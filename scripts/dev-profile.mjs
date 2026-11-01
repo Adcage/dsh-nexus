@@ -15,7 +15,6 @@
  * Usage:
  *   node scripts/dev-profile.mjs boot [--port 19499] [--profile nexus-dev] [--cli <dsh>]
  *   node scripts/dev-profile.mjs dump       print the composed row
- *   node scripts/dev-profile.mjs url        print the served client bundle URL
  *   node scripts/dev-profile.mjs remove --yes
  *
  * The CLI comes from `--cli`, then `$DSH_CLI`, then `dsh` on PATH. No absolute
@@ -155,10 +154,6 @@ switch (command) {
     dumpRow(cli, profile)
     break
   }
-  case 'url': {
-    console.log(`http://127.0.0.1:${port}/plugins/${manifest.name}/client.js`)
-    break
-  }
   case 'remove': {
     if (flags.get('yes') !== true) {
       console.error(`dev-profile: refusing to delete ${devHome} without --yes`)
@@ -169,7 +164,7 @@ switch (command) {
     break
   }
   default: {
-    console.error('usage: node scripts/dev-profile.mjs [boot|dump|url|remove] [--port N] [--profile NAME] [--cli PATH]')
+    console.error('usage: node scripts/dev-profile.mjs [boot|dump|remove] [--port N] [--profile NAME] [--cli PATH]')
     process.exit(2)
   }
 }

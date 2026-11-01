@@ -43,6 +43,13 @@ export interface ClientHostOptions {
    * throws, mirroring the real `slots.inject` contract.
    */
   readonly declaredSlots?: readonly string[]
+  /**
+   * A materialized module to mount instead of executing a bundle. The host must
+   * stay able to mount a module that leaks a registration: that is how a test
+   * proves its unload assertions can fail, rather than being satisfied by the
+   * host clearing state itself.
+   */
+  readonly module?: LoadedClientModule
 }
 
 /** One slot registration the client bundle made. */
@@ -114,7 +121,7 @@ export function defaultBundlePath(): string {
 
 /**
  * Create a fake browser host for the built client bundle.
- * @param options - bundle path and declared slots.
+ * @param options - bundle path, declared slots, or an explicit module to mount.
  * @returns the loader and context double.
  */
 export function createClientHost(options: ClientHostOptions = {}): ClientHost {
@@ -125,7 +132,7 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
   const registrations: SlotRegistration[] = []
   const disposers: Array<() => void> = []
   let disposeCount = 0
-  let module: LoadedClientModule | undefined
+  let module: LoadedClientModule | undefined = options.module
 
   const host: ClientHost = {
     loadedClientIds,
@@ -137,9 +144,10 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
       return disposeCount
     },
     load() {
-      module = executeBundle(bundlePath)
-      loadedClientIds.push(module.id)
-      return module
+      const loaded = options.module ?? executeBundle(bundlePath)
+      module = loaded
+      loadedClientIds.push(loaded.id)
+      return loaded
     },
     mount() {
       const loaded = module ?? host.load()
@@ -158,10 +166,11 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
       return context
     },
     unload() {
+      // Only the registrations' own disposers may empty these registries. The
+      // host clearing them here would make every "nothing left behind" assertion
+      // in a caller's spec pass whether or not the bundle cleaned up.
       for (const dispose of [...disposers].reverse()) dispose()
       disposers.length = 0
-      registrations.length = 0
-      locales.clear()
     },
   }
   return host

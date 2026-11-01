@@ -127,7 +127,9 @@ export class FsDouble extends FileSystem {
    */
   async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
     this.throwIfAborted(opts?.signal)
-    const key = normalizePath(opts?.cwd === undefined ? path : `${opts.cwd}/${path}`)
+    // The shipped contract resolves *relative* paths against `opts.cwd`; an
+    // already-rooted path must keep its own root.
+    const key = normalizePath(!isAbsolutePath(path) && opts?.cwd !== undefined ? `${opts.cwd}/${path}` : path)
     return { targetKey: FsTargetKey(key), displayPath: key }
   }
 
@@ -296,7 +298,9 @@ export class FsDouble extends FileSystem {
     }
     if (expected?.kind === 'replaceIfVersion') {
       if (before === null) {
-        throw new FsError(`file does not exist: ${target.displayPath}`, 'FS_NOT_OBSERVED')
+        // The shipped contract treats absence under a versioned replace as a
+        // stale version, not as an unobserved target.
+        throw new FsError(`cannot replace a target that does not exist: ${target.displayPath}`, 'FS_STALE_VERSION')
       }
       if (this.versionOf(key) !== expected.version) {
         throw new FsError(`file changed since it was observed: ${target.displayPath}`, 'FS_STALE_VERSION')
@@ -696,6 +700,11 @@ function countOccurrences(haystack: string, needle: string): number {
     index = haystack.indexOf(needle, index + needle.length)
   }
   return count
+}
+
+/** Whether a path is already rooted: a POSIX root or a Windows drive path. */
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
 }
 
 /** Normalize a path for the double's flat namespace. */

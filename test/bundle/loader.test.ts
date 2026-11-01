@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { NS, inject } from '../../src/client/index.tsx'
-import { createClientHost, defaultBundlePath } from '../support/browser-loader.ts'
+import { createClientHost, defaultBundlePath, type FakeClientContext } from '../support/browser-loader.ts'
 
 const bundlePath = defaultBundlePath()
 const packageName = 'dsh-nexus'
@@ -63,6 +63,29 @@ describe('built client bundle', () => {
     host.unload()
     expect(host.locales.size).toBe(0)
     expect(host.disposeCount).toBe(2)
+  })
+
+  it('does not mask a registration whose disposer is missing', () => {
+    // A host that cleared its own registries during unload would make every
+    // "nothing left behind" assertion above vacuous. Mounting a module that
+    // registers a dictionary and returns no disposer must leave that dictionary
+    // visible, so the cleanup assertions above can fail when they should.
+    const host = createClientHost({
+      module: {
+        id: 'leak-probe',
+        exports: {
+          inject: ['locale'],
+          apply(ctx: FakeClientContext) {
+            ctx.locale.register('leaked', { en: { panel: 'Leaked' }, zh: { panel: 'Leaked' } })
+          },
+        },
+      },
+    })
+    host.load()
+    host.mount()
+    host.unload()
+    expect(host.locales.size).toBe(1)
+    expect(host.disposeCount).toBe(0)
   })
 
   it('does not bundle a second copy of React', () => {

@@ -1,6 +1,8 @@
-# Product build, dependency and runtime output. Orchestration/runtime state is
-# excluded locally in `.git/info/exclude`; the entries repeated here keep the
-# working copy clean for anyone who clones the repository.
+# Product build, dependency and runtime output, plus the orchestration state the
+# local `.git/info/exclude` also carries (ledger says Task 1 repeats those
+# entries), so a clone does not show them as untracked.
+.superpowers/
+.pi/
 node_modules/
 lib/
 dist/
