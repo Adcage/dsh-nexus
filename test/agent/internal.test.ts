@@ -17,11 +17,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { RuntimeSettings } from '../../src/protocol.ts'
 import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 import { createAgentTool } from '../../src/agent/tool.ts'
-import { createWriteCoordinator } from '../../src/agent/coordination.ts'
+import { createWriteCoordinator, type WriteCoordinator } from '../../src/agent/coordination.ts'
 import { registerChildPolicy } from '../../src/agent/policy.ts'
 import type { NexusStore } from '../../src/storage/store.ts'
 import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
@@ -32,6 +33,7 @@ interface OpenCase {
   readonly harness: SubagentHarness
   readonly store: NexusStoreFixture
   readonly openStore: NexusStore
+  readonly coordinator: WriteCoordinator
   readonly disposePolicy: () => void
   readonly parent: Agent
   readonly settings: RuntimeSettings
@@ -70,6 +72,7 @@ async function openCase(
     harness,
     store,
     openStore,
+    coordinator,
     disposePolicy,
     parent,
     settings,
@@ -172,6 +175,7 @@ describe('start and inspect children', () => {
       harness,
       store,
       openStore,
+      coordinator,
       disposePolicy,
       parent,
       settings: DEFAULT_SETTINGS,
@@ -341,6 +345,57 @@ describe('read, wait and control', () => {
     expect(refused.isError).toBe(true)
     expect(refused.error?.info).toMatchObject({ code: 'NO_AGENT' })
     harness.releaseFor(childId)
+  })
+})
+
+describe('failed native start cleanup authority', () => {
+  it('keeps the record and the scope when a rejected start carries no cleanup receipt', async () => {
+    const testCase = await openCase()
+    const { harness, openStore } = testCase
+    const scope = join(harness.workspace, 'uncertain-scope')
+    await mkdir(scope, { recursive: true })
+
+    // A generic rejection with nothing published is exactly the shape the native
+    // runtime produces when its own rollback failed: AgentLoop detaches the
+    // session and agent BEFORE it throws collected cleanup failures, so the
+    // absence of both is negative evidence, never a cleanup receipt.
+    const original = SubagentRuntime.prototype.startActivation
+    let reserved: SessionId | undefined
+    SubagentRuntime.prototype.startActivation = function rejectStart(
+      this: SubagentRuntime,
+      spec: Parameters<typeof SubagentRuntime.prototype.startActivation>[0],
+    ) {
+      reserved = spec.childId
+      return Promise.reject(new Error('native start rejected after publication'))
+    } as unknown as typeof SubagentRuntime.prototype.startActivation
+    try {
+      const refused = await testCase.call({ action: 'start', task: 'write it', access: 'write', cwd: scope })
+      expect(refused.isError).toBe(true)
+      expect(refused.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      expect(refused.error?.message).toContain(reserved ?? '')
+      expect(refused.error?.message).toMatch(/unconfirmed/i)
+    } finally {
+      SubagentRuntime.prototype.startActivation = original
+    }
+    if (reserved === undefined) throw new Error('the native start was never attempted')
+
+    // Nothing is published, and that is NOT accepted as proof.
+    expect(harness.ctx.agents.get(reserved)).toBeUndefined()
+    expect(harness.ctx.sessions.get(reserved)).toBeUndefined()
+    // The recovery/narrowing authority and the write scope stay held.
+    expect(await openStore.getChildPolicy(reserved)).toMatchObject({ access: 'write' })
+    await expect(
+      testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-uncertain'), harness.workspace),
+    ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
+
+    // The retained child id stays controllable, and the SDK limit is explicit:
+    // `stop` is an accepted native no-op for an activation that is not resident,
+    // so it does NOT clear the retained scope and must not pretend to.
+    const stop = await testCase.call({ action: 'stop', childId: reserved })
+    expect(stop.isError).toBe(false)
+    await expect(
+      testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-stop'), harness.workspace),
+    ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
   })
 })
 

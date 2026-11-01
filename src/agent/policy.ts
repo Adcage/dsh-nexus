@@ -33,6 +33,20 @@
  * whose policy record says "read" cannot be proven read-only, so admission and
  * the creation hook both refuse.
  *
+ * A rejected native start does NOT authorize deleting the record. The native
+ * runtime swallows a failed rollback (`materializeTracked` calls
+ * `rollbackUnpublished(...).catch(() => void 0)`; `startExternal` only warns),
+ * and the agent factory runs `detachAgent()`/`detachSession()` in a `finally`
+ * BEFORE it throws the collected teardown failures — so an empty Agent/Session
+ * registry is negative evidence that can occur while a published child is still
+ * alive. Public API therefore offers no positive "nothing was created" receipt
+ * for a start that was attempted, and the reservation (policy record plus write
+ * lease) stays held until the native `agent/disposed` edge. The consequence is
+ * stated rather than hidden: a reservation whose rollback silently failed and
+ * whose child is already gone has no public path to release it, so `stop` on
+ * that id is an accepted no-op that does NOT clear the lease. It is never
+ * force-unlocked.
+ *
  * @module dsh-nexus/agent/policy
  */
 
@@ -45,7 +59,6 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { ChildPolicy } from '../protocol.ts'
 import type { CallOwner } from '../runtime/owner.ts'
 import { NexusError } from '../runtime/errors.ts'
@@ -79,17 +92,15 @@ export interface ChildAdmission {
   /** The lease a write child holds for its actual granted workspace root. */
   readonly lease: WriteLease | undefined
   /**
-   * Give this reservation back after a native start failed.
+   * Release a reservation whose native start was NEVER attempted.
    *
-   * A native rejection is NOT universal cleanup proof: the runtime logs a
-   * rollback failure instead of surfacing it (`startExternal` warns and
-   * `materializeTracked` swallows it), and a teardown failure is only visible as
-   * `ACTIVATION_TEARDOWN_FAILED`. Call this only when
-   * {@link confirmFailedStartCleanup} confirmed that no Agent and no Session
-   * still carry the reserved child id; otherwise keep the policy and the lease
-   * and let the native `agent/disposed` edge release them.
+   * This is the admission-only path (`admitChildPolicy` succeeded but the caller
+   * decided not to start the child) and it is genuinely safe cleanup: no native
+   * work exists, so nothing can be alive. Never call it after a rejected
+   * `startActivation`: absence of a live Agent or Session is not a cleanup
+   * receipt (see the module note), so that path keeps the record and the scope.
    */
-  abandon(): Promise<void>
+  releaseUnstarted(): Promise<void>
 }
 
 /** Ordering of the three sandbox modes from narrowest to widest. */
@@ -165,29 +176,6 @@ async function policyOf(store: NexusStore, agent: Agent): Promise<ChildPolicy | 
     )
   }
   return policy
-}
-
-/**
- * Whether a rejected native start proves that nothing of that child survived.
- *
- * The native runtime rolls its own resources back before rethrowing, but a
- * rollback failure is only logged (`startExternal`/`materializeTracked`), and a
- * teardown failure surfaces as `ACTIVATION_TEARDOWN_FAILED`. A bare rejection is
- * therefore NOT universal cleanup proof. This predicate accepts exactly two
- * public facts as proof: the rejection does not name a teardown failure, AND no
- * live Agent and no live Session still carry the reserved child id. Anything
- * else keeps the reservation (fail closed) until the native release edge.
- * @param ctx - context providing the Agent registry and Session store.
- * @param childId - reserved child id whose start was rejected.
- * @param error - the rejection the native start produced.
- * @returns true only when both registries prove the child is gone.
- */
-export function confirmFailedStartCleanup(ctx: Context, childId: SessionIdType, error: unknown): boolean {
-  if (error instanceof SubagentError && error.code === 'ACTIVATION_TEARDOWN_FAILED') return false
-  const agents = ctx.get('agents')
-  const sessions = ctx.get('sessions')
-  if (agents === undefined || sessions === undefined) return false
-  return agents.get(childId) === undefined && sessions.get(childId) === undefined
 }
 
 /**
@@ -291,7 +279,7 @@ export async function admitChildPolicy(
   return {
     policy,
     lease,
-    async abandon() {
+    async releaseUnstarted() {
       await store.deleteChildPolicy(policy.childId)
       lease?.release()
     },

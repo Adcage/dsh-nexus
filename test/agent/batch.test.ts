@@ -10,6 +10,7 @@
  * @module dsh-nexus/test/agent/batch
  */
 
+import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -30,6 +31,12 @@ interface OpenCase {
   readonly harness: SubagentHarness
   readonly store: NexusStoreFixture
   readonly parent: Agent
+  /**
+   * Original tool bodies, in call order. The registry reports native
+   * cancellation on its own, so the body's own completion is observed through
+   * a transparent wrapper around the real definition's `execute`.
+   */
+  readonly bodies: Promise<void>[]
   call(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolExecutionResult>
 }
 
@@ -53,7 +60,19 @@ async function openCase(options: { hold?: boolean | 'children' } = {}): Promise<
   const openStore = await store.open()
   const coordinator = createWriteCoordinator(harness.ctx)
   const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator)
-  harness.register(createAgentTool(harness.ctx, openStore, () => DEFAULT_SETTINGS, coordinator))
+  const definition = createAgentTool(harness.ctx, openStore, () => DEFAULT_SETTINGS, coordinator)
+  const bodies: Promise<void>[] = []
+  harness.register({
+    ...definition,
+    execute(args, exec) {
+      const body = definition.execute(args, exec)
+      bodies.push(body.then(
+        () => undefined,
+        () => undefined,
+      ))
+      return body
+    },
+  })
   const parent = await harness.createParent('batch-primary')
   let callCount = 0
   open.push({ harness, store, disposePolicy, disposeStore: () => openStore.dispose() })
@@ -61,6 +80,7 @@ async function openCase(options: { hold?: boolean | 'children' } = {}): Promise<
     harness,
     store,
     parent,
+    bodies,
     call: (args, signal) =>
       harness.ctx.tools.execute({
         callId: ToolCallId(`batch-call-${callCount++}`),
@@ -214,6 +234,56 @@ describe('parallel versus sequence write coordination', () => {
     expect(items.map((item) => item.ok)).toEqual([true, true])
     expect(items[0]?.childId).toBe(firstSession)
     expect(items[1]?.childId).toBe(secondSession)
+  })
+
+  it('ends the batch coroutine on caller abort without releasing the accepted child', async () => {
+    const testCase = await openCase({ hold: 'children' })
+    const { harness, parent } = testCase
+    const abort = new AbortController()
+    const listenersBefore = getEventListeners(abort.signal, 'abort').length
+    const childRequests = () =>
+      harness.requests.filter((request) => request.options.sessionId !== parent.id)
+
+    const batch = testCase.call(
+      {
+        action: 'batch',
+        mode: 'sequence',
+        tasks: [{ task: 'first' }, { task: 'second' }, { task: 'third' }],
+      },
+      abort.signal,
+    )
+    await waitFor(() => childRequests().length === 1, 'the first batch child request')
+    const firstId = childRequests()[0]?.options.sessionId ?? ''
+    expect(testCase.bodies).toHaveLength(1)
+
+    // The caller cancels while item 0 is still running and its answer is NEVER
+    // released: the batch coroutine must finish on its own, not stay parked on
+    // an activation whose accepted lifetime is detached from the start signal.
+    abort.abort()
+    const bodyOutcome = await Promise.race([
+      testCase.bodies[0]?.then(() => 'finished'),
+      new Promise((resolve) => setTimeout(() => resolve('parked'), 2_000)),
+    ])
+    expect(bodyOutcome).toBe('finished')
+
+    const result = await batch
+    expect(result.isError).toBe(true)
+    expect(result.error?.info).toMatchObject({ code: 'ABORTED' })
+    // The accepted child is a real, discoverable native child that was never
+    // stopped or released by this cancellation.
+    expect(harness.heldSessions()).toContain(firstId)
+    expect(harness.ctx.agents.get(SessionId(firstId))).toBeDefined()
+    const listed = valueOf(await harness.call('agent', { action: 'list' }, parent))
+    expect((listed.children as { childId: string }[]).map((child) => child.childId)).toContain(firstId)
+    // No later item was admitted.
+    expect(childRequests()).toHaveLength(1)
+    // Its write scope stays held by that child, not released by the abort.
+    const scope = await harness.call('agent', { action: 'status', childId: firstId }, parent)
+    expect(scope.isError).toBe(false)
+    expect((scope.value as unknown as { access?: string }).access).toBe('read')
+    // The abort listener the batch added was removed again.
+    expect(getEventListeners(abort.signal, 'abort').length).toBe(listenersBefore)
+    harness.releaseAll()
   })
 
   it('starts no further item after the caller cancels', async () => {

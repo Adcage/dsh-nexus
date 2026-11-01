@@ -321,7 +321,7 @@ export function createAgentTool(
         type: 'string',
         enum: ['parallel', 'sequence'],
         description:
-          'batch only: "parallel" (default) starts every accepted task at once within the concurrency limit; "sequence" waits for each child\'s own completion and confirmed release before starting the next, and never stops a running child on a timer.',
+          'batch only: "parallel" (default) starts every accepted task at once within the concurrency limit; "sequence" waits for each child\'s own completion and confirmed release before starting the next, and never stops a running child on a timer. A cancelled sequence admits nothing further and leaves an already accepted child running and owned by this session.',
       },
       tasks: {
         type: 'array',
@@ -423,11 +423,15 @@ function startedView(started: StartedChild): Omit<AgentValue, 'action'> {
  * `sequence` runs one item at a time and waits for that exact activation's own
  * settlement — never for a fixed wait slice and never for an idle boundary it
  * could stop at, because a child that has queued work is idle between turns
- * without having finished. Caller cancellation is the only way that wait ends
- * early, and it reaches the child through its own start signal. After
- * settlement the selected child is drained; a failed drain is reported on that
- * item and NO following item starts, because a possibly live writer must not be
- * joined by another one. The unstarted items say so individually.
+ * without having finished. That settlement promise is NOT tied to the caller's
+ * start signal (the native service detaches a local child's accepted lifetime
+ * after inbox acceptance), so the wait races it against the caller's abort: when
+ * the caller cancels, this batch ends promptly, admits nothing further and
+ * reports the remaining inputs as cancelled — it does NOT stop or release the
+ * already accepted child, which stays a real native child that its parent can
+ * list, read, message or stop. After settlement the selected child is drained; a
+ * failed drain is reported on that item and NO following item starts, because a
+ * possibly live writer must not be joined by another one.
  * @param runtime - child runtime.
  * @param owner - exact caller.
  * @param mode - parallel or sequence.
@@ -447,7 +451,7 @@ async function runBatch(
 
   const startOne = async (task: ChildStartInput, index: number): Promise<void> => {
     if (signal.aborted) {
-      items[index] = { index, ok: false, code: 'ABORTED', message: 'the caller cancelled before this task started' }
+      items[index] = cancelledItem(index)
       return
     }
     try {
@@ -464,33 +468,73 @@ async function runBatch(
     return { action: 'batch', batchMode: mode, items: items.map((item) => item as BatchItem) }
   }
 
-  for (const [index, task] of tasks.entries()) {
-    if (signal.aborted) {
-      items[index] = { index, ok: false, code: 'ABORTED', message: 'the caller cancelled before this task started' }
-      continue
+  // One abort signal for the whole sequence; removed in the `finally` so a
+  // finished batch leaves no listener behind on the caller's signal.
+  const aborted = Promise.withResolvers<void>()
+  const onAbort = (): void => {
+    aborted.resolve()
+  }
+  if (signal.aborted) aborted.resolve()
+  else signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    for (const [index, task] of tasks.entries()) {
+      if (signal.aborted) {
+        items[index] = cancelledItem(index)
+        continue
+      }
+      let started
+      try {
+        started = await runtime.start(owner, task)
+      } catch (error) {
+        items[index] = failureItem(error, index)
+        continue
+      }
+      items[index] = { index, ok: true, ...startedView(started) }
+      // Wait for THIS run's own settlement or for the caller's abort.
+      await Promise.race([started.settled, aborted.promise])
+      if (signal.aborted) {
+        // The accepted child is NOT stopped here: its settlement is detached
+        // from the start signal, so its release is simply not observed by this
+        // cancelled call. It stays owned, discoverable and leased.
+        items[index] = {
+          ...(items[index] as BatchItem),
+          message:
+            'accepted; the caller cancelled before this child was released, so its release was not observed here and it remains this session\'s child',
+        }
+        markCancelled(items, tasks.length, index + 1)
+        break
+      }
+      // Confirm the native release of exactly this child before the next task.
+      try {
+        await runtime.stop(owner, SessionId(started.childId))
+      } catch (error) {
+        items[index] = { ...(items[index] as BatchItem), ...failureItem(error, index) }
+        markNotStarted(items, tasks.length, index + 1, `batch item ${index} could not be released`)
+        break
+      }
     }
-    let started
-    try {
-      started = await runtime.start(owner, task)
-    } catch (error) {
-      items[index] = failureItem(error, index)
-      continue
-    }
-    items[index] = { index, ok: true, ...startedView(started) }
-    // Wait for THIS run's own settlement. The promise settles when that exact
-    // activation ends; cancellation of the caller reaches the child through the
-    // start signal, so this wait is bounded by the work, not by a timer.
-    await started.settled
-    // Confirm the native release of exactly this child before the next task.
-    try {
-      await runtime.stop(owner, SessionId(started.childId))
-    } catch (error) {
-      items[index] = { ...(items[index] as BatchItem), ...failureItem(error, index) }
-      markNotStarted(items, tasks.length, index + 1, `batch item ${index} could not be released`)
-      break
-    }
+  } finally {
+    signal.removeEventListener('abort', onAbort)
   }
   return { action: 'batch', batchMode: mode, items: items.map((item) => item as BatchItem) }
+}
+
+/** One input the caller cancelled before it started. */
+function cancelledItem(index: number): BatchItem {
+  return { index, ok: false, code: 'ABORTED', message: 'the caller cancelled before this task started' }
+}
+
+/**
+ * Report every still-unstarted item after the caller cancelled mid-sequence.
+ * @param items - item rows being built.
+ * @param total - number of inputs.
+ * @param from - first index that never started.
+ */
+function markCancelled(items: (BatchItem | undefined)[], total: number, from: number): void {
+  for (let index = from; index < total; index += 1) {
+    if (items[index] !== undefined) continue
+    items[index] = cancelledItem(index)
+  }
 }
 
 /**

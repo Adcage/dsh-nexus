@@ -47,7 +47,7 @@ import { NexusError } from '../runtime/errors.ts'
 import type { CallOwner } from '../runtime/owner.ts'
 import type { ChildPolicy, RuntimeSettings } from '../protocol.ts'
 import type { NexusStore } from '../storage/store.ts'
-import { admitChildPolicy, confirmFailedStartCleanup, type ChildAccess } from './policy.ts'
+import { admitChildPolicy, type ChildAccess } from './policy.ts'
 import type { WriteCoordinator } from './coordination.ts'
 import { takeUtf8Prefix } from '../shell/output.ts'
 
@@ -98,6 +98,8 @@ export interface StartedChild {
   /**
    * Settles when this exact activation's run ends. It never identifies a later
    * resume of the same child, and it is not proof that the child is released.
+   * The native service detaches a local child's accepted lifetime from the
+   * caller's start signal, so this promise is NOT signal-aware either.
    */
   readonly settled: Promise<void>
 }
@@ -414,11 +416,17 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
   /**
    * Admit and natively start one child.
    *
-   * A rejected start releases the reservation only when the cleanup is PROVEN:
-   * the rejection is not a teardown failure and neither public registry still
-   * names the child. Otherwise the policy record and the write lease stay held,
-   * because a writer may still be alive, and the caller is told so explicitly;
-   * the native `agent/disposed` edge releases them later.
+   * A rejected start KEEPS the reservation. The public SDK offers no positive
+   * cleanup receipt for a start that was attempted: the runtime swallows a
+   * failed rollback and the agent factory detaches the session and agent before
+   * it throws collected teardown failures, so "no live Agent, no live Session"
+   * can be true while a published child is still running. Deleting the durable
+   * policy would drop the only narrowing/recovery authority for that id and
+   * releasing the lease would let a second writer into a tree a possibly live
+   * writer still mutates. The reservation is therefore retained and the caller
+   * is told so explicitly, with the child id and the actual scope, so the child
+   * stays discoverable and stop-able; the native `agent/disposed` edge releases
+   * the lease later.
    * @param owner - exact caller.
    * @param childId - reserved child id.
    * @param provider - resolved in-process provider name.
@@ -460,13 +468,12 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       })
       return { access: admitted.policy.access, cwd: admitted.policy.cwd, activation }
     } catch (error) {
-      if (confirmFailedStartCleanup(ctx, childId, error)) {
-        await admitted.abandon()
-        throw translateNative(error, `starting child "${childId}"`)
-      }
+      // No cleanup receipt: keep the durable narrowing authority AND the write
+      // scope. The error carries the child id and the retained scope so the
+      // caller keeps control of that identity.
       throw new NexusError(
         'RESOURCE_NOT_AVAILABLE',
-        `child "${childId}" did not start and the native rollback could not be confirmed, so its write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) and policy stay held for that child id until the native runtime releases it`,
+        `child "${childId}" did not start and its cleanup is unconfirmed, so its policy record and write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) are retained for that child id; it stays discoverable and stop-able, and a second writer on that workspace root is refused until the native runtime releases it`,
         { cause: error },
       )
     }

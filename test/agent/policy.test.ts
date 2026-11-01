@@ -15,7 +15,6 @@ import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -24,7 +23,6 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { NexusStore } from '../../src/storage/store.ts'
 import {
   admitChildPolicy,
-  confirmFailedStartCleanup,
   registerChildPolicy,
   type ChildAccess,
 } from '../../src/agent/policy.ts'
@@ -128,7 +126,7 @@ async function startChild(
       delivery: 'parent',
     })
   } catch (error) {
-    await admission.abandon()
+    await admission.releaseUnstarted()
     throw error
   }
   const child = harness.ctx.agents.get(SessionId(childId))
@@ -324,21 +322,13 @@ describe('child policy admission', () => {
       openStore,
       testCase.coordinator,
       { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-      { childId: SessionId('failing-child'), cwd: scope, access: 'write', maxDepth: 2 },
+      { childId: SessionId('unstarted-child'), cwd: scope, access: 'write', maxDepth: 2 },
     )
-    await expect(
-      harness.ctx.subagents.startActivation({
-        provider: 'missing-provider',
-        label: 'failing',
-        childId: SessionId('failing-child'),
-        request: { prompt: [{ type: 'text', text: 'never runs' }], parent, cwd: admission.policy.cwd },
-        signal: new AbortController().signal,
-        delivery: 'parent',
-      }),
-    ).rejects.toBeDefined()
-    await admission.abandon()
+    expect(await openStore.getChildPolicy('unstarted-child')).toMatchObject({ access: 'write' })
+    // Admission-only cleanup is genuinely safe: no native start was attempted.
+    await admission.releaseUnstarted()
 
-    expect(await openStore.getChildPolicy('failing-child')).toBeUndefined()
+    expect(await openStore.getChildPolicy('unstarted-child')).toBeUndefined()
     // The tree is free again for the next writer.
     const retry = await testCase.coordinator.acquire(parent, SessionId('retry-child'), scope)
     retry.release()
@@ -495,7 +485,7 @@ describe('the leased scope is the workspace a writer can actually write', () => 
       { childId: SessionId('writer-other'), cwd: otherRoot, access: 'write', maxDepth: 2 },
     )
     expect(admission.policy.access).toBe('write')
-    await admission.abandon()
+    await admission.releaseUnstarted()
   })
 
   it('keeps a read-only child out of the shell path through the real confinement call', async () => {
@@ -532,7 +522,33 @@ describe('the leased scope is the workspace a writer can actually write', () => 
 })
 
 describe('failed native start cleanup authority', () => {
-  it('does not release the reservation while the child is still live', async () => {
+  it('releases the lease when persisting the record fails before any start', async () => {
+    const testCase = await openCase()
+    const { harness, openStore } = testCase
+    const scope = join(harness.workspace, 'persist-failure-scope')
+    await mkdir(scope, { recursive: true })
+    testCase.store.failNextPut('child_policies')
+
+    await expect(
+      admitChildPolicy(
+        harness.ctx,
+        openStore,
+        testCase.coordinator,
+        { agent: testCase.parent, sessionId: testCase.parent.id, signal: new AbortController().signal },
+        { childId: SessionId('persist-failure-child'), cwd: scope, access: 'write', maxDepth: 2 },
+      ),
+    ).rejects.toBeDefined()
+    // A reservation that never reached the store holds nothing: this is the
+    // genuinely safe pre-admission failure path.
+    expect(await openStore.getChildPolicy('persist-failure-child')).toBeUndefined()
+    const next = await testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-failure'), scope)
+    next.release()
+  })
+
+  it('keeps the policy when a rejected start has no cleanup receipt', async () => {
+    // Covered through the tool in `internal.test.ts` ("keeps the record and the
+    // scope when a rejected start carries no cleanup receipt"); this case pins
+    // the other half: a live child is never treated as released either.
     const testCase = await openCase({ hold: true })
     const { harness, openStore } = testCase
     const scope = join(harness.workspace, 'cleanup-scope')
@@ -540,32 +556,11 @@ describe('failed native start cleanup authority', () => {
     const started = await startChild(testCase, 'cleanup-child', 'write', scope)
     await waitFor(() => harness.requestsOf('cleanup-child').length === 1, 'the child request')
 
-    // A still-live writer is never released by a plain rejection: the public
-    // registries still name it, so the reservation and its scope stay held.
-    expect(confirmFailedStartCleanup(harness.ctx, started.childId, new Error('start failed'))).toBe(false)
-    // A teardown failure is unconfirmed cleanup even without a live child.
-    expect(
-      confirmFailedStartCleanup(
-        harness.ctx,
-        started.childId,
-        new SubagentError('teardown failed', 'ACTIVATION_TEARDOWN_FAILED'),
-      ),
-    ).toBe(false)
+    expect(harness.ctx.agents.get(started.childId)).toBeDefined()
+    expect(await openStore.getChildPolicy('cleanup-child')).toMatchObject({ access: 'write' })
+    await expect(
+      testCase.coordinator.acquire(testCase.parent, SessionId('writer-while-live'), harness.workspace),
+    ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
     harness.releaseFor('cleanup-child')
-    void openStore
-  })
-
-  it('confirms cleanup once neither an Agent nor a session names the child', async () => {
-    const testCase = await openCase({ hold: true })
-    const { harness, openStore } = testCase
-    const scope = join(harness.workspace, 'cleanup-scope-two')
-    await mkdir(scope, { recursive: true })
-    const started = await startChild(testCase, 'cleanup-child-two', 'write', scope)
-    await waitFor(() => harness.requestsOf('cleanup-child-two').length === 1, 'the child request')
-    harness.releaseFor('cleanup-child-two')
-    await waitFor(() => harness.ctx.agents.get(started.childId) === undefined, 'the child to be released')
-    expect(harness.ctx.sessions.get(started.childId)).toBeUndefined()
-    expect(confirmFailedStartCleanup(harness.ctx, started.childId, new Error('start failed'))).toBe(true)
-    void openStore
   })
 })
