@@ -81,22 +81,23 @@ export class ManagedOutput {
     let lost = state.lost
     let text = ''
 
-    const stdout = readAligned(this.streams.stdout ?? EMPTY_READER, state.stdoutOffset)
-    const stdoutRaw = takeUtf8Prefix(stdout.text, remaining)
-    // A live reader can end in the middle of a UTF-8 character. Its decode is
-    // a trailing U+FFFD whose byte width is not the number of source bytes
-    // consumed, so hold the decoded tail until more bytes or output completion
-    // arrive; the cursor stays exactly before it.
-    const stdoutPage = holdPendingTail(stdoutRaw, stdout.text, outputComplete)
-    const stdoutBytes = Buffer.byteLength(stdoutPage, 'utf8')
-    state.stdoutOffset = Math.min(stdout.start + stdoutBytes, stdout.end)
-    remaining -= stdoutBytes
-    text += stdoutPage
-    lost = lost || stdout.lossy
+    const stdoutReader = this.streams.stdout ?? EMPTY_READER
+    const stdout = readAligned(stdoutReader, state.stdoutOffset)
+    const stdoutWindow = readMemoryWindow(
+      stdoutReader,
+      { text: stdout.text, start: stdout.start, end: stdout.end, lossy: stdout.lossy },
+      remaining,
+      outputComplete,
+    )
+    state.stdoutOffset = stdoutWindow.nextOffset
+    remaining -= stdoutWindow.bytes
+    text += stdoutWindow.text
+    lost = lost || stdoutWindow.lost
 
     // Read stderr even when this page has no room for it: its CURRENT spill
     // fact is part of this page's availability answer.
-    const stderr = readAligned(this.streams.stderr ?? EMPTY_READER, state.stderrOffset)
+    const stderrReader = this.streams.stderr ?? EMPTY_READER
+    const stderr = readAligned(stderrReader, state.stderrOffset)
     const spillAvailable = stdout.spillPath !== undefined || stderr.spillPath !== undefined
     if (remaining > 0 && stderr.text.length > 0) {
       const marker = '[stderr]\n'
@@ -104,13 +105,16 @@ export class ManagedOutput {
       const prefix = state.stderrStarted ? '' : marker
       const prefixBytes = state.stderrStarted ? 0 : markerBytes
       if (remaining > prefixBytes) {
-        const stderrRaw = takeUtf8Prefix(stderr.text, remaining - prefixBytes)
-        const stderrPage = holdPendingTail(stderrRaw, stderr.text, outputComplete)
-        const stderrBytes = Buffer.byteLength(stderrPage, 'utf8')
-        state.stderrOffset = Math.min(stderr.start + stderrBytes, stderr.end)
-        lost = lost || stderr.lossy
-        if (stderrPage.length > 0) {
-          text += prefix + stderrPage
+        const stderrWindow = readMemoryWindow(
+          stderrReader,
+          { text: stderr.text, start: stderr.start, end: stderr.end, lossy: stderr.lossy },
+          remaining - prefixBytes,
+          outputComplete,
+        )
+        state.stderrOffset = stderrWindow.nextOffset
+        lost = lost || stderrWindow.lost
+        if (stderrWindow.text.length > 0) {
+          text += prefix + stderrWindow.text
           state.stderrStarted = true
         }
       }
@@ -276,6 +280,145 @@ export function takeUtf8Prefix(text: string, maxBytes: number): string {
   }
   if (end === 0 && text.length > 0) end = text.codePointAt(0)! > 0xffff ? 2 : 1
   return text.slice(0, end)
+}
+
+/**
+ * One bounded in-memory page and the whole-stream source bytes it consumed.
+ *
+ * `bytes` is always a source-byte count. For a provably byte-exact page it is
+ * the decoded width; for an ambiguous invalid-UTF-8 window it is the whole
+ * remaining source span, because the bounded preview consumes the rest and says
+ * so instead of advancing by a decoded width that is not a source offset.
+ */
+export interface MemoryWindow {
+  /** Page text returned to the caller. */
+  readonly text: string
+  /** Whole-stream source bytes consumed by this page. */
+  readonly bytes: number
+  /** Whole-stream offset immediately after `bytes`. */
+  readonly nextOffset: number
+  /** The page covers the whole decoded window from its start offset. */
+  readonly full: boolean
+  /** The page is not a provably byte-exact continuation of the source. */
+  readonly lost: boolean
+  /** Why a decoded-only window could not be mapped to exact source bytes. */
+  readonly reason?: 'invalid-utf8'
+}
+
+/**
+ * Read one bounded page out of one decoded native window.
+ *
+ * Native readers expose decoded text plus whole-stream byte offsets; they do
+ * not expose raw bytes. For valid UTF-8 the decoded width equals the source
+ * width, so a code-point-aligned prefix advances the cursor exactly. Invalid
+ * bytes decode to U+FFFD and inflate the decoded width, so a decoded-width
+ * advance would silently skip source bytes and a `lossy:false` page would be a
+ * false exactness claim.
+ *
+ * The boundary is therefore proven, not assumed: the reader is asked for the
+ * text after the proposed cursor offset and it must equal the remaining
+ * decoded text. That probe also distinguishes a genuine literal U+FFFD and a
+ * live pending tail (their suffix decodes identically) from an invalid byte
+ * that has no source boundary at that decoded width. When the boundary cannot
+ * be proven, the page stays bounded to `budget` and consumes the rest of the
+ * retained window with `lost:true, reason:'invalid-utf8'`: the model sees an
+ * explicitly incomplete preview, never a silent skip.
+ * @param reader - native reader for this stream; undefined means only a width match can prove exactness.
+ * @param window - decoded text and the whole-stream start/end offsets it was read from.
+ * @param budget - UTF-8 page budget.
+ * @param outputComplete - native output-completion fact for the pending-tail hold.
+ * @returns the bounded page and its exact source-byte continuation.
+ */
+export function readMemoryWindow(
+  reader: SubprocessOutputReader | undefined,
+  window: { readonly text: string; readonly start: number; readonly end: number; readonly lossy: boolean },
+  budget: number,
+  outputComplete: boolean,
+): MemoryWindow {
+  const prefix = takeUtf8Prefix(window.text, budget)
+  // A live reader can end in the middle of a UTF-8 character. Its decode is a
+  // trailing U+FFFD whose byte width is not the number of source bytes
+  // consumed, so hold the decoded tail until more bytes or output completion
+  // arrive; the cursor stays exactly before it.
+  const text = holdPendingTail(prefix, window.text, outputComplete)
+  const span = Math.max(0, window.end - window.start)
+  const claimed = Buffer.byteLength(text, 'utf8')
+  const reachesEnd = text.length === window.text.length
+  if (claimed <= span && boundaryIsSourceExact(reader, window.text, text, window.start + claimed, span)) {
+    return {
+      text,
+      bytes: claimed,
+      nextOffset: window.start + claimed,
+      full: reachesEnd,
+      lost: window.lossy,
+    }
+  }
+  return {
+    text,
+    bytes: span,
+    nextOffset: window.end,
+    full: reachesEnd,
+    lost: true,
+    reason: 'invalid-utf8',
+  }
+}
+
+/**
+ * Whether one decoded page prefix ends on a real source-byte boundary.
+ *
+ * A valid UTF-8 boundary is proven by the reader returning exactly the
+ * remaining decoded text from the proposed offset. A genuine literal U+FFFD
+ * and a pending incomplete tail both satisfy that relation; an invalid byte
+ * that inflated the decoded width does not.
+ * @param reader - native reader for the stream.
+ * @param sourceText - full decoded text of the window.
+ * @param page - bounded page text taken from its start.
+ * @param nextOffset - proposed whole-stream offset after the page.
+ * @param span - whole-stream source span of the window.
+ * @returns true only when the proposed offset is a proven source boundary.
+ */
+function boundaryIsSourceExact(
+  reader: SubprocessOutputReader | undefined,
+  sourceText: string,
+  page: string,
+  nextOffset: number,
+  span: number,
+): boolean {
+  if (Buffer.byteLength(page, 'utf8') > span) return false
+  if (reader === undefined) return Buffer.byteLength(sourceText, 'utf8') === span
+  const suffix = reader.readFrom(nextOffset)
+  return !suffix.lossy && suffix.text === sourceText.slice(page.length)
+}
+
+/**
+ * Whether a decoded window can be mapped back to exact source bytes.
+ *
+ * Used by the process controller's per-stream truth so a lossy invalid-UTF-8
+ * preview reports `invalid-utf8` instead of `lost:false`. Pending tails and
+ * genuine replacement characters are not misclassified because the same
+ * boundary proof is used.
+ * @param reader - native reader for the stream.
+ * @param text - full decoded text from `start`.
+ * @param start - whole-stream offset the text starts at.
+ * @param end - reader-reported whole-stream end offset.
+ * @param outputComplete - native output-completion fact.
+ * @returns true when the whole window is a proven byte-exact decode.
+ */
+export function memoryWindowIsByteExact(
+  reader: SubprocessOutputReader | undefined,
+  text: string,
+  start: number,
+  end: number,
+  outputComplete: boolean,
+): boolean {
+  const page = holdPendingTail(text, text, outputComplete)
+  return boundaryIsSourceExact(
+    reader,
+    text,
+    page,
+    start + Buffer.byteLength(page, 'utf8'),
+    Math.max(0, end - start),
+  )
 }
 
 /** Validate and clamp one requested page size. */

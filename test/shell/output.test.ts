@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import { NexusError } from '../../src/runtime/errors.ts'
 import { ManagedOutput } from '../../src/shell/output.ts'
-import { createScriptedLiveOutputReader, createScriptedOutputReader } from '../support/fixtures.ts'
+import { createScriptedLiveOutputReader, createScriptedOutputReader, createScriptedRawOutputReader } from '../support/fixtures.ts'
 
 /** Read every page through a fresh cursor until the stream is empty. */
 function readAll(output: ManagedOutput): { text: string; pages: number; lossy: boolean } {
@@ -81,6 +81,29 @@ ${stderr}`)
     const page = output.read()
     expect(page.lossy).toBe(true)
     expect(page.spillAvailable).toBe(false)
+  })
+
+  it('bounds invalid UTF-8 without a spill instead of claiming a byte-exact continuation', () => {
+    const output = new ManagedOutput('proc_invalid_nospill', {
+      stdout: createScriptedRawOutputReader(Buffer.alloc(20_000, 0xff)),
+    })
+    const first = output.read()
+    expect(Buffer.byteLength(first.text, 'utf8')).toBeLessThanOrEqual(16 * 1024)
+    expect(first.lossy).toBe(true)
+    const second = output.read(first.cursor)
+    // The invalid remainder is disclosed once, never silently resumed.
+    expect(second.text).toBe('')
+    expect(second.lossy).toBe(true)
+  })
+
+  it('keeps valid UTF-8 exact after a genuine replacement character', () => {
+    const original = 'A�中文🙂B'.repeat(500)
+    const output = new ManagedOutput('proc_invalid_valid_mix', {
+      stdout: createScriptedRawOutputReader(Buffer.from(original, 'utf8')),
+    })
+    const result = readAll(output)
+    expect(result.text).toBe(original)
+    expect(result.lossy).toBe(false)
   })
 
   it('reports a lossy retained window and drops spill availability when the provider revokes it', () => {

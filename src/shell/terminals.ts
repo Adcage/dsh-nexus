@@ -642,7 +642,10 @@ class Controller implements TerminalController {
     const probed = terminals.read(owner.agent, entry.sessionId, { offset: state.offset, count })
     const drift = probed.totalLines - state.totalLines
     if (drift < 0) return evictedPage(probed)
-    if (drift === 0) return pageOf(resourceId, probed)
+    // A sticky retention latch with an unchanged count is the cap-reached
+    // shape: an append and a head drop cancel out, so the same newest-relative
+    // offset now points at different content. Exactness is unprovable.
+    if (drift === 0) return pageOf(resourceId, probed, state.truncated || probed.truncated ? 'shifted' : undefined)
     // Appends shift every newest-relative offset; the same boundary is now
     // `drift` lines further back. Evictions cannot be separated from appends, so
     // a retention drop makes the page non-exact and says so.
@@ -970,11 +973,14 @@ function pageOf(
  * because retention dropped output; the caller starts a fresh read.
  */
 function evictedPage(result: TerminalReadResult, at = result.lineEnd): TerminalPage {
+  // A shrunk window can leave the requested offset beyond the retained count;
+  // clamp the reported newest-relative coordinate to the real window.
+  const coordinate = Math.min(at, result.totalLines)
   return {
     text: '',
     totalLines: result.totalLines,
-    lineBegin: at,
-    lineEnd: at,
+    lineBegin: coordinate,
+    lineEnd: coordinate,
     truncated: result.truncated,
     hasOlder: false,
     lossy: true,

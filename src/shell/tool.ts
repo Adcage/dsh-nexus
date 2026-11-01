@@ -980,7 +980,7 @@ function renderShellValue(value: ShellValue): string {
           renderTerminal(value.terminal!) +
           `\n<wait timedOut="${value.timedOut === true}" waitReason="${value.waitReason ?? 'unknown'}" />` +
           (value.timedOut === true
-            ? '\n[the wait bound elapsed; the terminal was not stopped — a timeout is not an exit]'
+            ? '\n[the wait ended without settlement (bound elapsed or the call was cancelled); the terminal was not stopped — not an exit]'
             : '\n[the native wait settled; see sessionStatus for the observed fact]')
         )
       }

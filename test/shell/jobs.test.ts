@@ -19,7 +19,7 @@ import type { ShellExecutionConfig } from '../../src/shell/engines.ts'
 import { createProcessController, type ProcessController } from '../../src/shell/jobs.ts'
 import type { CallOwner } from '../../src/runtime/owner.ts'
 import { NexusError } from '../../src/runtime/errors.ts'
-import { AGENT_MAX_PROCESSES, PROCESS_OUTPUT_SPILL_BYTES } from '../../src/runtime/defaults.ts'
+import { AGENT_MAX_PROCESSES, PROCESS_OUTPUT_SPILL_BYTES, PROCESS_READ_MAX_BYTES } from '../../src/runtime/defaults.ts'
 import {
   createScriptedLiveOutputReader,
   createScriptedOutputReader,
@@ -772,5 +772,182 @@ describe('controlled output recovery', () => {
       ).toString('base64url')}`),
     )
     expectNexusCode(other, 'INVALID_ARGUMENT')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Raw-byte memory reads without a spill
+// ---------------------------------------------------------------------------
+
+describe('invalid UTF-8 on the memory path', () => {
+  it('never claims a byte-exact page for invalid bytes that have no spill', async () => {
+    const bytes = Buffer.alloc(20_000, 0xff)
+    const shell = await openJobsHarness({ script: () => ({ readers: { stdout: createScriptedRawOutputReader(bytes) } }) })
+    const owner = shell.harness.owner
+    const execution = await shell.harness.captureExecution()
+    const started = await shell.controller.run(owner, execution, { command: 'binary', cwd: CWD })
+
+    expect(started.page.lossy).toBe(true)
+    expect(Buffer.byteLength(started.page.text, 'utf8')).toBeLessThanOrEqual(PROCESS_READ_MAX_BYTES)
+    expect(started.recovery).toContainEqual(
+      expect.objectContaining({ stream: 'stdout', source: 'memory', lost: true, reason: 'invalid-utf8' }),
+    )
+
+    // The bounded preview consumes the invalid remainder and says so; a second
+    // page must not silently resume with the skipped source bytes.
+    const second = await shell.controller.read(owner, started.view.resourceId, started.page.cursor)
+    expect(second.page.text).toBe('')
+    expect(second.page.lossy).toBe(true)
+  })
+
+  it('keeps a genuine replacement character and valid CJK/emoji byte-exact across pages', async () => {
+    const original = 'A�中文🙂B'.repeat(2_000)
+    const shell = await openJobsHarness({ script: () => ({ readers: { stdout: createScriptedOutputReader(original) } }) })
+    const owner = shell.harness.owner
+    const execution = await shell.harness.captureExecution()
+    const started = await shell.controller.run(owner, execution, { command: 'valid unicode', cwd: CWD })
+    expect(started.page.lossy).toBe(false)
+
+    let cursor = started.page.cursor
+    let joined = started.page.text
+    let lost = false
+    for (let page = 0; page < 64; page += 1) {
+      const next = await shell.controller.read(owner, started.view.resourceId, cursor, 4_096)
+      joined += next.page.text
+      lost = lost || next.page.lossy || next.recovery.some((truth) => truth.lost)
+      if (next.page.text.length === 0) break
+      cursor = next.page.cursor
+    }
+    expect(joined).toBe(original)
+    expect(lost).toBe(false)
+  })
+
+  it('does not mark a live incomplete UTF-8 tail as invalid loss', async () => {
+    const live = createScriptedLiveOutputReader('ok')
+    live.append(Uint8Array.of(0xf0, 0x9f))
+    const shell = await openJobsHarness({
+      subprocess: { script: () => ({ readers: { stdout: live }, staysOpen: true }) },
+    })
+    const owner = shell.harness.owner
+    const execution = await shell.harness.captureExecution()
+    const started = await shell.controller.run(owner, execution, {
+      command: 'live tail',
+      cwd: CWD,
+      background: true,
+    })
+    const first = await shell.controller.read(owner, started.view.resourceId)
+    expect(first.page.text).toBe('ok')
+    expect(first.page.lossy).toBe(false)
+    expect(first.recovery.every((truth) => truth.lost === false)).toBe(true)
+
+    live.append(Uint8Array.of(0x98, 0x80))
+    live.end()
+    const second = await shell.controller.read(owner, started.view.resourceId, first.page.cursor)
+    expect(second.page.text).toBe('😀')
+    expect(second.page.lossy).toBe(false)
+    await shell.controller.stop(owner, started.view.resourceId)
+  })
+
+  it('reports invalid stderr bytes honestly while still delivering valid stdout', async () => {
+    const shell = await openJobsHarness({
+      script: () => ({
+        readers: {
+          stdout: createScriptedRawOutputReader(Buffer.from('OUT\n', 'utf8')),
+          stderr: createScriptedRawOutputReader(Buffer.alloc(8_000, 0xff)),
+        },
+      }),
+    })
+    const owner = shell.harness.owner
+    const execution = await shell.harness.captureExecution()
+    const started = await shell.controller.run(owner, execution, { command: 'binary stderr', cwd: CWD })
+
+    expect(started.page.text.startsWith('OUT\n')).toBe(true)
+    expect(started.page.lossy).toBe(true)
+    expect(started.recovery).toContainEqual(
+      expect.objectContaining({ stream: 'stdout', lost: false }),
+    )
+    expect(started.recovery).toContainEqual(
+      expect.objectContaining({ stream: 'stderr', source: 'memory', lost: true, reason: 'invalid-utf8' }),
+    )
+    expect(Buffer.byteLength(started.page.text, 'utf8')).toBeLessThanOrEqual(PROCESS_READ_MAX_BYTES)
+    const second = await shell.controller.read(owner, started.view.resourceId, started.page.cursor)
+    expect(second.page.lossy).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slot release and unload diagnostics
+// ---------------------------------------------------------------------------
+
+describe('guarded settlement and unload diagnostics', () => {
+  it('releases the active slot when a guarded settlement is confirmed afterwards', async () => {
+    const shell = await openJobsHarness({
+      script: (spec) =>
+        spec.argv.at(-1) === 'guarded'
+          ? { staysOpen: true, terminateDelayMs: 4_500 }
+          : { staysOpen: true },
+    })
+    const owner = shell.harness.owner
+    const execution = await shell.harness.captureExecution()
+    const guarded = await shell.controller.run(owner, execution, {
+      command: 'guarded',
+      cwd: CWD,
+      background: true,
+      timeoutMs: 1,
+    })
+    // The guard settles the entry before the provider's own completion lands;
+    // the later confirmation must still free the active-process slot.
+    await until(
+      () => shell.controller.status(owner, guarded.view.resourceId).view.cleanupConfirmed,
+      8_000,
+    )
+    const fillers: string[] = []
+    for (let index = 0; index < AGENT_MAX_PROCESSES; index += 1) {
+      const filler = await shell.controller.run(owner, execution, {
+        command: `filler ${index}`,
+        cwd: CWD,
+        background: true,
+      })
+      fillers.push(filler.view.resourceId)
+    }
+    // All eight fit because the guarded slot was released. Cleanup itself is
+    // the harness's job; close/stop behaviour is covered by its own cases.
+    expect(fillers).toHaveLength(AGENT_MAX_PROCESSES)
+    await stopAll(shell, fillers)
+  }, 20_000)
+
+  it('reports unload cleanup failures through the supported logger', async () => {
+    const harness = await createToolHarness({
+      cwd: CWD,
+      subprocess: { script: () => ({ staysOpen: true, cleanupUnconfirmed: true }) },
+    })
+    open.push(harness)
+    await harness.ctx.plugin(LocalJobRegistry)
+    const messages: string[] = []
+    harness.ctx.logger.exporter({
+      levels: { default: 3 },
+      export: (message) => {
+        messages.push(message.args.map((value) => String(value)).join(' '))
+      },
+    })
+    // A child fiber owns the controller, so disposing it runs the controller's
+    // own unload effect while the parent logger is still alive.
+    let controller: ProcessController | undefined
+    const fiber = harness.ctx.plugin((scope) => {
+      controller = createProcessController(scope, () => BASH_CONFIG)
+    })
+    await fiber
+    if (controller === undefined) throw new Error('the controller plugin did not start')
+    const started = await controller.run(harness.owner, await harness.captureExecution(), {
+      command: 'unload failure',
+      cwd: CWD,
+      background: true,
+    })
+    await fiber.dispose()
+    expect(controller).toBeDefined()
+    expect(messages.some((message) => message.includes(started.view.resourceId))).toBe(true)
+    expect(messages.some((message) => message.includes('not cleaned up'))).toBe(true)
+    await harness.dispose()
+    open.splice(open.indexOf(harness), 1)
   })
 })

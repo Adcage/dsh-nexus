@@ -1179,6 +1179,11 @@ export interface ScriptedProcessScript {
    */
   readonly ignoreTerminate?: boolean
   /**
+   * Delay the provider's termination settlement by this many milliseconds so a
+   * bounded stop/guard can settle before native cleanup is confirmed.
+   */
+  readonly terminateDelayMs?: number
+  /**
    * The parent exits normally but the managed range keeps a survivor until
    * `terminate()`; this is the live-grandchild shape.
    */
@@ -1304,7 +1309,9 @@ class ScriptedProcess implements SubprocessHandle {
   private readonly staysOpen: boolean
   private readonly cleanupUnconfirmed: boolean | (() => boolean)
   private readonly ignoreTerminate: boolean
+  private readonly terminateDelayMs: number | undefined
   private readonly survivingRange: boolean
+  private terminateScheduled = false
   private rangeWaiters: Array<() => void> = []
 
   /**
@@ -1317,6 +1324,7 @@ class ScriptedProcess implements SubprocessHandle {
     this.staysOpen = script.staysOpen === true
     this.cleanupUnconfirmed = script.cleanupUnconfirmed ?? false
     this.ignoreTerminate = script.ignoreTerminate === true
+    this.terminateDelayMs = script.terminateDelayMs
     this.survivingRange = script.survivingRange === true
     this.rangeEmpty = !this.survivingRange
     this.stdin = spec.stdio.stdin === 'pipe' ? new PassThrough() : undefined
@@ -1361,6 +1369,18 @@ class ScriptedProcess implements SubprocessHandle {
       for (const wake of this.rangeWaiters.splice(0)) wake()
     }
     if (this.finished) return
+    if (this.terminateDelayMs !== undefined) {
+      if (this.terminateScheduled) return
+      this.terminateScheduled = true
+      const timer = setTimeout(() => {
+        this.terminateScheduled = false
+        if (this.finished) return
+        this.finished = true
+        this.settle({ exitCode: null, signal: 'SIGTERM' })
+      }, this.terminateDelayMs)
+      timer.unref()
+      return
+    }
     this.finished = true
     this.settle({ exitCode: null, signal: 'SIGTERM' })
   }

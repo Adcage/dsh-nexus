@@ -918,6 +918,47 @@ describe('terminal read', () => {
     expect(shifted.totalLines).toBe(8)
   })
 
+  it('marks a continuation lossy when an append and an eviction keep the retained count', async () => {
+    const shell = await openTerminalHarness()
+    const owner = shell.harness.owner
+    const session = new ScriptedNativeSession(1)
+    for (let line = 0; line < 8; line += 1) session.append(`line ${line}`)
+    shell.backends.get('bash')!.prepare = () => session
+    const opened = await shell.controller.open(owner)
+    const resourceId = opened.terminal.resourceId
+    const first = shell.controller.read(owner, resourceId, undefined, 2)
+    expect(first).toMatchObject({ totalLines: 8, lineBegin: 0, lineEnd: 2 })
+
+    // At the retention bound every append also drops a head line, so the
+    // retained count is unchanged while the content shifts.
+    session.append('line 8', 8)
+    expect(session.dropped).toBe(true)
+    const continued = shell.controller.read(owner, resourceId, first.cursor, 2)
+    expect(continued.totalLines).toBe(8)
+    expect(continued.lossy).toBe(true)
+    expect(continued.lossReason).toBe('shifted')
+  })
+
+  it('clamps an evicted continuation to the retained line count', async () => {
+    const shell = await openTerminalHarness()
+    const owner = shell.harness.owner
+    const session = new ScriptedNativeSession(1)
+    for (let line = 0; line < 8; line += 1) session.append(`line ${line}`)
+    shell.backends.get('bash')!.prepare = () => session
+    const opened = await shell.controller.open(owner)
+    const resourceId = opened.terminal.resourceId
+    const first = shell.controller.read(owner, resourceId, undefined, 2)
+    const second = shell.controller.read(owner, resourceId, first.cursor, 2)
+
+    session.lines.splice(0, 6)
+    session.dropped = true
+    const evicted = shell.controller.read(owner, resourceId, second.cursor, 2)
+    expect(evicted.lossy).toBe(true)
+    expect(evicted.lossReason).toBe('evicted')
+    expect(evicted.lineBegin).toBeLessThanOrEqual(evicted.totalLines)
+    expect(evicted.lineEnd).toBeLessThanOrEqual(evicted.totalLines)
+  })
+
   it('refuses a read when the terminal is no longer owned', async () => {
     const shell = await openTerminalHarness()
     const owner = shell.harness.owner

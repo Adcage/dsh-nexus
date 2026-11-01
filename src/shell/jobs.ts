@@ -59,9 +59,9 @@ import type { ShellExecutionConfig } from './engines.ts'
 import {
   decodeOutputCursor,
   findWindowStart,
-  holdPendingTail,
+  memoryWindowIsByteExact,
   outputPageLimit,
-  takeUtf8Prefix,
+  readMemoryWindow,
   type OutputCursorState,
 } from './output.ts'
 import { startProcess, type ManagedProcess, type ManagedSandboxFacts, type RunInput } from './process.ts'
@@ -100,9 +100,11 @@ const NATIVE_WAIT_MARGIN_MS = 1_000
 
 /**
  * Consecutive completion wakes one owner may receive before notices degrade to
- * queued injection. Any user-authored input resets the count. The bound keeps a
- * job that starts another job from waking its owner forever, while a normal
- * background workflow still reaches an idle owner without polling.
+ * queued injection. A queued notice is NOT delivered yet: an idle owner keeps it
+ * pending until a later user/steering turn wakes the driver (the explicit
+ * tradeoff against an unbounded self-waking chain). Any user-authored input
+ * resets the count, so a normal background workflow still reaches an idle owner
+ * without polling.
  */
 const COMPLETION_WAKE_BUDGET = 4
 
@@ -332,6 +334,8 @@ interface StreamProbe {
   readonly text: string
   readonly nextOffset: number
   readonly lossy: boolean
+  /** The decoded window has no source-byte boundary proof (invalid UTF-8). */
+  readonly invalidUtf8: boolean
   readonly spillPath?: string
 }
 
@@ -360,9 +364,19 @@ export function createProcessController(
   config: () => ShellExecutionConfig,
 ): ProcessController {
   const controller = new Controller(ctx, config)
-  ctx.effect(() => async () => {
-    await controller.dispose()
-  }, 'dsh-nexus shell process controller')
+  ctx.effect(
+    () => async () => {
+      const result = await controller.dispose()
+      for (const failure of result.failures) {
+        ctx
+          .logger('dsh-nexus-shell')
+          .warn(
+            `shell process ${failure.resourceId} was not cleaned up on unload (${failure.reason}); the managed range may survive until the host reaps it`,
+          )
+      }
+    },
+    'dsh-nexus shell process controller',
+  )
   return controller
 }
 
@@ -575,8 +589,8 @@ class Controller implements ProcessController {
         stdoutFromSpill: false,
         stderrFromSpill: false,
       }
-      const stdoutProbe = probeStream(entry.reader('stdout'), 0)
-      const stderrProbe = probeStream(entry.reader('stderr'), 0)
+      const stdoutProbe = probeStream(entry.reader('stdout'), 0, entry.outputComplete)
+      const stderrProbe = probeStream(entry.reader('stderr'), 0, entry.outputComplete)
       if (needsRecovery(stdoutProbe) || needsRecovery(stderrProbe)) {
         return this.recover(entry, state, pageSize)
       }
@@ -588,8 +602,8 @@ class Controller implements ProcessController {
       return this.recover(entry, state, pageSize)
     }
     const state = decodeOutputCursor(cursor, entry.resourceId)
-    const stdoutProbe = probeStream(entry.reader('stdout'), state.stdoutOffset)
-    const stderrProbe = probeStream(entry.reader('stderr'), state.stderrOffset)
+    const stdoutProbe = probeStream(entry.reader('stdout'), state.stdoutOffset, entry.outputComplete)
+    const stderrProbe = probeStream(entry.reader('stderr'), state.stderrOffset, entry.outputComplete)
     if (needsRecovery(stdoutProbe) || needsRecovery(stderrProbe)) {
       return this.recover(
         entry,
@@ -783,9 +797,9 @@ class Controller implements ProcessController {
 
     const stdoutReader = entry.reader('stdout')
     const stderrReader = entry.reader('stderr')
-    const stdoutProbe = probeStream(stdoutReader, stdoutOffset)
-    const stderrProbe = probeStream(stderrReader, stderrOffset)
     const outputComplete = entry.outputComplete
+    const stdoutProbe = probeStream(stdoutReader, stdoutOffset, outputComplete)
+    const stderrProbe = probeStream(stderrReader, stderrOffset, outputComplete)
     // The current fact only: a provider may revoke a spill on cap/write/seal.
     const spillAvailable = stdoutProbe.spillPath !== undefined || stderrProbe.spillPath !== undefined
 
@@ -954,7 +968,10 @@ class Controller implements ProcessController {
     }
   }
 
-  /** Deliver one unclaimed background completion to its exact live owner. */
+  /**
+   * Offer one unclaimed background completion to its exact live owner: wake an
+   * idle owner within the budget, otherwise queue it for the next step/turn.
+   */
   private report(event: JobEvent): void {
     if (this.disposed || event.type !== 'settled') return
     if (event.awaited || event.cause === 'teardown') return
@@ -1086,7 +1103,12 @@ class OwnedProcess {
   /** Request termination and bound the wait for provider confirmation. */
   async stopBound(cause: ProcessStopCause): Promise<ProcessView> {
     const current = this.process.view()
-    if (current.cleanupConfirmed && this.completed) return current
+    if (current.cleanupConfirmed && this.completed) {
+      // A bounded stop may have settled first while cleanup was still open; once
+      // the provider confirms the range empty the slot is no longer active.
+      this.releaseReservation()
+      return current
+    }
     const result = await bounded(this.process.stop(cause), STOP_BOUND_MS)
     const view = result ?? this.process.view()
     if (view.cleanupConfirmed) {
@@ -1129,7 +1151,14 @@ class OwnedProcess {
 
   /** First-wins settlement; releases the slot only once cleanup is confirmed. */
   settle(outcome: JobOutcome): void {
-    if (this.completed) return
+    if (this.completed) {
+      // The native settlement can win the race against the bounded stop/guard
+      // and land `cleanupConfirmed` slightly later. Releasing here (idempotent)
+      // keeps the active-process cap truthful without touching the retained
+      // output or emitting a second notice.
+      if (this.process.view().cleanupConfirmed) this.releaseReservation()
+      return
+    }
     this.completed = true
     this.clearGuard()
     if (this.process.view().cleanupConfirmed) this.releaseReservation()
@@ -1272,13 +1301,18 @@ function jobLabel(command: string): string {
 }
 
 /** Read one stream at one offset without consuming anything. */
-function probeStream(reader: SubprocessOutputReader | undefined, offset: number): StreamProbe {
-  if (reader === undefined) return { text: '', nextOffset: offset, lossy: false }
+function probeStream(
+  reader: SubprocessOutputReader | undefined,
+  offset: number,
+  outputComplete: boolean,
+): StreamProbe {
+  if (reader === undefined) return { text: '', nextOffset: offset, lossy: false, invalidUtf8: false }
   const probe = reader.readFrom(offset)
   return {
     text: probe.text,
     nextOffset: probe.nextOffset,
     lossy: probe.lossy,
+    invalidUtf8: !probe.lossy && !memoryWindowIsByteExact(reader, probe.text, offset, probe.nextOffset, outputComplete),
     ...(probe.spillPath === undefined ? {} : { spillPath: probe.spillPath }),
   }
 }
@@ -1295,6 +1329,14 @@ function liveTruth(stdout: StreamProbe, stderr: StreamProbe): readonly OutputSou
 
 /** Per-stream truth for one memory-only page. */
 function liveStreamTruth(stream: 'stdout' | 'stderr', probe: StreamProbe): OutputSourceTruth {
+  if (probe.invalidUtf8) {
+    return {
+      stream,
+      source: probe.text.length === 0 ? 'none' : 'memory',
+      lost: true,
+      reason: 'invalid-utf8',
+    }
+  }
   if (!probe.lossy) {
     return { stream, source: probe.text.length === 0 ? 'none' : 'memory', lost: false }
   }
@@ -1327,7 +1369,7 @@ async function readStream(
   usedSpill: boolean,
 ): Promise<StreamSlice> {
   if (!probe.lossy) {
-    return readMemory(probe, offset, budget, outputComplete)
+    return readMemory(reader, probe, offset, budget, outputComplete)
   }
   if (probe.spillPath !== undefined) {
     const spill = await readSpillChunk(probe.spillPath, offset, budget, outputComplete)
@@ -1339,17 +1381,27 @@ async function readStream(
 }
 
 /** Read a bounded page out of the retained in-memory tail. */
-function readMemory(probe: StreamProbe, offset: number, budget: number, outputComplete: boolean): StreamSlice {
-  const prefix = takeUtf8Prefix(probe.text, budget)
-  const text = holdPendingTail(prefix, probe.text, outputComplete)
-  const bytes = Buffer.byteLength(text, 'utf8')
+function readMemory(
+  reader: SubprocessOutputReader | undefined,
+  probe: StreamProbe,
+  offset: number,
+  budget: number,
+  outputComplete: boolean,
+): StreamSlice {
+  const window = readMemoryWindow(
+    reader,
+    { text: probe.text, start: offset, end: probe.nextOffset, lossy: false },
+    budget,
+    outputComplete,
+  )
   return {
-    text,
-    bytes,
-    nextOffset: Math.min(offset + bytes, probe.nextOffset),
-    full: text.length === probe.text.length,
+    text: window.text,
+    bytes: window.bytes,
+    nextOffset: window.nextOffset,
+    full: window.full,
     source: 'memory',
-    lost: false,
+    lost: window.lost,
+    ...(window.reason === undefined ? {} : { reason: window.reason }),
   }
 }
 
@@ -1367,17 +1419,20 @@ function readMemoryLossy(
   }
   const start = findWindowStart(reader, offset, probe.nextOffset)
   const aligned = reader.readFrom(start)
-  const prefix = takeUtf8Prefix(aligned.text, budget)
-  const text = holdPendingTail(prefix, aligned.text, outputComplete)
-  const bytes = Buffer.byteLength(text, 'utf8')
+  const window = readMemoryWindow(
+    reader,
+    { text: aligned.text, start, end: aligned.nextOffset, lossy: true },
+    budget,
+    outputComplete,
+  )
   return {
-    text,
-    bytes,
-    nextOffset: Math.min(start + bytes, aligned.nextOffset),
+    text: window.text,
+    bytes: window.bytes,
+    nextOffset: window.nextOffset,
     full: start >= aligned.nextOffset,
     source: 'memory',
     lost: true,
-    reason,
+    reason: window.reason ?? reason,
   }
 }
 
