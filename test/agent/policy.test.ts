@@ -152,6 +152,26 @@ function requestPolicy(testCase: OpenCase, childId: string, index: number): stri
   return JSON.stringify(request.options.messages).match(/Current DSH file policy: [a-z-]+/)?.[0]
 }
 
+/**
+ * The error in one rejection's cause chain that carries a given code.
+ *
+ * The native continuation path wraps a refused creation in its own
+ * `NOT_RESUMABLE` error, so a case reads the whole chain instead of assuming
+ * the outermost error is the Nexus refusal.
+ * @param error - rejection value.
+ * @param code - error code the caller expects somewhere in the chain.
+ * @returns that error, or undefined when no link carries the code.
+ */
+function errorWithCode(error: unknown, code: string): (Error & { readonly code: string }) | undefined {
+  let current: unknown = error
+  for (let depth = 0; current instanceof Error && depth < 8; depth += 1) {
+    const candidate = current as Error & { readonly code?: unknown; readonly cause?: unknown }
+    if (candidate.code === code) return candidate as Error & { readonly code: string }
+    current = candidate.cause
+  }
+  return undefined
+}
+
 describe('child policy admission', () => {
   it('narrows a read-only child at creation and keeps the record before the child exists', async () => {
     const testCase = await openCase()
@@ -419,6 +439,52 @@ describe('policy revalidation beyond creation', () => {
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
     expect(effectiveMode(testCase, resumed)).toBe('workspace-write')
     harness.releaseFor('write-child')
+  })
+
+  it('refuses a new writing residency while the earlier start cleanup is unconfirmed', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness, coordinator } = testCase
+    const scope = join(harness.workspace, 'writer-scope')
+    await mkdir(scope, { recursive: true })
+    const started = await startChild(testCase, 'pinned-writer', 'write', scope)
+    await waitFor(() => harness.requestsOf('pinned-writer').length === 1, 'the child request')
+    const root = await canonicalDirectory(harness.workspace)
+    expect(coordinator.scopeOf(started.childId)).toEqual({ root, state: 'held' })
+
+    // Explicit fault setup, not a reproduction claim: a rejected start whose
+    // native rollback failed leaves exactly this state, and the public pin is
+    // how the host records it. The first residency is then retired normally.
+    coordinator.pin(started.childId)
+    harness.releaseFor('pinned-writer')
+    await started.child.whenIdle()
+    await harness.ctx.subagents.drainChildren(testCase.parent, [started.childId])
+    expect(harness.ctx.agents.get(started.childId)).toBeUndefined()
+    // Retiring that residency is negative evidence only: the scope stays reserved.
+    expect(coordinator.scopeOf(started.childId)).toEqual({ root, state: 'unconfirmed' })
+
+    const failure = await harness.ctx.subagents
+      .sendMessage(testCase.parent, started.childId, [{ type: 'text', text: 'resume' }], {
+        signal: new AbortController().signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+
+    // The new residency is refused before it can issue a second child turn.
+    expect(failure).toBeInstanceOf(Error)
+    const refusal = errorWithCode(failure, 'WRITE_SCOPE_BUSY')
+    expect(refusal?.message).toContain('pinned-writer')
+    expect(refusal?.message).toContain(root)
+    expect(refusal?.message).toContain('unconfirmed')
+    expect(harness.requestsOf('pinned-writer')).toHaveLength(1)
+    expect(harness.ctx.agents.get(started.childId)).toBeUndefined()
+    // The refused residency's own disposal is not cleanup proof for the old
+    // writer, and another writer stays out of the tree.
+    expect(coordinator.scopeOf(started.childId)).toEqual({ root, state: 'unconfirmed' })
+    await expect(
+      coordinator.acquire(testCase.parent, SessionId('overlapping-writer'), harness.workspace),
+    ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
   })
 })
 

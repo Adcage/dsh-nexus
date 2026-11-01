@@ -48,6 +48,16 @@
  * already gone has no public path to release it, `stop` on that id is an
  * accepted no-op that does NOT clear the lease, and it is never force-unlocked.
  *
+ * A retained scope also refuses a NEW writing residency of the same child. A
+ * cold continuation materializes a second Agent for the same session id, and
+ * `agent/created` fires for it (`source: "resume"`); re-acquiring the same id
+ * for the same tree would otherwise hand the pinned scope to that new writer
+ * while the earlier residency's cleanup is still unproven. The creation hook
+ * therefore refuses it with `WRITE_SCOPE_BUSY` before its first request. A
+ * resident child is unaffected because a wake does not fire `agent/created`, and
+ * an ordinary cold resume is unaffected because its lease was released on the
+ * confirmed disposal edge before the resume.
+ *
  * @module dsh-nexus/agent/policy
  */
 
@@ -297,6 +307,10 @@ export async function admitChildPolicy(
  * workspace root again on resume — re-derived from the native policy for the
  * resumed session, never from the smaller requested directory — because a
  * resume must not restore a narrower lease than the fence it runs under.
+ *
+ * A write child whose scope is still `unconfirmed` is refused here: this edge
+ * only fires for a new residency, and a pinned scope's earlier writer may still
+ * be alive, so the new residency is not authorized over it.
  * @param ctx - registration scope.
  * @param store - durable store holding child policies.
  * @param coordinator - shared write coordinator.
@@ -308,6 +322,13 @@ export function registerChildPolicy(ctx: Context, store: NexusStore, coordinator
     if (policy === undefined) return
     narrowToPolicy(ctx, policy, agent)
     if (policy.access !== 'write') return
+    const reserved = coordinator.scopeOf(agent.id)
+    if (reserved?.state === 'unconfirmed') {
+      throw new NexusError(
+        'WRITE_SCOPE_BUSY',
+        `child "${agent.id}" cannot start a new writing residency: an earlier start's cleanup is unconfirmed and the write scope "${reserved.root}" is still held for it, so that tree already has a possible writer and a second one is refused until the deployment scope is restarted`,
+      )
+    }
     const service = requirePolicy(ctx, `child "${policy.childId}"`)
     const root = await grantedWorkspaceRoot(service, agent.session)
     if (!scopeContains(root, policy.cwd)) {
