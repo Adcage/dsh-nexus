@@ -974,9 +974,19 @@ export async function mountRecordingSandbox(
   return mounted
 }
 
+/** A raw-byte output reader with the provider's revocable spill-file behavior. */
+export interface ScriptedOutputReader extends SubprocessOutputReader {
+  /** Simulate the provider discarding its spill file (cap, write or seal failure). */
+  withdrawSpill(): void
+}
+
 /**
- * In-memory output reader whose retained window can lose its head, mirroring a
- * collect-mode provider. Offsets are UTF-8 byte positions.
+ * In-memory output reader whose retained window can lose its head, mirroring
+ * the real collector's Buffer slice + UTF-8 decode. Offsets are whole-stream
+ * UTF-8 byte positions.
+ *
+ * A spill file exists only after a real overflow, exactly like the provider;
+ * `withdrawSpill()` removes the path the way cap/write/seal revocation does.
  * @param text - complete captured stream text.
  * @param options - retained-window size and optional full-stream spill path.
  * @returns a non-consuming reader with the shipped offset contract.
@@ -984,9 +994,10 @@ export async function mountRecordingSandbox(
 export function createScriptedOutputReader(
   text: string,
   options: { readonly memoryBytes?: number; readonly spillPath?: string } = {},
-): SubprocessOutputReader {
+): ScriptedOutputReader {
   const bytes = Buffer.from(text, 'utf8')
   const memoryBytes = options.memoryBytes ?? bytes.length
+  let spillActive = options.spillPath !== undefined && memoryBytes < bytes.length
   return {
     readFrom(fromByte) {
       const windowStart = Math.max(0, bytes.length - memoryBytes)
@@ -995,8 +1006,11 @@ export function createScriptedOutputReader(
         text: bytes.subarray(start).toString('utf8'),
         nextOffset: bytes.length,
         lossy: fromByte < windowStart,
-        ...(options.spillPath === undefined ? {} : { spillPath: options.spillPath }),
+        ...(spillActive && options.spillPath !== undefined ? { spillPath: options.spillPath } : {}),
       }
+    },
+    withdrawSpill() {
+      spillActive = false
     },
   }
 }

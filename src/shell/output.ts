@@ -46,13 +46,11 @@ const EMPTY_READER: SubprocessOutputReader = {
 }
 
 /**
- * One process's output window. Sticky state belongs to the process, not to a
- * caller-provided cursor, so availability facts cannot be reset by replaying
- * an older cursor.
+ * One process's output window. Cursor state is explicit; spill availability is
+ * recomputed on every page from what each reader reports NOW, because the
+ * provider may revoke its spill file on cap/write/seal failure.
  */
 export class ManagedOutput {
-  private spillAvailable = false
-
   /**
    * @param resourceId - process id every cursor must belong to.
    * @param streams - the collected stdout/stderr readers.
@@ -85,61 +83,122 @@ export class ManagedOutput {
     remaining -= stdoutBytes
     text += stdoutPage
     lost = lost || stdout.lossy
-    if (stdout.spillPath !== undefined) this.spillAvailable = true
 
-    if (remaining > 0) {
-      const stderr = readAligned(this.streams.stderr ?? EMPTY_READER, state.stderrOffset)
-      if (stderr.text.length > 0) {
-        const marker = '[stderr]\n'
-        const markerBytes = Buffer.byteLength(marker, 'utf8')
-        const prefix = state.stderrStarted ? '' : marker
-        const prefixBytes = state.stderrStarted ? 0 : markerBytes
-        if (remaining > prefixBytes) {
-          const stderrPage = takeUtf8Prefix(stderr.text, remaining - prefixBytes)
-          const stderrBytes = Buffer.byteLength(stderrPage, 'utf8')
-          state.stderrOffset = stderr.start + stderrBytes
-          text += prefix + stderrPage
-          state.stderrStarted = true
-          lost = lost || stderr.lossy
-        }
-        // With no room for the marker, the stderr text stays unread for the
-        // next page; its native offset is not advanced.
+    // Read stderr even when this page has no room for it: its CURRENT spill
+    // fact is part of this page's availability answer.
+    const stderr = readAligned(this.streams.stderr ?? EMPTY_READER, state.stderrOffset)
+    const spillAvailable = stdout.spillPath !== undefined || stderr.spillPath !== undefined
+    if (remaining > 0 && stderr.text.length > 0) {
+      const marker = '[stderr]\n'
+      const markerBytes = Buffer.byteLength(marker, 'utf8')
+      const prefix = state.stderrStarted ? '' : marker
+      const prefixBytes = state.stderrStarted ? 0 : markerBytes
+      if (remaining > prefixBytes) {
+        const stderrPage = takeUtf8Prefix(stderr.text, remaining - prefixBytes)
+        const stderrBytes = Buffer.byteLength(stderrPage, 'utf8')
+        state.stderrOffset = stderr.start + stderrBytes
+        text += prefix + stderrPage
+        state.stderrStarted = true
+        lost = lost || stderr.lossy
       }
-      if (stderr.spillPath !== undefined) this.spillAvailable = true
+      // With no room for the marker, the stderr text stays unread for the
+      // next page; its native offset is not advanced.
     }
 
     return {
       text,
       cursor: encodeCursor(this.resourceId, { ...state, lost }),
       lossy: lost,
-      spillAvailable: this.spillAvailable,
+      spillAvailable,
     }
   }
 }
 
+/** One stream's read, already anchored to a real byte start. */
+interface AlignedRead {
+  readonly text: string
+  readonly start: number
+  readonly end: number
+  readonly lossy: boolean
+  readonly spillPath?: string
+}
+
 /** Read one stream from an exact offset, resolving a lossy window to its real start. */
-function readAligned(
-  reader: SubprocessOutputReader,
-  fromByte: number,
-): { text: string; start: number; lossy: boolean; spillPath?: string } {
+function readAligned(reader: SubprocessOutputReader, fromByte: number): AlignedRead {
   const first = reader.readFrom(fromByte)
   if (!first.lossy) {
-    return {
+    return alignCroppedWindow(reader, {
       text: first.text,
       start: fromByte,
+      end: first.nextOffset,
       lossy: false,
       ...(first.spillPath === undefined ? {} : { spillPath: first.spillPath }),
-    }
+    })
   }
   const start = findWindowStart(reader, fromByte, first.nextOffset)
   const aligned = reader.readFrom(start)
   const spillPath = first.spillPath ?? aligned.spillPath
-  return {
+  return alignCroppedWindow(reader, {
     text: aligned.text,
     start,
+    end: aligned.nextOffset,
     lossy: true,
     ...(spillPath === undefined ? {} : { spillPath }),
+  })
+}
+
+/**
+ * Advance past continuation bytes left by a ring window that begins inside a
+ * multi-byte character.
+ *
+ * Re-encoding the decoder's U+FFFD would over-count consumed source bytes and
+ * let the cursor overtake bytes it never returned. The real boundary is the
+ * largest bounded byte offset at which dropping exactly that many leading
+ * replacement characters matches the decode from that offset; smaller offsets
+ * still land inside the cropped character. The probe is bounded to the three
+ * bytes a UTF-8 code point can leave behind, so a genuine literal U+FFFD plus
+ * its valid bytes cannot be mistaken for a crop (their decodes do not match
+ * this relation).
+ */
+function alignCroppedWindow(reader: SubprocessOutputReader, read: AlignedRead): AlignedRead {
+  if (read.start >= read.end || !read.text.startsWith('\uFFFD')) return read
+  const leading = countLeadingReplacements(read.text)
+  const limit = Math.min(3, leading, read.end - read.start)
+  let skip = 0
+  for (let bytes = 1; bytes <= limit; bytes += 1) {
+    const probe = reader.readFrom(read.start + bytes)
+    if (dropLeadingReplacements(read.text, bytes) === probe.text) skip = bytes
   }
+  if (skip === 0) return read
+  return {
+    ...read,
+    text: dropLeadingReplacements(read.text, skip),
+    start: read.start + skip,
+    lossy: true,
+  }
+}
+
+/** Count the replacement characters at the start of one decoded window. */
+function countLeadingReplacements(text: string): number {
+  let count = 0
+  for (const char of text) {
+    if (char !== '\uFFFD') break
+    count += 1
+  }
+  return count
+}
+
+/** Remove exactly the requested count of leading replacement characters. */
+function dropLeadingReplacements(text: string, count: number): string {
+  let dropped = 0
+  let index = 0
+  for (const char of text) {
+    if (dropped >= count) break
+    if (char !== '\uFFFD') break
+    dropped += 1
+    index += char.length
+  }
+  return text.slice(index)
 }
 
 /**

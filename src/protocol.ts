@@ -103,7 +103,12 @@ export interface OutputPage {
   readonly cursor: string
   /** Some requested bytes were dropped from memory and are not in `text`. */
   readonly lossy: boolean
-  /** A complete-stream spill file exists for the output lost from memory. */
+  /**
+   * At least one stream currently advertises an intact complete-stream spill
+   * file. This is not proof that the combined stdout+stderr log is fully
+   * recoverable: another stream may have no spill, and the provider can revoke
+   * a spill on cap/write/seal failure.
+   */
   readonly spillAvailable: boolean
 }
 
