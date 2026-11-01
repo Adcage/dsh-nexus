@@ -149,6 +149,24 @@ export function restoreLineEndings(text: string, style: LineEndingStyle): string
 }
 
 /**
+ * Clip one display line without splitting a UTF-16 surrogate pair.
+ *
+ * A high surrogate at the cut boundary belongs to a code point whose low half
+ * lies beyond the cap; keeping only the high half would emit an invalid lone
+ * surrogate into the model-facing text, so the pair is dropped instead.
+ * @param text - the line's decoded text.
+ * @param max - maximum UTF-16 code units to keep.
+ * @returns the prefix, ending on a whole code point when possible.
+ */
+function clipLine(text: string, max: number): string {
+  if (text.length <= max) return text
+  let end = max
+  const boundary = text.charCodeAt(end - 1)
+  if (boundary >= 0xd800 && boundary <= 0xdbff) end -= 1
+  return text.slice(0, end)
+}
+
+/**
  * Build one bounded, line-numbered window and count the whole file.
  *
  * A file whose first returned line alone exceeds the byte cap still returns that
@@ -177,7 +195,7 @@ export async function buildTextWindow(
     if (byteCapped || totalLines < request.offset || lines.length >= request.limit) return
     const text =
       rawLine.length > request.maxLineLength
-        ? `${rawLine.slice(0, request.maxLineLength)}... (line truncated to ${request.maxLineLength} chars)`
+        ? `${clipLine(rawLine, request.maxLineLength)}... (line truncated to ${request.maxLineLength} chars; the remaining tail is not reachable by this cursor — use the shell tool to read it in byte chunks)`
         : rawLine
     const bytes = Buffer.byteLength(text, 'utf8') + (lines.length > 0 ? 1 : 0)
     if (lines.length > 0 && outputBytes + bytes > request.maxBytes) {

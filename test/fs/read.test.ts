@@ -76,6 +76,25 @@ async function openReader(
   return { harness, root }
 }
 
+/**
+ * Detect an unpaired UTF-16 surrogate, which cannot be encoded as UTF-8.
+ * @param value - text to inspect.
+ * @returns whether the text contains a lone high or low surrogate.
+ */
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
 describe('read text windows', () => {
   it('pages a long file and reports an accurate next offset', async () => {
     const { harness } = await openReader({ 'notes.txt': 'l1\nl2\nl3\nl4\nl5\nl6\n' })
@@ -169,13 +188,21 @@ describe('read text windows', () => {
     const result = await harness.call('read', { path: 'huge-line.txt', limit: 1 })
 
     expect(result.isError).toBe(false)
-    expect(result.value).toMatchObject({
-      lines: [{ number: 1, text: expect.stringContaining('(line truncated to 2000 chars)') }],
-      totalLines: 2,
-      nextOffset: 2,
-    })
+    expect(result.value).toMatchObject({ totalLines: 2, nextOffset: 2 })
     const line = (result.value as { lines: { text: string }[] }).lines[0]
     expect(line?.text.startsWith('x'.repeat(2_000))).toBe(true)
+    expect(line?.text).toContain('(line truncated to 2000 chars')
+  })
+
+  it('never emits a lone surrogate when a line clip lands inside a code point', async () => {
+    const line = `${'x'.repeat(1_999)}😀tail`
+    const { harness } = await openReader({ 'surrogate.txt': `${line}\n` })
+    const result = await harness.call('read', { path: 'surrogate.txt', limit: 1 })
+    expect(result.isError).toBe(false)
+    const text = (result.value as { lines: { text: string }[] }).lines[0]?.text ?? ''
+    expect(text.startsWith('x'.repeat(1_999))).toBe(true)
+    expect(hasLoneSurrogate(text)).toBe(false)
+    expect(text).toContain('use the shell tool to read it in byte chunks')
   })
 
   it('rejects an offset past the end of the file as not found', async () => {

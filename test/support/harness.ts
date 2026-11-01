@@ -29,6 +29,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
+import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   mountAgentLoopTestDependencies,
@@ -41,9 +43,11 @@ import {
   mountAttachmentDouble,
   mountLocalFileSystem,
   mountModelRoute,
+  mountSandboxedFileSystem,
   mountSubprocessDouble,
   mountWebDouble,
   CountingLocalFileSystem,
+  CountingSandboxedFileSystem,
   type AttachmentDouble,
   type AttachmentDoubleOptions,
   type FsDoubleOptions,
@@ -64,6 +68,16 @@ export interface HarnessOwnerOptions {
   readonly signal?: AbortSignal
 }
 
+/** The shared sandbox policy plus the enforcing filesystem backend. */
+export interface SandboxHarnessOptions {
+  /** Deployment default mode; defaults to `workspace-write`. */
+  readonly mode?: SandboxMode
+  /** Absolute fallback workspace root; defaults to the session cwd. */
+  readonly workspaceRoot?: string
+  /** Backend relative-path base; defaults to the session cwd and may be broader. */
+  readonly backendCwd?: string
+}
+
 /** What to mount in a fresh harness context. */
 export interface ToolHarnessOptions {
   /** Explicit owner identity; the Agent is created under this session id. */
@@ -77,6 +91,12 @@ export interface ToolHarnessOptions {
    * in-memory double. Byte fidelity and version guards are then the backend's.
    */
   readonly localFs?: LocalFileSystemDoubleOptions
+  /**
+   * Mount the shipped enforcing backend plus the shared sandbox-policy service.
+   * The created Agent's session cwd is the `workspace-write` boundary; the
+   * backend base may be broader through `backendCwd`.
+   */
+  readonly sandbox?: SandboxHarnessOptions
   /** Register this exact model route for the created Agent. */
   readonly model?: ModelRouteOptions
   /** Mount an in-memory attachment store with these limits. */
@@ -99,6 +119,8 @@ export interface ToolHarness {
   readonly doubleFs: FsDouble | undefined
   /** The counting host backend, when `localFs` was selected. */
   readonly localFs: CountingLocalFileSystem | undefined
+  /** The counting enforcing backend, when `sandbox` was selected. */
+  readonly sandboxFs: CountingSandboxedFileSystem | undefined
   /** The in-memory attachment store, when `attachments` was selected. */
   readonly attachments: AttachmentDouble | undefined
   /** Scripted web service registered as `ctx.web`. */
@@ -129,6 +151,7 @@ const HARNESS_SERVICES = [
   'agentLoop',
   'workingDirectory',
   'fs',
+  'sandboxPolicy',
   'attachments',
   'web',
   'subprocess',
@@ -155,7 +178,17 @@ export async function createToolHarness(options: ToolHarnessOptions = {}): Promi
 
   let mountedFs: FsDouble | undefined
   let mountedLocal: CountingLocalFileSystem | undefined
-  if (options.localFs !== undefined) {
+  let mountedSandbox: CountingSandboxedFileSystem | undefined
+  if (options.sandbox !== undefined) {
+    await ctx.plugin(SandboxPolicyService, {
+      mode: options.sandbox.mode ?? 'workspace-write',
+      workspaceRoot: options.sandbox.workspaceRoot ?? cwd,
+    })
+    mountedSandbox = await mountSandboxedFileSystem(ctx, {
+      root: options.sandbox.backendCwd ?? cwd,
+      cwd: options.sandbox.backendCwd ?? cwd,
+    })
+  } else if (options.localFs !== undefined) {
     mountedLocal = await mountLocalFileSystem(ctx, { ...options.localFs, cwd })
   } else {
     await ctx.plugin((pluginCtx) => {
@@ -166,7 +199,7 @@ export async function createToolHarness(options: ToolHarnessOptions = {}): Promi
     options.attachments === undefined ? undefined : await mountAttachmentDouble(ctx, options.attachments)
   const web = await mountWebDouble(ctx, options.web)
   const subprocess = await mountSubprocessDouble(ctx, options.subprocess)
-  const backend: FileSystem | undefined = mountedLocal ?? mountedFs
+  const backend: FileSystem | undefined = mountedSandbox ?? mountedLocal ?? mountedFs
   if (backend === undefined) throw new Error('no filesystem backend mounted')
   const fs: FileSystem = backend
   let callCount = 0
@@ -178,6 +211,7 @@ export async function createToolHarness(options: ToolHarnessOptions = {}): Promi
     fs,
     doubleFs: mountedFs,
     localFs: mountedLocal,
+    sandboxFs: mountedSandbox,
     attachments,
     web,
     subprocess,

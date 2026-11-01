@@ -11,14 +11,14 @@
  * @module dsh-nexus/test/fs/edit
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { planEdits } from '../../src/fs/edit.ts'
 import { createFsTools } from '../../src/fs/read.ts'
-import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
+import { DEFAULT_SETTINGS, FILE_EDIT_MAX_INPUT_BYTES } from '../../src/runtime/defaults.ts'
 import { createToolHarness, type ToolHarness } from '../support/harness.ts'
 
 /** Project-local cache directory; no test state leaves the checkout. */
@@ -202,6 +202,31 @@ describe('edit preflight', () => {
     })
     expect(result.isError).toBe(true)
     expect(result.error?.info?.code).toBe('FS_EDIT_NOT_FOUND')
+    expect(await readFile(pathOf('a.txt'), 'utf8')).toBe('alpha\n')
+    expect(harness.localFs?.writes).toHaveLength(0)
+  })
+
+  it('accepts an edit input exactly at the byte limit', async () => {
+    const { harness, pathOf } = await openEditor({ 'a.txt': 'alpha\n' })
+    await harness.call('read', { path: 'a.txt' })
+    const replacement = 'x'.repeat(FILE_EDIT_MAX_INPUT_BYTES - 'alpha'.length)
+    const result = await harness.call('edit', {
+      path: 'a.txt',
+      edits: [{ oldText: 'alpha', newText: replacement }],
+    })
+    expect(result.isError).toBe(false)
+    expect((await stat(pathOf('a.txt'))).size).toBe(FILE_EDIT_MAX_INPUT_BYTES - 4)
+  })
+
+  it('rejects an edit input over the byte limit before any write', async () => {
+    const { harness, pathOf } = await openEditor({ 'a.txt': 'alpha\n' })
+    await harness.call('read', { path: 'a.txt' })
+    const result = await harness.call('edit', {
+      path: 'a.txt',
+      edits: [{ oldText: 'alpha', newText: 'x'.repeat(FILE_EDIT_MAX_INPUT_BYTES) }],
+    })
+    expect(result.isError).toBe(true)
+    expect(result.error?.info).toMatchObject({ name: 'NexusError', code: 'INVALID_ARGUMENT' })
     expect(await readFile(pathOf('a.txt'), 'utf8')).toBe('alpha\n')
     expect(harness.localFs?.writes).toHaveLength(0)
   })

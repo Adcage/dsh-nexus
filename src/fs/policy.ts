@@ -13,6 +13,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { FsObservation, FsTarget, FsVersion, FsWriteIntent } from '@deepseek-ai/dsh-fs'
+import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
+import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { NexusError } from '../runtime/errors.ts'
 
@@ -133,6 +135,45 @@ export async function resolveTarget(ctx: Context, exec: ToolRunContext, path: st
       ? undefined
       : await workingDirectory.ensure(exec.agent, exec.signal)
   return ctx.fs.resolve(path, { ...(cwd === undefined ? {} : { cwd }), signal: exec.signal })
+}
+
+/**
+ * Resolve the exact calling session's sandbox policy for one mutation.
+ *
+ * The enforcing backend resolves an omitted policy to the DEPLOYMENT fallback,
+ * so a read-only or narrower-workspace session would be widened to the
+ * deployment mode and root. The policy must therefore be resolved here, on
+ * every call, from the exact live session the run is attributed to; it is never
+ * captured when the factory is built. A confining backend without the policy
+ * service fails closed before any mutation instead of falling back.
+ * @param ctx - context providing the filesystem backend and the policy service.
+ * @param exec - current tool execution; its Agent owns the session.
+ * @param displayPath - target path rendered in the fail-closed message.
+ * @returns the per-call policy, or undefined for a backend that does not confine.
+ * @throws NexusError `UNSUPPORTED_CAPABILITY` when confinement is mounted without its policy service.
+ */
+export function resolveMutationPolicy(
+  ctx: Context,
+  exec: ToolRunContext,
+  displayPath: string,
+): SandboxExecutionPolicy | undefined {
+  if (ctx.fs.sandboxMode === undefined) return undefined
+  const policy: SandboxPolicyService | undefined = ctx.get('sandboxPolicy')
+  if (policy === undefined) {
+    throw new NexusError(
+      'UNSUPPORTED_CAPABILITY',
+      `cannot modify "${displayPath}": the mounted filesystem confines writes but ctx.sandboxPolicy is unavailable; mount the sandbox-policy service for this scope and retry`,
+    )
+  }
+  try {
+    return policy.resolve(exec.agent === undefined ? {} : { session: exec.agent.session })
+  } catch (error) {
+    throw new NexusError(
+      'UNSUPPORTED_CAPABILITY',
+      `cannot modify "${displayPath}": the sandbox policy for this session could not be resolved; mount a working sandbox-policy service and retry`,
+      { cause: error },
+    )
+  }
 }
 
 /**

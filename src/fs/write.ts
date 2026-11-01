@@ -13,9 +13,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { FILE_EDIT_MAX_INPUT_BYTES } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import { requireOwner } from '../runtime/owner.ts'
-import { recordObservation, requestWriteIntent, resolveTarget } from './policy.ts'
+import { recordObservation, requestWriteIntent, resolveMutationPolicy, resolveTarget } from './policy.ts'
 
 /** The structured outcome of one successful write. */
 export interface WriteValue {
@@ -43,6 +44,12 @@ interface RawWriteArgs {
  */
 function parseWriteArgs(args: RawWriteArgs): RawWriteArgs {
   if (args.path.trim().length === 0) throw new NexusError('INVALID_ARGUMENT', 'path must be a non-empty string')
+  if (Buffer.byteLength(args.content, 'utf8') > FILE_EDIT_MAX_INPUT_BYTES) {
+    throw new NexusError(
+      'INVALID_ARGUMENT',
+      `content exceeds the ${FILE_EDIT_MAX_INPUT_BYTES}-byte limit for one file mutation`,
+    )
+  }
   return { path: args.path, content: args.content }
 }
 
@@ -103,6 +110,10 @@ export function createWriteTool(ctx: Context): ToolDefinition {
       requireOwner(exec)
       const input = parseWriteArgs(args)
       const target = await resolveTarget(ctx, exec, input.path)
+      // The exact calling session's policy is resolved per call: an omitted
+      // policy would resolve to the deployment fallback and widen a read-only
+      // or narrower-workspace session.
+      const sandboxPolicy = resolveMutationPolicy(ctx, exec, target.displayPath)
       // Obtain the guard before any internal probe: a later reread must never
       // become the observation an overwrite is based on.
       const intent = await requestWriteIntent(ctx, target, exec)
@@ -115,7 +126,7 @@ export function createWriteTool(ctx: Context): ToolDefinition {
           )
         }
       }
-      const outcome = await ctx.fs.writeText(target, input.content, intent, exec.signal)
+      const outcome = await ctx.fs.writeText(target, input.content, intent, exec.signal, sandboxPolicy)
       recordObservation(ctx, target, { kind: 'present', version: outcome.version }, exec)
       return {
         path: ctx.fs.processPath(target),

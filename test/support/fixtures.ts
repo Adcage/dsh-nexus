@@ -44,7 +44,9 @@ import {
   type FsWriteIntent,
   type FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
+import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import SandboxedFileSystem from '@deepseek-ai/dsh-fs-sandbox'
 import { LlmAdapter, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import WebRuntime, {
   type WebFetchProvider,
@@ -494,6 +496,92 @@ export async function mountLocalFileSystem(
   })
   if (mounted === undefined) throw new Error('the local filesystem backend did not mount')
   return mounted
+}
+
+/**
+ * The shipped sandbox-enforcing backend with the same counters as
+ * {@link CountingLocalFileSystem}.
+ *
+ * Containment, the read-only denial and the workspace-root check all come from
+ * `@deepseek-ai/dsh-fs-sandbox`; the override only records attempts and keeps
+ * the two controllable seams used by the non-sandbox cases.
+ */
+export class CountingSandboxedFileSystem extends SandboxedFileSystem {
+  /** Every `writeText` attempt, in call order (including denied ones). */
+  readonly writes: string[] = []
+  /** Every `editText` attempt, in call order (including denied ones). */
+  readonly edits: string[] = []
+  /** Run immediately before one write reaches the enforcing backend. */
+  beforeWrite?: (target: FsTarget, content: string) => Promise<void> | void
+  /** Refuse the next write with a native I/O failure before publication. */
+  failNextWrite = false
+
+  /**
+   * @param ctx - context the service registers into as `ctx.fs`.
+   * @param config - backend configuration; `cwd` is the relative-path base.
+   */
+  constructor(ctx: Context, config: { cwd: string }) {
+    super(ctx, { ...config, diffBasisMaxBytes: 10 * 1024 * 1024 })
+  }
+
+  /**
+   * @param target - resolved target.
+   * @param content - complete new content.
+   * @param expected - guarded create or versioned replace.
+   * @param signal - cancellation.
+   * @param sandboxPolicy - per-call policy the enforcing backend fences by.
+   * @returns the enforcing backend's outcome.
+   */
+  override async writeText(
+    target: FsTarget,
+    content: string,
+    expected?: FsWriteIntent,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsWriteOutcome> {
+    this.writes.push(target.displayPath)
+    await this.beforeWrite?.(target, content)
+    if (this.failNextWrite) {
+      this.failNextWrite = false
+      throw new FsError(`simulated atomic publication failure for ${target.displayPath}`, 'FS_IO_ERROR')
+    }
+    return super.writeText(target, content, expected, signal, sandboxPolicy)
+  }
+
+  /**
+   * @param target - resolved target.
+   * @param edit - literal edit request.
+   * @param expected - version guard.
+   * @param signal - cancellation.
+   * @param sandboxPolicy - per-call policy the enforcing backend fences by.
+   * @returns the enforcing backend's outcome.
+   */
+  override async editText(
+    target: FsTarget,
+    edit: FsEditRequest,
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsEditOutcome> {
+    this.edits.push(target.displayPath)
+    return super.editText(target, edit, expected, signal, sandboxPolicy)
+  }
+}
+
+/**
+ * Mount the shipped sandbox-enforcing backend over a project-local root.
+ * @param ctx - context to mount into; must already provide `sandboxPolicy`.
+ * @param options - root and relative-path base.
+ * @returns the mounted counting backend.
+ */
+export async function mountSandboxedFileSystem(
+  ctx: Context,
+  options: LocalFileSystemDoubleOptions,
+): Promise<CountingSandboxedFileSystem> {
+  // Load it as a plugin so its inherited `inject: ['sandboxPolicy']` is honored;
+  // a direct construction cannot read an injected service.
+  await ctx.plugin(CountingSandboxedFileSystem, { cwd: options.cwd ?? options.root })
+  return ctx.fs as CountingSandboxedFileSystem
 }
 
 /** Deployment image limits a test may narrow. */

@@ -10,12 +10,12 @@
  * @module dsh-nexus/test/fs/write
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createFsTools } from '../../src/fs/read.ts'
-import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
+import { DEFAULT_SETTINGS, FILE_EDIT_MAX_INPUT_BYTES } from '../../src/runtime/defaults.ts'
 import { createToolHarness, type ToolHarness } from '../support/harness.ts'
 
 /** Project-local cache directory; no test state leaves the checkout. */
@@ -112,6 +112,27 @@ describe('write guarded creation', () => {
     const result = await harness.call('write', { path: 'nested/deep/file.txt', content: 'nested\n' })
     expect(result.isError).toBe(false)
     expect(await readFile(pathOf('nested/deep/file.txt'), 'utf8')).toBe('nested\n')
+  })
+
+  it('accepts content exactly at the mutation input byte limit', async () => {
+    const { harness, pathOf } = await openWriter()
+    const content = 'x'.repeat(FILE_EDIT_MAX_INPUT_BYTES)
+    const result = await harness.call('write', { path: 'limit.txt', content })
+    expect(result.isError).toBe(false)
+    expect((await stat(pathOf('limit.txt'))).size).toBe(FILE_EDIT_MAX_INPUT_BYTES)
+    expect(harness.localFs?.writes).toHaveLength(1)
+  })
+
+  it('rejects content over the mutation input byte limit before writing', async () => {
+    const { harness, pathOf } = await openWriter()
+    const result = await harness.call('write', {
+      path: 'too-big.txt',
+      content: 'x'.repeat(FILE_EDIT_MAX_INPUT_BYTES + 1),
+    })
+    expect(result.isError).toBe(true)
+    expect(result.error?.info).toMatchObject({ name: 'NexusError', code: 'INVALID_ARGUMENT' })
+    expect(harness.localFs?.writes).toHaveLength(0)
+    await expect(stat(pathOf('too-big.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('writes UTF-8 to a Windows-style path with CJK characters and spaces', async () => {

@@ -32,7 +32,7 @@ import {
   type LineEndingStyle,
   type TextEdit,
 } from './text.ts'
-import { recordObservation, requestEditGuard, resolveTarget } from './policy.ts'
+import { recordObservation, requestEditGuard, resolveMutationPolicy, resolveTarget } from './policy.ts'
 
 /** One raw match range in the decoded original (UTF-16 code-unit offsets). */
 export interface PlannedEditMatch {
@@ -73,6 +73,26 @@ export interface EditValue {
 }
 
 /**
+ * Validate the total UTF-8 input size of an edit list.
+ *
+ * The bound covers what the model submits (`oldText` plus `newText` over every
+ * edit), matching the shared contract's 16 MiB mutation-input ceiling. It is a
+ * bound on the request, not on the resulting file.
+ * @param edits - literal replacements in call order.
+ * @throws NexusError `INVALID_ARGUMENT` when the submitted literals exceed the limit.
+ */
+function assertEditInputBytes(edits: readonly TextEdit[]): void {
+  let bytes = 0
+  for (const edit of edits) bytes += Buffer.byteLength(edit.oldText, 'utf8') + Buffer.byteLength(edit.newText, 'utf8')
+  if (bytes > FILE_EDIT_MAX_INPUT_BYTES) {
+    throw new NexusError(
+      'INVALID_ARGUMENT',
+      `edits exceed the ${FILE_EDIT_MAX_INPUT_BYTES}-byte limit for one file mutation input`,
+    )
+  }
+}
+
+/**
  * Validate the schema-expressible part of an edit call before any side effect.
  * @param args - schema-validated raw arguments.
  * @returns the validated input.
@@ -97,6 +117,7 @@ function parseEditArgs(args: RawEditArgs): EditInput {
       throw new NexusError('INVALID_ARGUMENT', `edits[${index}] replaces text with itself`)
     }
   }
+  assertEditInputBytes(args.edits)
   return { path: args.path, edits: args.edits }
 }
 
@@ -146,6 +167,7 @@ export function planEdits(original: Uint8Array, edits: readonly TextEdit[]): Pla
       throw new NexusError('INVALID_ARGUMENT', `edits[${index}].newText must be a string`)
     }
   }
+  assertEditInputBytes(edits)
 
   const decoded = decodeEditableText(original)
   const normalized = normalizeLineEndings(decoded.text)
@@ -272,6 +294,10 @@ export function createEditTool(ctx: Context): ToolDefinition {
       requireOwner(exec)
       const input = parseEditArgs(args)
       const target = await resolveTarget(ctx, exec, input.path)
+      // Resolve the exact calling session's policy on every call. Passing no
+      // policy would let the enforcing backend fall back to the deployment
+      // mode/root, widening a read-only or narrower-workspace session.
+      const sandboxPolicy = resolveMutationPolicy(ctx, exec, target.displayPath)
       // This is the original observation's version. It is obtained *before*
       // the internal reread below, so the reread can never upgrade the guard
       // to a fresher version of a file someone else changed.
@@ -303,6 +329,7 @@ export function createEditTool(ctx: Context): ToolDefinition {
         plan.text,
         { kind: 'replaceIfVersion', version: guard.version },
         exec.signal,
+        sandboxPolicy,
       )
       recordObservation(ctx, target, { kind: 'present', version: outcome.version }, exec)
       return { path: ctx.fs.processPath(target), applied: input.edits.length } satisfies EditValue
