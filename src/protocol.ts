@@ -185,6 +185,9 @@ export interface RuntimeSettings {
  * upstream summary at the same time. Naming the basis in the record keeps
  * offsets meaningful: a later `read` continues in exactly the text those
  * offsets were measured in, instead of silently switching representation.
+ * `search-results` is the rendered search output: the source listing plus, when
+ * upstream supplied one, the provider answer under its own non-original
+ * heading. `summary` keeps that answer alone; it is provenance, not page text.
  */
 export type WebTextBasis = 'content' | 'converted-text' | 'summary' | 'search-results'
 

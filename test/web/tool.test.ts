@@ -238,7 +238,7 @@ describe('search batches', () => {
     expect(fetchesOf(testCase)).toHaveLength(0)
   })
 
-  it('saves a readable source listing and keeps an upstream summary distinct', async () => {
+  it('saves the source listing and the labelled provider answer in one readable basis', async () => {
     const testCase = await createWebCase({
       web: {
         search: async () => ({
@@ -271,7 +271,93 @@ describe('search batches', () => {
     expect(read.text).toContain('https://example.test/a')
     expect(read.text).toContain('snippet text')
     expect(read.text).toContain('https://example.test/b')
-    expect(read.text).not.toContain('provider answer')
+    expect(read.text).toContain('provider answer')
+    expect(read.text).toMatch(/provider-generated answer: not a fetched page body/i)
+
+    const stored = await testCase.store.getWeb(testCase.harness.owner.sessionId, resultId)
+    expect(stored?.summary).toBe('provider answer')
+    expect(stored?.content).toContain('provider answer')
+  })
+
+  it('keeps a long provider answer reachable past the first page and findable without another provider call', async () => {
+    const answer = `UNIQUE_PROVIDER_ANSWER ${'a'.repeat(2_000)}`
+    const snippet = 's'.repeat(12_400)
+    const testCase = await createWebCase({
+      web: {
+        search: async () => ({
+          content: answer,
+          sources: [{ url: 'https://example.test/long', title: 'Long source', snippet }],
+          truncated: false,
+        }),
+      },
+    })
+
+    const [item] = itemsOf(await testCase.call({ action: 'search', queries: ['alpha'] }))
+    const resultId = item?.resultId
+    if (resultId === undefined) throw new Error('missing resultId')
+    expect(item).toMatchObject({ ok: true, summaryOnly: false })
+
+    const firstResult = await testCase.call({ action: 'read', resultId })
+    const first = valueOf(firstResult)
+    expect(first).toMatchObject({ basis: 'search-results', atEnd: false })
+    expect(first.text).not.toContain('UNIQUE_PROVIDER_ANSWER')
+    expect(resultText(firstResult)).toMatch(/provider-generated answer/i)
+
+    let offset = first.nextOffset ?? 0
+    let page = first
+    let answerPage = ''
+    while (page.atEnd !== true) {
+      page = valueOf(await testCase.call({ action: 'read', resultId, offset }))
+      offset = page.nextOffset ?? 0
+      if (String(page.text).includes('UNIQUE_PROVIDER_ANSWER')) {
+        answerPage = String(page.text)
+        break
+      }
+    }
+    expect(answerPage).toContain('UNIQUE_PROVIDER_ANSWER')
+    expect(answerPage).toMatch(/provider-generated answer: not a fetched page body/i)
+
+    const found = valueOf(await testCase.call({ action: 'find', resultId, text: 'UNIQUE_PROVIDER_ANSWER' }))
+    expect(found.matches).toHaveLength(1)
+    const match = found.matches?.[0]
+    if (match === undefined) throw new Error('missing match')
+    const around = valueOf(
+      await testCase.call({ action: 'read', resultId, offset: match.offset, limit: 60 }),
+    )
+    expect(around.text?.startsWith('UNIQUE_PROVIDER_ANSWER')).toBe(true)
+
+    expect(searchesOf(testCase)).toHaveLength(1)
+    expect(fetchesOf(testCase)).toHaveLength(0)
+  })
+
+  it('labels a search source-list cut as a list bound rather than upstream truncation', async () => {
+    const testCase = await createWebCase({
+      web: {
+        search: async () => ({
+          sources: [
+            { url: 'https://example.test/1', title: 'One' },
+            { url: 'https://example.test/2', title: 'Two' },
+            { url: 'https://example.test/3', title: 'Three' },
+          ],
+          truncated: false,
+        }),
+      },
+    })
+
+    const batch = await testCase.call({ action: 'search', queries: ['alpha'], maxResults: 1 })
+    const [item] = itemsOf(batch)
+    expect(item).toMatchObject({ ok: true, upstreamTruncated: true })
+    expect(searchesOf(testCase).map((request) => request.maxResults)).toEqual([1])
+    expect(resultText(batch)).toMatch(/source list/i)
+    expect(resultText(batch)).toMatch(/maxResults/)
+    expect(resultText(batch)).not.toMatch(/upstream returned less/i)
+
+    const resultId = item?.resultId
+    if (resultId === undefined) throw new Error('missing resultId')
+    const read = await testCase.call({ action: 'read', resultId })
+    expect(valueOf(read)).toMatchObject({ basis: 'search-results', upstreamTruncated: true })
+    expect(resultText(read)).toMatch(/source list/i)
+    expect(resultText(read)).not.toMatch(/upstream returned less/i)
   })
 
   it('labels a summary-only answer as summary-only instead of full text', async () => {

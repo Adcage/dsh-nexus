@@ -352,6 +352,30 @@ describe('retention', () => {
       await medium.dispose()
     }
   })
+
+  it('records that a failed publication may already have evicted older results', async () => {
+    const medium = await fixture()
+    const store = await medium.open()
+    try {
+      const clock = createClock()
+      const limits: WebRetentionLimits = { ...PRODUCTION_LIMITS, maxDocuments: 1 }
+      const repository = createWebResultRepository(store, { now: clock.now, limits })
+
+      const evicted = await repository.save(fetchInput('sess-1', { url: 'https://example.test/old' }))
+      medium.failNextPut('web_documents')
+
+      await expect(repository.save(fetchInput('sess-1', { url: 'https://example.test/new' }))).rejects.toThrow(
+        /refused the write of 'web_documents/,
+      )
+
+      // The accepted cache ordering makes room before the write: the older record is
+      // gone and the failed save published nothing, so no id can be used later.
+      expect(await store.getWeb('sess-1', evicted.resultId)).toBeUndefined()
+      expect(await store.listWeb('sess-1')).toEqual([])
+    } finally {
+      await medium.dispose()
+    }
+  })
 })
 
 describe('availability', () => {
