@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { WebError } from '@deepseek-ai/dsh-web'
 import { NEXUS_PRESET_ID } from '../../src/preset/definition.ts'
 import { waitFor } from '../support/agent-harness.ts'
 import { mountPresetHarness } from '../support/preset-harness.ts'
@@ -72,6 +73,12 @@ describe('nexus preset scope', () => {
       await harness.startNexus()
       const parent = await harness.createAgent('delegate-parent', NEXUS_PRESET_ID)
       await harness.runTurn(parent, 'parent turn')
+      // The parent's exact effective snapshot is what a child must inherit; a
+      // library default or an empty persona would not contain this text.
+      const parentSnapshot = harness.runtime.prompts.peek(parent)
+      expect(parentSnapshot.text).toContain(NEXUS_PERSONA)
+      const inherited = harness.runtime.prompts.peek(parent)
+      expect(inherited.text).toBe(parentSnapshot.text)
 
       for (const context of ['spawn', 'fork'] as const) {
         const result = await harness.call(
@@ -98,14 +105,19 @@ describe('nexus preset scope', () => {
           .flatMap((message) => message.content)
           .map((block) => (block.type === 'text' ? block.text : ''))
           .join('\n')
-        expect(childText).toContain(NEXUS_PERSONA)
+        // The child's own assembled request carries the parent's EXACT effective
+        // Nexus snapshot text, not a library default the parent is not running.
+        expect(childText).toContain(parentSnapshot.text)
 
         // A child runs inside the parent's generation, so the Nexus tool surface
-        // is what it sees; the parent's snapshot is what it starts from.
+        // is what it sees.
         const childTools = (childRequests[0]?.options.tools ?? []).map((tool) => tool.name)
         expect(childTools).toContain('read')
-        expect(childTools).not.toContain('subagent')
+        expect(childTools).toContain('agent')
       }
+
+      // The parent's snapshot was not replaced by the children's inheritance.
+      expect(harness.runtime.prompts.peek(parent).text).toBe(parentSnapshot.text)
     } finally {
       await harness.dispose()
     }
@@ -175,6 +187,26 @@ describe('nexus preset scope', () => {
     }
   }, 60_000)
 
+  it('preserves a native refusal code across the compiled package boundary', async () => {
+    // A real shipped `WebError` (a `HarnessError` subclass) thrown by the provider
+    // boundary. The built package must classify it with the HOST class, or the
+    // native code is replaced by a generic fallback.
+    const refusal = new WebError('the configured web provider refused this query', 'WEB_PROVIDER_UNAVAILABLE')
+    const harness = await mountPresetHarness({ webSearchError: refusal })
+    try {
+      await harness.startNexus()
+      const agent = await harness.createAgent('native-refusal', NEXUS_PRESET_ID)
+      const result = await harness.call('web', { action: 'search', queries: ['nexus'] }, agent)
+      expect(result.isError).toBe(false)
+      const items = (result.value as { items: { ok: boolean; error?: { code: string; message: string } }[] }).items
+      expect(items[0]?.ok).toBe(false)
+      expect(items[0]?.error?.code).toBe('WEB_PROVIDER_UNAVAILABLE')
+      expect(items[0]?.error?.message).toContain('refused this query')
+    } finally {
+      await harness.dispose()
+    }
+  }, 60_000)
+
   it('refuses a nexus tool once the runtime stops admitting nexus work', async () => {
     const harness = await mountPresetHarness({})
     try {
@@ -190,6 +222,10 @@ describe('nexus preset scope', () => {
       const during = await harness.call('read', { path: 'AGENTS.md' }, agent)
       expect(during.isError).toBe(true)
       expect(String(during.error?.message)).toMatch(/not running the Nexus preset/)
+      // Compiled-boundary identity: this package's `NexusError` must be the HOST
+      // `HarnessError` subclass, or the native ToolRuntime drops the code and the
+      // model/user sees an unclassified failure. This suite runs the BUILT row.
+      expect(during.error?.info).toMatchObject({ code: 'NO_AGENT' })
       await closing
     } finally {
       await harness.dispose()

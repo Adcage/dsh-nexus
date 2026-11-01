@@ -63,6 +63,8 @@ import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import { apply as applySessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
+import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import * as SpawnProvider from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as ForkProvider from '@deepseek-ai/dsh-subagent-fork-in-process'
 import {
@@ -81,6 +83,7 @@ import {
   type AttachmentDouble,
   type CountingSandboxedFileSystem,
   type NexusStoreFixture,
+  type RecordingSandboxProvider,
   type ScriptedProcessScript,
   type SubprocessDouble,
   type WebDouble,
@@ -115,13 +118,32 @@ export interface PresetHarnessOptions {
    */
   readonly thirdPartyTools?: readonly string[]
   /**
-   * Tool names a first-party-looking plugin contributes in the GLOBAL layer.
+   * Tool names a THIRD-PARTY plugin registers under names that also describe a
+   * first-party capability (`bash`, `subagent`, `job_list` …).
    *
-   * They stand in for the native rows a real deployment mounts host-wide
-   * (`bash`, `subagent`, `job_list` …) so the narrow Nexus replacement filter can
-   * be observed doing something. Default: none.
+   * This exists to prove the opposite of ownership: the public registry has no
+   * provenance, so a name never proves who registered it, and none of these may
+   * be filtered from a Nexus session. A real Cordis plugin registers them in the
+   * global layer. Default: none.
    */
-  readonly nativeToolNames?: readonly string[]
+  readonly collisionToolNames?: readonly string[]
+  /**
+   * Mount the shipped native compaction pair in the HOST realm before the Nexus
+   * row starts, so `detectNativeComposition` sees an inheritable mechanism.
+   *
+   * `'pair'` mounts the real `BasicCompactionEngine` and `ToolResultPruner`;
+   * `'partial'` mounts only the engine, i.e. the half-present case (no pruner)
+   * the preset must refuse. Default: none (the host realm carries no mechanism).
+   */
+  readonly hostCompaction?: 'pair' | 'partial'
+  /**
+   * Make the scripted web search provider throw this error.
+   *
+   * A case passes a real native `WebError` (a `HarnessError` subclass) so the
+   * compiled package's failure classification is exercised with a host-created
+   * error instance. Default: an empty source list.
+   */
+  readonly webSearchError?: Error
   /** System-prompt configuration for the mounted registry. */
   readonly systemPrompt?: SystemPromptConfig
   /**
@@ -148,6 +170,8 @@ export interface PresetHarness {
   readonly web: WebDouble
   /** Attachment store double. */
   readonly attachments: AttachmentDouble
+  /** The scripted confinement runner, with its recorded `confine` calls. */
+  readonly sandbox: RecordingSandboxProvider
   /** The scripted process-spawn boundary, with its recorded spawn requests. */
   readonly subprocess: SubprocessDouble
   /** Durable Nexus store mounted as `storageDomain`. */
@@ -156,9 +180,10 @@ export interface PresetHarness {
   readonly requests: PresetRequest[]
   /**
    * Mount the built host row: opens the runtime and registers the definition.
+   * @param config - real deployment configuration for the row; defaults to `{}`.
    * @returns the runtime the row published.
    */
-  startNexus(): Promise<NexusRuntime>
+  startNexus(config?: NexusConfig): Promise<NexusRuntime>
   /**
    * Unload the host row as the Loader would on a plugin disable.
    * @returns after the row's fiber is disposed.
@@ -166,6 +191,12 @@ export interface PresetHarness {
   stopNexus(): Promise<void>
   /** The runtime the host row opened, once {@link PresetHarness.startNexus} ran. */
   readonly runtime: NexusRuntime
+  /**
+   * The rows one preset definition currently has mounted, in Loader order.
+   * @param presetId - preset identity; the `nexus` definition by default.
+   * @returns the module names and enablement the registry reports.
+   */
+  presetRows(presetId?: string): Promise<readonly { moduleName: string; enabled: boolean }[]>
   /**
    * The tool names one Agent's assembled request advertised.
    * @param agent - agent whose last request is read.
@@ -383,7 +414,7 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     // them would leave method-less services behind; these implementations keep
     // the executor's real policy resolution and argv path while replacing only
     // the host-side runner/process. Neither claims OS-sandbox or PTY proof.
-    await mountRecordingSandbox(ctx)
+    const sandbox = await mountRecordingSandbox(ctx)
     const subprocess = await mountSubprocessDouble(
       ctx,
       options.subprocessScript === undefined ? {} : { script: options.subprocessScript },
@@ -396,9 +427,23 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     await ctx.plugin(UserQuestions)
     await ctx.plugin(Commands)
     await ctx.plugin(TokenMeter)
+    // The shipped native compaction components, in the HOST realm, mounted before
+    // the Nexus row activates: this is the composition `detectNativeComposition`
+    // must read, not a service-shaped test object.
+    if (options.hostCompaction !== undefined) {
+      await ctx.plugin(BasicCompactionEngine, {})
+      if (options.hostCompaction === 'pair') await ctx.plugin(ToolResultPruner, {})
+    }
     // A deterministic provider answer, so a saved-result write is a real
     // publication through the shipped web runtime rather than an empty body.
     const web = await mountWebDouble(ctx, {
+      ...(options.webSearchError === undefined
+        ? {}
+        : {
+            search: (): never => {
+              throw options.webSearchError as Error
+            },
+          }),
       fetch: (request) => ({
         url: request.url,
         statusCode: 200,
@@ -412,8 +457,8 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     await ctx.plugin(ForkProvider)
     const fixture = await mountNexusStoreFixture({ ctx })
     await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
-    if (options.nativeToolNames !== undefined && options.nativeToolNames.length > 0) {
-      await ctx.plugin(globalToolsPlugin('nexus-native-replacements', options.nativeToolNames))
+    if (options.collisionToolNames !== undefined && options.collisionToolNames.length > 0) {
+      await ctx.plugin(globalToolsPlugin('nexus-collision-tools', options.collisionToolNames))
     }
     if (options.thirdPartyTools !== undefined && options.thirdPartyTools.length > 0) {
       await ctx.plugin(globalToolsPlugin('nexus-third-party-tools', options.thirdPartyTools))
@@ -433,6 +478,7 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       fs,
       web,
       attachments,
+      sandbox,
       subprocess,
       fixture,
       requests,
@@ -441,9 +487,9 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
         if (runtime === undefined) throw new Error('the Nexus host row is not mounted')
         return runtime
       },
-      async startNexus() {
+      async startNexus(config: NexusConfig = {}) {
         if (nexusFiber !== undefined) throw new Error('the Nexus host row is already mounted')
-        const fiber = ctx.plugin(hostRow, {})
+        const fiber = ctx.plugin(hostRow, config)
         await fiber
         nexusFiber = fiber as unknown as { dispose(): Promise<unknown> }
         const runtime = ctx.get('nexusRuntime')
@@ -454,6 +500,16 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
         const fiber = nexusFiber
         nexusFiber = undefined
         if (fiber !== undefined) await fiber.dispose()
+      },
+      async presetRows(presetId = 'nexus') {
+        const inventory = await ctx.agentPresets.compositionInventory()
+        const record = inventory.find((entry) => entry.id === presetId)
+        if (record === undefined) throw new Error(`no preset "${presetId}" is registered`)
+        if (record.broken !== undefined) throw new Error(`preset "${presetId}" is not usable: ${record.broken}`)
+        return (record.rows as readonly { moduleName: string; enabled: boolean }[]).map((row) => ({
+          moduleName: row.moduleName,
+          enabled: row.enabled,
+        }))
       },
       toolNamesOf(agent) {
         const own = requests.filter((request) => request.options.sessionId === agent.id)

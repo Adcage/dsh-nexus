@@ -9,10 +9,21 @@
  *   their observation policy, registered in the generation scope so they shadow
  *   the native tools of the same name for Nexus sessions only;
  * - the persona system-prompt section of the Nexus persona, per Agent;
- * - the exact-Agent membership the runtime needs, and the narrow tool filter
- *   that hides the first-party tools Nexus replaces;
+ * - the exact-Agent membership the runtime needs;
  * - the generation's cleanup facts, reported to the runtime instead of being
  *   logged as a hope.
+ *
+ * It deliberately applies no tool-name policy. The public tool registry exposes
+ * no provenance — a `ToolDefinition`/`ToolSchema` has no owner and
+ * `tools.restrict` takes plain name masks — so a name can never prove that a
+ * FIRST-PARTY plugin registered it. Filtering the names Nexus "replaces" would
+ * therefore also hide an unrelated third-party `bash`/`subagent`/`job_list`,
+ * which is a capability the user installed. Nexus does not need such a filter to
+ * avoid duplicates of its own making: the preset definition mounts none of the
+ * replaced native rows, and a same-name tool registered by a third party (or by
+ * the host composition) stays visible beside the Nexus tool that covers a
+ * similar capability. That co-existence is reported honestly in the tests and
+ * the task report, never resolved by guessing ownership.
  *
  * It owns no state: the store, settings, coordinator, prompt-session owner and
  * saved-result repository belong to the host row's {@link NexusRuntime}, which
@@ -73,49 +84,6 @@ export const inject: readonly string[] = Object.freeze([
 
 /** The row's own configuration schema; mirrors the deployment config. */
 export const Config = NexusConfigSchema
-
-/**
- * First-party tool names Nexus replaces with its own capability.
- *
- * These are the exact names the native first-party plugins register for
- * capabilities this preset provides itself (`bash`/`pwsh` for the shell,
- * `subagent*` for internal delegation, `job_*` for background processes). The
- * list is a name table, not an allowlist: a name on it is filtered only when the
- * global registry actually exposes it, and nothing else is ever named.
- */
-const REPLACED_NATIVE_TOOLS: readonly string[] = Object.freeze([
-  'bash',
-  'pwsh',
-  'bash_persistent',
-  'pwsh_persistent',
-  'subagent',
-  'subagent_fork',
-  'interrupt_agent',
-  'send_message',
-  'job_list',
-  'job_output',
-  'job_kill',
-])
-
-/**
- * Hide the first-party tools this preset replaces from one Nexus Agent.
- *
- * The registry has no provenance field, so ownership is verified the only way
- * the public surface allows: a name is filtered only when it is BOTH on the
- * fixed first-party replacement table AND currently visible in the global
- * layer. Nexus' own scoped registrations are never named, so its own tools
- * cannot be filtered by this call, and no unknown name is banned. A third-party
- * plugin that registers one of these exact names is indistinguishable at this
- * API and would be filtered too — recorded as a known limitation, not hidden.
- * @param agent - the exact Agent whose scope is restricted.
- * @param ctx - generation scope providing the tool registry.
- */
-function hideReplacedNativeTools(ctx: Context, agent: Agent): void {
-  const visible = new Set(ctx.tools.schemas().map((schema) => schema.name))
-  const deny = REPLACED_NATIVE_TOOLS.filter((tool) => visible.has(tool))
-  if (deny.length === 0) return
-  agent.ctx.tools.restrict({ deny })
-}
 
 /**
  * Refuse a Nexus tool call that no exact live Nexus Agent owns.
@@ -204,7 +172,6 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
   const onCreated = ctx.on('agent/created', ({ agent }) => {
     if (memberships.has(agent)) return undefined
     memberships.set(agent, runtime.markNexusAgent(agent))
-    hideReplacedNativeTools(ctx, agent)
     return undefined
   })
   const onDisposed = ctx.on('agent/disposed', ({ agent }) => {

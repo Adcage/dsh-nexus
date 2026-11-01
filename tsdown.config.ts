@@ -18,7 +18,16 @@ import type { UserConfig } from 'tsdown'
  *
  * `deps.neverBundle` is the current spelling of the deprecated top-level
  * `external`; the meaning is identical (mark these imports external rather than
- * resolve and inline them).
+ * resolve and inline them). It is load-bearing here, not decorative:
+ * `@deepseek-ai/*` packages carry identity-bearing classes (`HarnessError`,
+ * `FsError`, `TerminalError`, `TerminalBackendCleanupError`,
+ * `BashTerminalBackend`, …). Inlining a second copy breaks every
+ * `instanceof`-based classification across the plugin boundary — the native
+ * `ToolRuntime` would drop a `NexusError`'s code, and a native terminal refusal
+ * would stop being recognised — so the whole SDK namespace must resolve from the
+ * profile the plugin is installed into. The packages that are VALUE-imported at
+ * runtime are also declared as exact peers in `package.json`, so the requirement
+ * is visible to the installer instead of being inferred from the bundle.
  */
 const hostConfig: UserConfig = {
   entry: {
@@ -32,6 +41,7 @@ const hostConfig: UserConfig = {
   dts: true,
   sourcemap: true,
   clean: false,
+  deps: { neverBundle: [/^@deepseek-ai\//, 'schemastery'] },
   outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
 }
 

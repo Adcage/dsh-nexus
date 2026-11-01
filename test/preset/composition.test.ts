@@ -4,17 +4,20 @@
  * Every row in the definition is mounted by the shipped Loader and the shipped
  * `agentPresets` registry; the Nexus contribution row is the package's own built
  * sub-entry. Nothing is faked inside the composition: the only scripted members
- * are the model transport and the native web providers.
+ * are external boundaries (model transport, web providers, process spawn,
+ * confinement runner).
  *
  * The cases assert the fixed composition (the six Nexus tools plus the native
- * skill, question and todo surfaces), the absence of the first-party tools Nexus
- * replaces, the survival of a third-party contribution, an untouched `standard`
- * preset, one effective compaction mechanism, a real cold-path call chain and
+ * skill, question and todo surfaces), that a third-party tool is never filtered
+ * even when it uses a first-party capability's name, an untouched `standard`
+ * preset, the three compaction decisions, a real cold-path call chain and
  * repeated start/unload without registration growth.
  *
  * @module dsh-nexus/test/preset/composition
  */
 
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { NEXUS_PRESET_ID } from '../../src/preset/definition.ts'
@@ -26,31 +29,38 @@ const NEXUS_CORE = ['read', 'write', 'edit', 'shell', 'web', 'agent'] as const
 /** The native surfaces a Nexus session must keep. */
 const NATIVE_SURFACES = ['skill', 'ask_user_question', 'todo_write'] as const
 
-/** First-party tools Nexus replaces with its own capability. */
-const REPLACED = ['bash', 'pwsh', 'subagent', 'subagent_fork', 'job_list'] as const
+/**
+ * Names a THIRD-PARTY plugin registers that also describe first-party tools.
+ *
+ * Names carry no ownership: the public registry has no provenance, so nothing
+ * here may be treated as "native" and filtered.
+ */
+const COLLISION_NAMES = ['bash', 'pwsh', 'subagent', 'subagent_fork', 'job_list'] as const
 
 /**
- * Open a harness with the workspace baseline files a cold-path case needs.
- * @param withReplacements - register native-looking global tools as well.
+ * Open a harness whose global layer carries a third-party tool and a third-party
+ * plugin that happens to use first-party tool names.
  * @returns the mounted harness.
  */
-async function openHarness(withReplacements = true): Promise<PresetHarness> {
+async function openHarness(): Promise<PresetHarness> {
   return mountPresetHarness({
     thirdPartyTools: ['example_extra_tool'],
-    ...(withReplacements ? { nativeToolNames: [...REPLACED] } : {}),
+    collisionToolNames: [...COLLISION_NAMES],
   })
 }
 
 describe('nexus preset composition', () => {
-  it('adds the nexus core without filtering other presets or extra tools', async () => {
+  it('adds the nexus core without filtering any other contributor', async () => {
     const harness = await openHarness()
     try {
       const standardAgent = await harness.createAgent('standard-session', 'standard')
       await harness.runTurn(standardAgent, 'before')
       const standardBefore = harness.toolNamesOf(standardAgent)
-      // The native composition and the third-party contribution are visible
+      // The native surfaces and both third-party contributions are visible
       // before Nexus exists at all.
-      expect(standardBefore).toEqual(expect.arrayContaining([...NATIVE_SURFACES, 'example_extra_tool', ...REPLACED]))
+      expect(standardBefore).toEqual(
+        expect.arrayContaining([...NATIVE_SURFACES, 'example_extra_tool', ...COLLISION_NAMES]),
+      )
 
       await harness.startNexus()
       await harness.runTurn(standardAgent, 'after')
@@ -61,16 +71,23 @@ describe('nexus preset composition', () => {
       const names = harness.toolNamesOf(nexusAgent)
 
       expect(names).toEqual(expect.arrayContaining([...NEXUS_CORE, ...NATIVE_SURFACES, 'example_extra_tool']))
-      // The first-party tools Nexus replaces are hidden from Nexus only; the
-      // third-party tool is never filtered, and no unknown name is banned.
-      for (const replaced of REPLACED) expect(names).not.toContain(replaced)
+      // A name never proves who registered a tool: every colliding third-party
+      // tool stays visible to a Nexus session, beside the Nexus tool that covers
+      // the same capability. Their co-existence is the honest overlap this preset
+      // cannot resolve without provenance.
+      for (const collision of COLLISION_NAMES) {
+        expect(standardBefore).toContain(collision)
+        expect(names).toContain(collision)
+      }
+      expect(names).toContain('shell')
+      expect(names).toContain('agent')
     } finally {
       await harness.dispose()
     }
   }, 60_000)
 
   it('keeps one effective compaction mechanism inside the nexus scope', async () => {
-    const harness = await openHarness(false)
+    const harness = await mountPresetHarness({})
     try {
       await harness.startNexus()
       const agent = await harness.createAgent('nexus-compaction', NEXUS_PRESET_ID)
@@ -100,15 +117,111 @@ describe('nexus preset composition', () => {
       expect(prunedText.endsWith('A'.repeat(1_024))).toBe(true)
       // Within budget, nothing is rewritten.
       expect(pruner?.pruneContent([{ type: 'text', text: 'short' }])).toBeNull()
+
+      // The isolated group is Nexus-only: a `standard` session resolves no
+      // engine at all because the host realm has none, so the group cannot be
+      // compacting unrelated sessions.
+      const standardAgent = await harness.createAgent('standard-compaction', 'standard')
+      expect(harness.ctx.agentPresets.serviceFor(standardAgent, 'compaction' as 'llm')).toBeUndefined()
+      expect(standardAgent.ctx.get('compaction')).toBeUndefined()
+    } finally {
+      await harness.dispose()
+    }
+  }, 60_000)
+
+  it('inherits the host compaction pair instead of stacking its own group', async () => {
+    const harness = await mountPresetHarness({ hostCompaction: 'pair' })
+    try {
+      // The shipped native components, mounted in the host realm before the row
+      // starts: this is the pair `detectNativeComposition` must report.
+      const hostEngine = harness.ctx.get('compaction')
+      const hostPruner = harness.ctx.get('toolResultPruner')
+      expect(hostEngine).toBeDefined()
+      expect(hostPruner).toBeDefined()
+
+      await harness.startNexus()
+      const agent = await harness.createAgent('nexus-inherited', NEXUS_PRESET_ID)
+
+      // The definition composes no compaction row at all in this branch.
+      const rows = await harness.presetRows(NEXUS_PRESET_ID)
+      const modules = rows.map((row) => row.moduleName)
+      expect(modules).not.toContain('@deepseek-ai/dsh-compaction-basic')
+      expect(modules).not.toContain('@deepseek-ai/dsh-compaction-tool-result-pruner')
+      expect(modules).not.toContain('@deepseek-ai/dsh-command-compact')
+
+      // And the Agent's effective pair IS the inherited host pair: the preset
+      // provides no compaction service of its own (`serviceFor` reads only the
+      // preset's own subtree), while the Agent's scope chain resolves the native
+      // engine and pruner the host mounted. Cordis hands out a per-context
+      // traceable wrapper, so equality is checked on the resolved configuration
+      // and class, not on object identity across contexts.
+      expect(harness.ctx.agentPresets.serviceFor(agent, 'compaction' as 'llm')).toBeUndefined()
+      expect(harness.ctx.agentPresets.serviceFor(agent, 'toolResultPruner' as 'llm')).toBeUndefined()
+      const effectiveEngine = agent.ctx.get('compaction') as unknown as {
+        constructor: { name: string }
+        config: unknown
+        compactIfNeeded?: unknown
+      }
+      const effectivePruner = agent.ctx.get('toolResultPruner') as unknown as {
+        constructor: { name: string }
+        config: unknown
+        pruneSession?: unknown
+      }
+      expect(effectiveEngine).toBeDefined()
+      expect(effectivePruner).toBeDefined()
+      expect(effectiveEngine.constructor.name).toBe('BasicCompactionEngine')
+      expect(effectivePruner.constructor.name).toBe('ToolResultPruner')
+      expect(effectiveEngine.config).toEqual((hostEngine as unknown as { config: unknown }).config)
+      expect(effectivePruner.config).toEqual((hostPruner as unknown as { config: unknown }).config)
+      // One mechanism, and it is the one the host mounted: the operations the
+      // loop calls exist on the resolved instances.
+      expect(typeof effectiveEngine.compactIfNeeded).toBe('function')
+      expect(typeof effectivePruner.pruneSession).toBe('function')
+    } finally {
+      await harness.dispose()
+    }
+  }, 60_000)
+
+  it('refuses to compose when only half the inherited compaction pair exists', async () => {
+    const harness = await mountPresetHarness({ hostCompaction: 'partial' })
+    try {
+      expect(harness.ctx.get('compaction')).toBeDefined()
+      expect(harness.ctx.get('toolResultPruner')).toBeUndefined()
+
+      let failure: unknown
+      try {
+        await harness.startNexus()
+      } catch (error) {
+        failure = error
+      }
+      // The real public activation path fails closed, and it names the ambiguous
+      // capability rather than assuming the partial pair is complete.
+      expect(failure).toMatchObject({ name: 'NexusError', code: 'UNSUPPORTED_CAPABILITY' })
+      expect(String((failure as Error).message)).toMatch(/ambiguous/i)
+      expect(String((failure as Error).message)).toContain('toolResultPruner')
+      // Nothing half-composed survives the refusal.
+      expect(harness.ctx.get('nexusRuntime')).toBeUndefined()
+      const inventory = await harness.ctx.agentPresets.compositionInventory()
+      expect(inventory.map((entry) => entry.id)).not.toContain(NEXUS_PRESET_ID)
     } finally {
       await harness.dispose()
     }
   }, 60_000)
 
   it('serves the real cold path for storage, files, shell and prompts', async () => {
-    const harness = await openHarness(false)
+    const harness = await mountPresetHarness({
+      // The scripted spawn boundary answers a fixed stdout so the run's output
+      // page is assertable without executing anything.
+      subprocessScript: () => ({ stdout: 'FIXTURE STDOUT\n', exitCode: 0 }),
+    })
     try {
-      await harness.startNexus()
+      // A project-local fixture executable passed through the REAL deployment
+      // config. The recorded `SubprocessRuntime` boundary never executes it, so
+      // this proves the wiring (argv, cwd, confinement), not OS execution.
+      const fixtureExecutable = join(harness.workspace, 'fixture-bash.exe')
+      await writeFile(fixtureExecutable, 'fixture executable — never executed\n', 'utf8')
+      const runtime = await harness.startNexus({ bashPath: fixtureExecutable })
+      expect(runtime.getShellConfig().deployment.bashPath).toBe(fixtureExecutable)
       const agent = await harness.createAgent('nexus-cold', NEXUS_PRESET_ID)
 
       const written = await harness.call('write', { path: 'cold.txt', content: 'COLD PATH LINE\n' }, agent)
@@ -118,11 +231,40 @@ describe('nexus preset composition', () => {
       expect(read.value).toMatchObject({ kind: 'text', lines: [{ number: 1, text: 'COLD PATH LINE' }] })
 
       // The shell tool answers through the real process and terminal controllers.
-      // A `list` needs no host executable, so this case stays machine-independent:
-      // process/terminal spawning is Task 4/5's evidence, not this composition's.
-      const shell = await harness.call('shell', { action: 'list' }, agent)
-      expect(shell.isError).toBe(false)
-      expect(shell.value).toMatchObject({ action: 'list', processes: [], terminals: [] })
+      // A `list` proves the controllers are wired; a `run` below proves the
+      // executed-request shape through the recorded spawn and confinement seams.
+      const shellList = await harness.call('shell', { action: 'list' }, agent)
+      expect(shellList.isError).toBe(false)
+      expect(shellList.value).toMatchObject({ action: 'list', processes: [], terminals: [] })
+
+      expect(harness.ctx.get('sandboxPolicy')).toBeDefined()
+      const spawnsBefore = harness.subprocess.spawns.length
+      const confineBefore = harness.sandbox.calls.length
+      const run = await harness.call(
+        'shell',
+        { action: 'run', command: 'echo cold-run', engine: 'bash' },
+        agent,
+      )
+      expect(run.isError, JSON.stringify(run)).toBe(false)
+      const runValue = run.value as { action: string; process: { status: string }; page: { text: string } }
+      expect(runValue.action).toBe('run')
+      expect(runValue.process.status).toBe('exited')
+      expect(runValue.page.text).toContain('FIXTURE STDOUT')
+      // The provider received the configured executable, the documented bash
+      // argument shape and the session directory; the spawned argv is the one the
+      // confinement runner returned, not the raw one.
+      const rawArgv = [fixtureExecutable, '--noprofile', '--norc', '-c', 'echo cold-run']
+      expect(harness.subprocess.spawns).toHaveLength(spawnsBefore + 1)
+      const spawn = harness.subprocess.spawns.at(-1)
+      expect(spawn?.cwd).toBe(harness.workspace)
+      expect(spawn?.argv).toEqual(['nexus-sandbox', '--', ...rawArgv])
+      // Exactly one confinement was resolved for this run, against the session's
+      // effective policy, and it received the full raw argv.
+      expect(harness.sandbox.calls).toHaveLength(confineBefore + 1)
+      const confine = harness.sandbox.calls.at(-1)
+      expect(confine?.argv).toEqual(rawArgv)
+      expect(confine?.policy.mode).toBe('workspace-write')
+      expect(confine?.policy.workspaceRoot).toBe(harness.workspace)
 
       // The web tool publishes through the ONE repository the runtime owns and
       // reads the saved result back from the same store.
@@ -148,7 +290,7 @@ describe('nexus preset composition', () => {
   }, 60_000)
 
   it('repeats activation and unload without growing the registries', async () => {
-    const harness = await openHarness(false)
+    const harness = await mountPresetHarness({})
     try {
       const baseline = harness.ctx.tools.schemas().map((schema) => schema.name).sort()
       expect(baseline).not.toContain('read')
@@ -186,36 +328,46 @@ describe('nexus preset composition', () => {
     }
   }, 60_000)
 
-  it("publishes saved web results into the store the runtime's repository owns", async () => {
-    const harness = await openHarness(false)
+  it("publishes saved web results through the runtime's one repository instance", async () => {
+    const harness = await mountPresetHarness({})
     try {
       const runtime = await harness.startNexus()
       const first = await harness.createAgent('repo-first', NEXUS_PRESET_ID)
       const second = await harness.createAgent('repo-second', NEXUS_PRESET_ID)
 
-      const fetched = await harness.call('web', { action: 'fetch', urls: ['https://fixture.test/first'] }, first)
-      expect(fetched.isError).toBe(false)
-      const resultId = (fetched.value as { items: { resultId: string }[] }).items[0]?.resultId as string
+      // A transparent observer on the REAL repository instance: it forwards every
+      // publication to the shipped implementation and returns its result, so a
+      // tool that built its own repository over the same store would bypass it.
+      const repository = runtime.webResults
+      const realSave = repository.save.bind(repository)
+      const observed: string[] = []
+      repository.save = async (input) => {
+        observed.push(input.owner)
+        return realSave(input)
+      }
+      try {
+        const fetched = await harness.call('web', { action: 'fetch', urls: ['https://fixture.test/first'] }, first)
+        expect(fetched.isError).toBe(false)
+        const resultId = (fetched.value as { items: { resultId: string }[] }).items[0]?.resultId as string
+        // The genuine publish went through THIS instance, not merely the same store.
+        expect(observed).toEqual(['repo-first'])
 
-      // The tool published into the durable store the runtime's repository is
-      // built over, so reading through `runtime.webResults` finds the record the
-      // tool just handed out. Sharing the STORE is what this can observe; the
-      // repository INSTANCE is shared by construction (the preset hands
-      // `runtime.webResults` to every generation), and a distinguishing test for
-      // two publication chains would need the concurrent-publication race Task 13
-      // can attempt against a real deployment.
-      const saved = await runtime.webResults.read('repo-first', resultId)
-      expect(saved.document.resultId).toBe(resultId)
-      expect(saved.text).toContain('FIXTURE WEB BODY')
+        const saved = await runtime.webResults.read('repo-first', resultId)
+        expect(saved.document.resultId).toBe(resultId)
+        expect(saved.text).toContain('FIXTURE WEB BODY')
 
-      // A second Nexus session and a second generation both reach the same
-      // authoritative repository, which keeps each durable owner separate.
-      const otherFetched = await harness.call('web', { action: 'fetch', urls: ['https://fixture.test/second'] }, second)
-      expect(otherFetched.isError).toBe(false)
-      const otherId = (otherFetched.value as { items: { resultId: string }[] }).items[0]?.resultId as string
-      await expect(runtime.webResults.read('repo-first', otherId)).rejects.toMatchObject({
-        code: 'RESOURCE_NOT_AVAILABLE',
-      })
+        // A second Nexus session publishes through the same authoritative
+        // instance, which keeps each durable owner separate.
+        const otherFetched = await harness.call('web', { action: 'fetch', urls: ['https://fixture.test/second'] }, second)
+        expect(otherFetched.isError).toBe(false)
+        const otherId = (otherFetched.value as { items: { resultId: string }[] }).items[0]?.resultId as string
+        expect(observed).toEqual(['repo-first', 'repo-second'])
+        await expect(runtime.webResults.read('repo-first', otherId)).rejects.toMatchObject({
+          code: 'RESOURCE_NOT_AVAILABLE',
+        })
+      } finally {
+        repository.save = realSave
+      }
       expect(harness.ctx.get('nexusRuntime')).toBe(runtime)
     } finally {
       await harness.dispose()
@@ -223,7 +375,7 @@ describe('nexus preset composition', () => {
   }, 60_000)
 
   it('exposes every nexus tool definition only through the nexus scope', async () => {
-    const harness = await openHarness(false)
+    const harness = await mountPresetHarness({})
     try {
       await harness.startNexus()
       const standardAgent = await harness.createAgent('standard-scope', 'standard')
