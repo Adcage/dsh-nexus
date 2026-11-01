@@ -1,0 +1,13 @@
+# Product build, dependency and runtime output. Orchestration/runtime state is
+# excluded locally in `.git/info/exclude`; the entries repeated here keep the
+# working copy clean for anyone who clones the repository.
+node_modules/
+lib/
+dist/
+coverage/
+.dev-home/
+.pnpm-store/
+
+# Local logs and TypeScript build metadata.
+*.log
+*.tsbuildinfo

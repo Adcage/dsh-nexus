@@ -1,0 +1,5 @@
+# pnpm reads build-script approval from this file rather than from package.json.
+# esbuild's postinstall is what makes vitest and tsdown usable, so exactly that
+# one script is approved instead of every dependency's install script.
+onlyBuiltDependencies:
+  - esbuild
