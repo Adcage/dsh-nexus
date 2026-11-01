@@ -88,7 +88,10 @@ describe('canonical write scopes', () => {
 })
 
 describe('writer isolation', () => {
-  it('lets two writers hold isolated directories at the same time', async () => {
+  it('lets two writers hold disjoint scopes at the same time', async () => {
+    // A coordinator-level property: disjoint canonical scopes do not overlap.
+    // Nexus leases the granted workspace ROOT, so two writers of one session
+    // never reach this case — they overlap by definition (see the policy tests).
     const { harness, parent, first, second } = await openScopes()
     const coordinator = createWriteCoordinator(harness.ctx)
     const left = await coordinator.acquire(parent, SessionId('writer-left'), first)
@@ -173,6 +176,21 @@ describe('writer isolation', () => {
     // The old tree is free for another writer once the child moved away.
     const other = await coordinator.acquire(parent, SessionId('writer-two'), first)
     other.release()
+  })
+
+  it('keeps the current tree when a same-child move is refused', async () => {
+    const { harness, parent, first, second } = await openScopes()
+    const coordinator = createWriteCoordinator(harness.ctx)
+    await coordinator.acquire(parent, SessionId('writer-one'), first)
+    await coordinator.acquire(parent, SessionId('writer-two'), second)
+
+    // The move cannot be granted, so the child must not lose the tree it holds.
+    await expect(coordinator.acquire(parent, SessionId('writer-one'), second)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+    await expect(coordinator.acquire(parent, SessionId('writer-three'), first)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
   })
 
   it('does not keep authority for a writer whose owner and child are both gone', async () => {

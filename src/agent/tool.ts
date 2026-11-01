@@ -271,7 +271,7 @@ export function createAgentTool(
     description:
       'Delegate work to internal child agents and control them. Actions: start (run one child), list (this session\'s direct children), status (one child), read (a bounded page of a child\'s events by zero-based event position), wait (bounded wait), message (steer or continue a live child), interrupt (ask a child to stop; acknowledgement only), stop (stop one child and await the native release), continue (reuse the same child conversation), batch (up to ' +
       `${AGENT_BATCH_MAX_TASKS} starts, parallel or sequence). ` +
-      'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, write children run inside the workspace this session may write and hold an exclusive directory scope. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
+      'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, and a write child is bounded by this session\'s granted workspace and holds an exclusive scope over that whole workspace root (not over its subdirectory), so this session can have one writer child at a time. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
     parameters: {
       action: {
         type: 'string',
@@ -296,7 +296,7 @@ export function createAgentTool(
       cwd: {
         type: 'string',
         description:
-          'start only: the child\'s working directory, absolute or relative to this session. A write child must stay inside the workspace this session may write.',
+          'start only: the child\'s working directory, absolute or relative to this session. It must stay inside this session\'s granted workspace; a write child\'s exclusive scope is that whole workspace root, so two writers of one session cannot run in parallel even in different subdirectories.',
       },
       access: {
         type: 'string',
@@ -321,7 +321,7 @@ export function createAgentTool(
         type: 'string',
         enum: ['parallel', 'sequence'],
         description:
-          'batch only: "parallel" (default) starts every accepted task at once within the concurrency limit; "sequence" runs one task to completion and releases it before starting the next.',
+          'batch only: "parallel" (default) starts every accepted task at once within the concurrency limit; "sequence" waits for each child\'s own completion and confirmed release before starting the next, and never stops a running child on a timer.',
       },
       tasks: {
         type: 'array',
@@ -418,10 +418,16 @@ function startedView(started: StartedChild): Omit<AgentValue, 'action'> {
  * Start a batch, keeping the input order.
  *
  * `parallel` starts every item within the configured concurrency limit; an item
- * over the limit reports its own failure. `sequence` runs one item to its
- * native settlement and confirmed release before starting the next, so two
- * writing tasks never overlap. After the caller cancels, no further item starts
- * and every remaining item is reported individually.
+ * over the limit reports its own failure.
+ *
+ * `sequence` runs one item at a time and waits for that exact activation's own
+ * settlement — never for a fixed wait slice and never for an idle boundary it
+ * could stop at, because a child that has queued work is idle between turns
+ * without having finished. Caller cancellation is the only way that wait ends
+ * early, and it reaches the child through its own start signal. After
+ * settlement the selected child is drained; a failed drain is reported on that
+ * item and NO following item starts, because a possibly live writer must not be
+ * joined by another one. The unstarted items say so individually.
  * @param runtime - child runtime.
  * @param owner - exact caller.
  * @param mode - parallel or sequence.
@@ -459,17 +465,51 @@ async function runBatch(
   }
 
   for (const [index, task] of tasks.entries()) {
-    await startOne(task, index)
-    const item = items[index]
-    if (item?.ok !== true || item.childId === undefined) continue
-    const started = await runtime.status(owner, SessionId(item.childId)).catch(() => undefined)
-    if (started?.live === true) {
-      await runtime.wait(owner, SessionId(item.childId), WAIT_MAX_MS).catch(() => undefined)
+    if (signal.aborted) {
+      items[index] = { index, ok: false, code: 'ABORTED', message: 'the caller cancelled before this task started' }
+      continue
     }
-    // Confirm the native release of THIS child before the next task starts.
-    await runtime.stop(owner, SessionId(item.childId)).catch(() => undefined)
+    let started
+    try {
+      started = await runtime.start(owner, task)
+    } catch (error) {
+      items[index] = failureItem(error, index)
+      continue
+    }
+    items[index] = { index, ok: true, ...startedView(started) }
+    // Wait for THIS run's own settlement. The promise settles when that exact
+    // activation ends; cancellation of the caller reaches the child through the
+    // start signal, so this wait is bounded by the work, not by a timer.
+    await started.settled
+    // Confirm the native release of exactly this child before the next task.
+    try {
+      await runtime.stop(owner, SessionId(started.childId))
+    } catch (error) {
+      items[index] = { ...(items[index] as BatchItem), ...failureItem(error, index) }
+      markNotStarted(items, tasks.length, index + 1, `batch item ${index} could not be released`)
+      break
+    }
   }
   return { action: 'batch', batchMode: mode, items: items.map((item) => item as BatchItem) }
+}
+
+/**
+ * Report every still-unstarted item after a sequence stopped early.
+ * @param items - item rows being built.
+ * @param total - number of inputs.
+ * @param from - first index that never started.
+ * @param reason - why the sequence stopped, in model-facing wording.
+ */
+function markNotStarted(items: (BatchItem | undefined)[], total: number, from: number, reason: string): void {
+  for (let index = from; index < total; index += 1) {
+    if (items[index] !== undefined) continue
+    items[index] = {
+      index,
+      ok: false,
+      code: 'RESOURCE_NOT_AVAILABLE',
+      message: `not started because ${reason}; the selected child is still held, so retry after it is released`,
+    }
+  }
 }
 
 /** Project one failure into its item row. */

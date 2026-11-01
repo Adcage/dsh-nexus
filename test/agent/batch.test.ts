@@ -12,12 +12,13 @@
 
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
+import { SubagentError, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
+import { DEFAULT_SETTINGS, WAIT_MAX_MS } from '../../src/runtime/defaults.ts'
 import { createAgentTool } from '../../src/agent/tool.ts'
 import { createWriteCoordinator } from '../../src/agent/coordination.ts'
 import { registerChildPolicy } from '../../src/agent/policy.ts'
@@ -244,5 +245,75 @@ describe('parallel versus sequence write coordination', () => {
     expect(childSessions).toEqual([firstSession])
     const listed = valueOf(await testCase.call({ action: 'list' }))
     expect((listed.children as { childId: string }[]).map((child) => child.childId)).toContain(firstSession)
+  })
+
+  it('waits for the item\'s own settlement and schedules no wait slice', async () => {
+    const testCase = await openCase({ hold: 'children' })
+    const { harness } = testCase
+    const childRequests = () =>
+      harness.requests.filter((request) => request.options.sessionId !== testCase.parent.id)
+
+    // A sequence item is running while its answer is held. A fixed wait slice
+    // would show up as one long timer; the settled-answer path schedules none.
+    const spy = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      const batch = testCase.call({
+        action: 'batch',
+        mode: 'sequence',
+        tasks: [{ task: 'first' }, { task: 'second' }],
+      })
+      await waitFor(() => childRequests().length === 1, 'the first sequence request')
+      const firstId = childRequests()[0]?.options.sessionId ?? ''
+      // The item is genuinely still running, and nothing else was started.
+      expect(harness.ctx.agents.get(SessionId(firstId))?.status).toBe('running')
+      expect(childRequests()).toHaveLength(1)
+
+      harness.releaseFor(firstId)
+      await waitFor(() => childRequests().length === 2, 'the second sequence item to start')
+      harness.releaseAll()
+
+      const items = itemsOf(valueOf(await batch))
+      expect(items.map((item) => item.ok)).toEqual([true, true])
+      expect(childRequests()[0]?.options.sessionId).toBe(firstId)
+      // No 30 s wait slice: the batch waited for the run itself.
+      const longTimers = spy.mock.calls
+        .map((call) => call[1])
+        .filter((delay): delay is number => typeof delay === 'number' && delay >= 1_000)
+      expect(longTimers).not.toContain(WAIT_MAX_MS)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('does not start the next item when the selected child could not be released', async () => {
+    const testCase = await openCase({ hold: 'children' })
+    const { harness } = testCase
+    const original = SubagentRuntime.prototype.drainChildren
+    SubagentRuntime.prototype.drainChildren = function refuseDrain(): Promise<void> {
+      return Promise.reject(new SubagentError('simulated teardown failure for the selected child', 'ACTIVATION_TEARDOWN_FAILED'))
+    }
+    try {
+      const batch = testCase.call({
+        action: 'batch',
+        mode: 'sequence',
+        tasks: [{ task: 'first' }, { task: 'second' }],
+      })
+      const childRequests = () =>
+        harness.requests.filter((request) => request.options.sessionId !== testCase.parent.id)
+      await waitFor(() => childRequests().length === 1, 'the first sequence request')
+      const firstId = childRequests()[0]?.options.sessionId ?? ''
+      harness.releaseFor(firstId)
+      harness.releaseAll()
+      const items = itemsOf(valueOf(await batch))
+
+      // The run finished but the release is unconfirmed: the item says so and no
+      // following item may start over a possibly live writer.
+      expect(items[0]).toMatchObject({ index: 0, ok: false, code: 'ACTIVATION_TEARDOWN_FAILED', childId: firstId })
+      expect(items[1]).toMatchObject({ index: 1, ok: false })
+      expect(items[1]?.code).toBe('RESOURCE_NOT_AVAILABLE')
+      expect(childRequests()).toHaveLength(1)
+    } finally {
+      SubagentRuntime.prototype.drainChildren = original
+    }
   })
 })

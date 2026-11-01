@@ -15,17 +15,37 @@ import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { NexusStore } from '../../src/storage/store.ts'
-import { admitChildPolicy, registerChildPolicy, type ChildAccess } from '../../src/agent/policy.ts'
-import { createWriteCoordinator, directoryKey, type WriteCoordinator } from '../../src/agent/coordination.ts'
+import {
+  admitChildPolicy,
+  confirmFailedStartCleanup,
+  registerChildPolicy,
+  type ChildAccess,
+} from '../../src/agent/policy.ts'
+import { canonicalDirectory, createWriteCoordinator, directoryKey, type WriteCoordinator } from '../../src/agent/coordination.ts'
 import { createFsTools } from '../../src/fs/read.ts'
+import { createShellTool } from '../../src/shell/tool.ts'
+import type { ShellExecutionConfig } from '../../src/shell/engines.ts'
 import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
-import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
+import {
+  mountNexusStoreFixture,
+  mountRecordingSandbox,
+  mountSubprocessDouble,
+  type NexusStoreFixture,
+} from '../support/fixtures.ts'
 import { mountSubagentHarness, waitFor, type SubagentHarness } from '../support/agent-harness.ts'
+
+/** Bash pairing over the running Node executable; no shell is actually spawned. */
+const BASH_CONFIG: ShellExecutionConfig = {
+  deployment: {},
+  terminal: { engine: 'bash', bashPath: process.execPath },
+}
 
 /** Everything one case owns, disposed after it. */
 interface OpenCase {
@@ -409,5 +429,143 @@ describe('policy revalidation beyond creation', () => {
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
     expect(effectiveMode(testCase, resumed)).toBe('workspace-write')
     harness.releaseFor('write-child')
+  })
+})
+
+describe('the leased scope is the workspace a writer can actually write', () => {
+  it('refuses a second writer in a sibling subdirectory of one granted workspace', async () => {
+    const testCase = await openCase()
+    const { harness, openStore } = testCase
+    const left = join(harness.workspace, 'left')
+    const right = join(harness.workspace, 'right')
+    await mkdir(left, { recursive: true })
+    await mkdir(right, { recursive: true })
+
+    // The native fence for both children is the whole granted workspace, so a
+    // writer in `right` could still mutate `left`: the two scopes overlap in
+    // fact even though the requested directories differ.
+    const first = await startChild(testCase, 'writer-left', 'write', left)
+    expect(first.cwd).toBeTruthy()
+    await expect(startChild(testCase, 'writer-right', 'write', right)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+    expect(await openStore.getChildPolicy('writer-right')).toBeUndefined()
+    expect(harness.ctx.agents.get(SessionId('writer-right'))).toBeUndefined()
+  })
+
+  it('still recommends the actually granted workspace as the child workspace root', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness } = testCase
+    const nested = join(harness.workspace, 'nested')
+    await mkdir(nested, { recursive: true })
+    const started = await startChild(testCase, 'writer-nested', 'write', nested)
+    await waitFor(() => harness.requestsOf('writer-nested').length === 1, 'the child request')
+
+    // The requested directory stays the working directory; the enforced write
+    // root is the whole session workspace and is what the lease covers.
+    expect(directoryKey(started.cwd)).toBe(directoryKey(await canonicalDirectory(nested)))
+    expect(
+      directoryKey(harness.ctx.sandboxPolicy.resolve({ session: started.child.session }).workspaceRoot),
+    ).toBe(directoryKey(await canonicalDirectory(harness.workspace)))
+    const lease = testCase.coordinator.acquire(testCase.parent, SessionId('other-writer'), harness.workspace)
+    await expect(lease).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
+    harness.releaseFor('writer-nested')
+  })
+
+  it('admits writers of two different authorized workspace roots side by side', async () => {
+    const testCase = await openCase()
+    const { harness, openStore } = testCase
+    const mine = join(harness.workspace, 'mine')
+    await mkdir(mine, { recursive: true })
+    const otherRoot = join(harness.root, 'other-workspace')
+    await mkdir(otherRoot, { recursive: true })
+    const other = await harness.createParent('policy-parent-two', otherRoot)
+
+    const first = await startChild(testCase, 'writer-mine', 'write', mine)
+    expect(first.cwd).toBeTruthy()
+    // A different authorized session owns a different granted root, so its
+    // writer does not overlap mine.
+    const secondRoot = harness.ctx.sandboxPolicy.resolve({ session: other.session })
+    expect(directoryKey(secondRoot.workspaceRoot)).toBe(directoryKey(await canonicalDirectory(otherRoot)))
+    const admission = await admitChildPolicy(
+      harness.ctx,
+      openStore,
+      testCase.coordinator,
+      { agent: other, sessionId: other.id, signal: new AbortController().signal },
+      { childId: SessionId('writer-other'), cwd: otherRoot, access: 'write', maxDepth: 2 },
+    )
+    expect(admission.policy.access).toBe('write')
+    await admission.abandon()
+  })
+
+  it('keeps a read-only child out of the shell path through the real confinement call', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness } = testCase
+    const provider = await mountRecordingSandbox(harness.ctx)
+    const subprocess = await mountSubprocessDouble(harness.ctx, { script: () => ({ exitCode: 0, stdout: 'ok' }) })
+    // The shell tool owns ordinary runs through the native job registry.
+    await harness.ctx.plugin(LocalJobRegistry)
+    harness.register(createShellTool(harness.ctx, () => BASH_CONFIG))
+
+    const started = await startChild(testCase, 'read-child', 'read', harness.workspace)
+    await waitFor(() => harness.requestsOf('read-child').length === 1, 'the child request')
+    const run = await harness.ctx.tools.execute({
+      callId: ToolCallId('child-shell'),
+      name: 'shell',
+      arguments: { action: 'run', command: 'echo confined', cwd: harness.workspace },
+      agent: started.child,
+      signal: new AbortController().signal,
+    })
+
+    expect(run.isError, `${run.error?.message ?? ''} ${JSON.stringify(run.error?.info ?? {})}`).toBe(false)
+    // The child's own narrowed policy reached the native confinement call: no
+    // bare unconfined spawn is possible for a read-only child.
+    expect(provider.calls).toHaveLength(1)
+    expect(provider.calls[0]?.policy.mode).toBe('read-only')
+    expect(provider.calls[0]?.policy.sessionId).toBe('read-child')
+    expect(provider.calls[0]?.policy.workspaceRoot).toBe(harness.workspace)
+    const argv = [process.execPath, '--noprofile', '--norc', '-c', 'echo confined']
+    expect(provider.calls[0]?.argv).toEqual(argv)
+    expect(subprocess.spawns[0]?.argv).toEqual(['nexus-sandbox', '--', ...argv])
+    harness.releaseFor('read-child')
+  })
+})
+
+describe('failed native start cleanup authority', () => {
+  it('does not release the reservation while the child is still live', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness, openStore } = testCase
+    const scope = join(harness.workspace, 'cleanup-scope')
+    await mkdir(scope, { recursive: true })
+    const started = await startChild(testCase, 'cleanup-child', 'write', scope)
+    await waitFor(() => harness.requestsOf('cleanup-child').length === 1, 'the child request')
+
+    // A still-live writer is never released by a plain rejection: the public
+    // registries still name it, so the reservation and its scope stay held.
+    expect(confirmFailedStartCleanup(harness.ctx, started.childId, new Error('start failed'))).toBe(false)
+    // A teardown failure is unconfirmed cleanup even without a live child.
+    expect(
+      confirmFailedStartCleanup(
+        harness.ctx,
+        started.childId,
+        new SubagentError('teardown failed', 'ACTIVATION_TEARDOWN_FAILED'),
+      ),
+    ).toBe(false)
+    harness.releaseFor('cleanup-child')
+    void openStore
+  })
+
+  it('confirms cleanup once neither an Agent nor a session names the child', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness, openStore } = testCase
+    const scope = join(harness.workspace, 'cleanup-scope-two')
+    await mkdir(scope, { recursive: true })
+    const started = await startChild(testCase, 'cleanup-child-two', 'write', scope)
+    await waitFor(() => harness.requestsOf('cleanup-child-two').length === 1, 'the child request')
+    harness.releaseFor('cleanup-child-two')
+    await waitFor(() => harness.ctx.agents.get(started.childId) === undefined, 'the child to be released')
+    expect(harness.ctx.sessions.get(started.childId)).toBeUndefined()
+    expect(confirmFailedStartCleanup(harness.ctx, started.childId, new Error('start failed'))).toBe(true)
+    void openStore
   })
 })

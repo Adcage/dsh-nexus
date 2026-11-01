@@ -11,11 +11,23 @@
  * step, because a resident child can be woken again without a new creation
  * edge.
  *
- * A `read` child runs `read-only`. A `write` child runs `workspace-write`
- * inside its own canonical root, may only be granted a directory inside the
- * delegating parent's effective workspace root, and holds an exclusive write
- * lease for that tree (see `coordination.ts`). A parent that is itself
- * read-only cannot delegate write access at all.
+ * A `read` child runs `read-only`. A `write` child runs `workspace-write`,
+ * which the native policy service fences by its session's workspace root — for
+ * a delegated child that root is the delegating session's workspace, not the
+ * subdirectory the child was asked to use. The lease therefore covers that
+ * whole granted root, so one workspace has at most one writer child no matter
+ * which subdirectories two children name. The requested directory stays the
+ * child's working directory and must live inside the granted root. A parent
+ * that is itself read-only cannot delegate write access at all.
+ *
+ * Product limitation, stated because it is a real capability boundary of the
+ * installed SDK: there is no public way to give a child a narrower
+ * `workspace-write` root than its session workspace (`SandboxPolicyService`
+ * resolves the root from the immutable session header; `setSandboxMode` carries
+ * only a mode). Parallel writers isolated by subdirectory or worktree under ONE
+ * delegating session are therefore unsupported; a worktree-isolated writer works
+ * only when that session's own workspace already is that worktree. Removing this
+ * needs a public per-child root API, not a Nexus workaround.
  *
  * Missing enforcement fails closed: without the shared policy service a child
  * whose policy record says "read" cannot be proven read-only, so admission and
@@ -28,10 +40,12 @@ import { isAbsolute, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { ChildPolicy } from '../protocol.ts'
 import type { CallOwner } from '../runtime/owner.ts'
 import { NexusError } from '../runtime/errors.ts'
@@ -62,11 +76,18 @@ export interface ChildAdmissionRequest {
 export interface ChildAdmission {
   /** The record persisted before the native child was published. */
   readonly policy: ChildPolicy
-  /** The lease a write child holds for its tree. */
+  /** The lease a write child holds for its actual granted workspace root. */
   readonly lease: WriteLease | undefined
   /**
-   * Give this reservation back after a native start failed. The native start's
-   * rejection is the cleanup proof: the runtime rolled back before rejecting.
+   * Give this reservation back after a native start failed.
+   *
+   * A native rejection is NOT universal cleanup proof: the runtime logs a
+   * rollback failure instead of surfacing it (`startExternal` warns and
+   * `materializeTracked` swallows it), and a teardown failure is only visible as
+   * `ACTIVATION_TEARDOWN_FAILED`. Call this only when
+   * {@link confirmFailedStartCleanup} confirmed that no Agent and no Session
+   * still carry the reserved child id; otherwise keep the policy and the lease
+   * and let the native `agent/disposed` edge release them.
    */
   abandon(): Promise<void>
 }
@@ -147,12 +168,48 @@ async function policyOf(store: NexusStore, agent: Agent): Promise<ChildPolicy | 
 }
 
 /**
+ * Whether a rejected native start proves that nothing of that child survived.
+ *
+ * The native runtime rolls its own resources back before rethrowing, but a
+ * rollback failure is only logged (`startExternal`/`materializeTracked`), and a
+ * teardown failure surfaces as `ACTIVATION_TEARDOWN_FAILED`. A bare rejection is
+ * therefore NOT universal cleanup proof. This predicate accepts exactly two
+ * public facts as proof: the rejection does not name a teardown failure, AND no
+ * live Agent and no live Session still carry the reserved child id. Anything
+ * else keeps the reservation (fail closed) until the native release edge.
+ * @param ctx - context providing the Agent registry and Session store.
+ * @param childId - reserved child id whose start was rejected.
+ * @param error - the rejection the native start produced.
+ * @returns true only when both registries prove the child is gone.
+ */
+export function confirmFailedStartCleanup(ctx: Context, childId: SessionIdType, error: unknown): boolean {
+  if (error instanceof SubagentError && error.code === 'ACTIVATION_TEARDOWN_FAILED') return false
+  const agents = ctx.get('agents')
+  const sessions = ctx.get('sessions')
+  if (agents === undefined || sessions === undefined) return false
+  return agents.get(childId) === undefined && sessions.get(childId) === undefined
+}
+
+/**
+ * Resolve the workspace root one session's writes are actually fenced by.
+ * @param service - shared sandbox policy service.
+ * @param session - session whose root is required.
+ * @returns the canonical granted workspace root.
+ * @throws NexusError `INVALID_ARGUMENT` when the root does not resolve.
+ */
+async function grantedWorkspaceRoot(service: SandboxPolicyService, session: Session): Promise<string> {
+  const resolved = service.resolve({ session })
+  return canonicalDirectory(resolved.workspaceRoot)
+}
+
+/**
  * Admit one child: validate and canonicalize its directory, reserve its write
  * scope and persist its policy.
  *
- * Nothing is published here; the caller starts the native activation with
- * {@link ChildAdmission.policy}'s canonical directory, and calls
- * {@link ChildAdmission.abandon} if that start fails.
+ * The reserved scope is the workspace root the child can actually write, not
+ * the requested directory; see the module note on the resulting product
+ * limitation. Nothing is published here; the caller starts the native
+ * activation with {@link ChildAdmission.policy}'s canonical directory.
  * @param ctx - context providing the policy and directory services.
  * @param store - durable store that keeps the child policy.
  * @param coordinator - shared write coordinator.
@@ -160,7 +217,7 @@ async function policyOf(store: NexusStore, agent: Agent): Promise<ChildPolicy | 
  * @param request - reserved id, directory, access and depth cap.
  * @returns the admission.
  * @throws NexusError `INVALID_ARGUMENT` for a refused directory, access or depth.
- * @throws NexusError `WRITE_SCOPE_BUSY` when another writer overlaps the tree.
+ * @throws NexusError `WRITE_SCOPE_BUSY` when the granted workspace already has a writer.
  * @throws NexusError `UNSUPPORTED_CAPABILITY` when enforcement is unavailable.
  */
 export async function admitChildPolicy(
@@ -194,25 +251,29 @@ export async function admitChildPolicy(
     : resolvePath(parentDirectory ?? parent.workspaceRoot, request.cwd)
   const cwd = await canonicalDirectory(requested)
 
-  if (request.access === 'write') {
+  // The native fence for a delegated child is this whole workspace root: the
+  // child session inherits the delegating session's header cwd, and the policy
+  // service derives `workspace-write` from exactly that root. A writer whose
+  // working directory left it could not write where it works, and its exclusive
+  // scope is the root itself; a read child may still be pointed anywhere.
+  const grantedRoot = request.access === 'write' ? await canonicalDirectory(parent.workspaceRoot) : undefined
+  if (request.access === 'write' && grantedRoot !== undefined) {
     if (MODE_RANK[parent.mode] < MODE_RANK['workspace-write']) {
       throw new NexusError(
         'INVALID_ARGUMENT',
         `cannot start a writing child: this session runs read-only, and delegation never widens its own access`,
       )
     }
-    if (parent.mode === 'workspace-write') {
-      const granted = await canonicalDirectory(parent.workspaceRoot)
-      if (!scopeContains(granted, cwd)) {
-        throw new NexusError(
-          'INVALID_ARGUMENT',
-          `cannot start a writing child in "${cwd}": it is outside the workspace this session may write (${granted})`,
-        )
-      }
+    if (!scopeContains(grantedRoot, cwd)) {
+      throw new NexusError(
+        'INVALID_ARGUMENT',
+        `cannot start a writing child in "${cwd}": it is outside the workspace root its writes would be limited to (${grantedRoot})`,
+      )
     }
   }
 
-  const lease = request.access === 'write' ? await coordinator.acquire(owner.agent, request.childId, cwd) : undefined
+  const lease =
+    grantedRoot === undefined ? undefined : await coordinator.acquire(owner.agent, request.childId, grantedRoot)
   const policy: ChildPolicy = Object.freeze({
     childId: request.childId,
     parentSessionId: owner.sessionId,
@@ -243,9 +304,10 @@ export async function admitChildPolicy(
  * `agent/created` runs (serially, awaited by the loop) before the child's first
  * request, after the native delegation policy seed, so the narrower mode wins.
  * `agent/pre-step` covers every later step of a resident child, which is woken
- * without a second creation edge. A write child must own its tree again on
- * resume; if another writer holds it the child is not created, because the
- * promised exclusive scope cannot be honored.
+ * without a second creation edge. A write child must own its ACTUAL granted
+ * workspace root again on resume — re-derived from the native policy for the
+ * resumed session, never from the smaller requested directory — because a
+ * resume must not restore a narrower lease than the fence it runs under.
  * @param ctx - registration scope.
  * @param store - durable store holding child policies.
  * @param coordinator - shared write coordinator.
@@ -257,8 +319,16 @@ export function registerChildPolicy(ctx: Context, store: NexusStore, coordinator
     if (policy === undefined) return
     narrowToPolicy(ctx, policy, agent)
     if (policy.access !== 'write') return
+    const service = requirePolicy(ctx, `child "${policy.childId}"`)
+    const root = await grantedWorkspaceRoot(service, agent.session)
+    if (!scopeContains(root, policy.cwd)) {
+      throw new NexusError(
+        'UNSUPPORTED_CAPABILITY',
+        `child "${agent.id}" was admitted in "${policy.cwd}", which is outside the workspace its session can now write (${root}); refusing to resume an unenforceable write scope`,
+      )
+    }
     const parent = ctx.get('agents')?.get(SessionId(policy.parentSessionId))
-    await coordinator.acquire(parent ?? agent, agent.id, policy.cwd)
+    await coordinator.acquire(parent ?? agent, agent.id, root)
   })
   const onStep = ctx.on('agent/pre-step', async ({ agent }, next) => {
     const policy = await policyOf(store, agent)

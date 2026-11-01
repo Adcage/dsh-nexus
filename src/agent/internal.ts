@@ -47,8 +47,9 @@ import { NexusError } from '../runtime/errors.ts'
 import type { CallOwner } from '../runtime/owner.ts'
 import type { ChildPolicy, RuntimeSettings } from '../protocol.ts'
 import type { NexusStore } from '../storage/store.ts'
-import { admitChildPolicy, type ChildAccess } from './policy.ts'
+import { admitChildPolicy, confirmFailedStartCleanup, type ChildAccess } from './policy.ts'
 import type { WriteCoordinator } from './coordination.ts'
+import { takeUtf8Prefix } from '../shell/output.ts'
 
 /** How a child is created. */
 export type ChildContext = 'spawn' | 'fork'
@@ -411,8 +412,13 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
   }
 
   /**
-   * Admit and natively start one child, releasing the reservation if the start
-   * fails after the native runtime rolled its own resources back.
+   * Admit and natively start one child.
+   *
+   * A rejected start releases the reservation only when the cleanup is PROVEN:
+   * the rejection is not a teardown failure and neither public registry still
+   * names the child. Otherwise the policy record and the write lease stay held,
+   * because a writer may still be alive, and the caller is told so explicitly;
+   * the native `agent/disposed` edge releases them later.
    * @param owner - exact caller.
    * @param childId - reserved child id.
    * @param provider - resolved in-process provider name.
@@ -454,8 +460,15 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       })
       return { access: admitted.policy.access, cwd: admitted.policy.cwd, activation }
     } catch (error) {
-      await admitted.abandon()
-      throw translateNative(error, `starting child "${childId}"`)
+      if (confirmFailedStartCleanup(ctx, childId, error)) {
+        await admitted.abandon()
+        throw translateNative(error, `starting child "${childId}"`)
+      }
+      throw new NexusError(
+        'RESOURCE_NOT_AVAILABLE',
+        `child "${childId}" did not start and the native rollback could not be confirmed, so its write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) and policy stay held for that child id until the native runtime releases it`,
+        { cause: error },
+      )
     }
   }
 
@@ -574,9 +587,10 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
         const size = Buffer.byteLength(text, 'utf8')
         if (bytes + size > AGENT_READ_MAX_BYTES) {
           if (page.length > 0) break
-          // The single event is larger than one page: keep a bounded prefix and
-          // say so instead of returning a silently cropped event.
-          text = Buffer.from(text, 'utf8').subarray(0, AGENT_READ_MAX_BYTES).toString('utf8')
+          // The single event is larger than one page: keep a bounded prefix on a
+          // code-point boundary and say so instead of returning a silently
+          // cropped event whose re-encoding could exceed the page budget.
+          text = takeUtf8Prefix(text, AGENT_READ_MAX_BYTES)
           textTruncated = true
           bytes += Buffer.byteLength(text, 'utf8')
           page.push({ index, seq: Number(event.seq), type: event.type, text })

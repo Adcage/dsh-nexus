@@ -16,6 +16,7 @@ import { mkdir } from 'node:fs/promises'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { RuntimeSettings } from '../../src/protocol.ts'
 import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
@@ -51,9 +52,13 @@ afterEach(async () => {
 
 /** One harness with the tool registered on the shared coordinator. */
 async function openCase(
-  options: { hold?: boolean | 'children'; settings?: (current: RuntimeSettings) => RuntimeSettings } = {},
+  options: {
+    hold?: boolean | 'children'
+    settings?: (current: RuntimeSettings) => RuntimeSettings
+    answer?: (request: GenerateOptions, index: number) => string
+  } = {},
 ): Promise<OpenCase> {
-  const harness = await mountSubagentHarness({ hold: options.hold ?? false })
+  const harness = await mountSubagentHarness({ hold: options.hold ?? false, ...(options.answer === undefined ? {} : { answer: options.answer }) })
   const store = await mountNexusStoreFixture()
   const openStore = await store.open()
   const coordinator = createWriteCoordinator(harness.ctx)
@@ -218,6 +223,40 @@ describe('read, wait and control', () => {
     const past = await testCase.call({ action: 'read', childId, offset: 10_000 })
     expect(past.isError).toBe(true)
     expect(past.error?.info).toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+
+  it('cuts one oversized event on a code-point boundary and stays inside the page budget', async () => {
+    // 101 ASCII characters put the 16 KiB cut two bytes inside a 3-byte
+    // character, which a byte-slice would turn into a replacement character and
+    // push the page one byte over its own bound.
+    const answer = `${'a'.repeat(101)}${'漢'.repeat(8_000)}`
+    const testCase = await openCase({ answer: () => answer })
+    const started = valueOf(await testCase.call({ action: 'start', task: 'produce a long answer' }))
+    const childId = started.childId as string
+    await waitFor(() => testCase.harness.requestsOf(childId).length === 1, 'the child request')
+    await waitFor(() => testCase.harness.ctx.agents.get(SessionId(childId)) === undefined, 'the child to settle')
+
+    const page = valueOf(await testCase.call({ action: 'read', childId, limit: 100 }))
+    // Page from the start until the oversized event is the FIRST event of a
+    // page; only then is its own text cut to fit the budget.
+    let offset = 0
+    let truncated: Record<string, unknown> | undefined
+    for (let guard = 0; guard < 20 && truncated === undefined; guard += 1) {
+      const candidate = valueOf(await testCase.call({ action: 'read', childId, offset, limit: 100 }))
+      if (candidate.textTruncated === true) {
+        truncated = candidate
+        break
+      }
+      if (candidate.atEnd === true) break
+      offset = candidate.nextOffset as number
+    }
+    expect(truncated).toBeDefined()
+    expect(page.totalEvents).toBeGreaterThan(0)
+    const events = (truncated?.events ?? []) as { text: string }[]
+    const text = events.map((event) => event.text).join('')
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(16 * 1024)
+    expect(text.includes('\uFFFD')).toBe(false)
+    expect(text.startsWith('a'.repeat(101))).toBe(true)
   })
 
   it('distinguishes an interrupt request from a confirmed stop', async () => {
