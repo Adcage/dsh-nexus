@@ -57,6 +57,8 @@
     }
   },
   "dependencies": {
+    "@joplin/turndown-plugin-gfm": "1.0.68",
+    "turndown": "7.2.4",
     "zod": "4.4.3"
   },
   "peerDependencies": {
@@ -99,6 +101,7 @@
     "@deepseek-ai/dsh-web": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "~3.18.5",
     "@types/node": "^22.20.0",
+    "@types/turndown": "5.0.6",
     "tsdown": "^0.22.2",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"

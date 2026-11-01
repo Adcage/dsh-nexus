@@ -88,10 +88,27 @@ export interface NexusStore {
    */
   getWeb(owner: string, resultId: string): Promise<WebDocument | undefined>
   /**
+   * List one owner's saved web documents, oldest first.
+   *
+   * Retention enforcement needs the owner's actual records (age and stored
+   * size) before it may publish a replacement. The list is a snapshot; a
+   * record deleted by a concurrent save simply disappears from the next list.
+   * @param owner - session whose documents to list.
+   * @returns the owner's documents ordered by creation time, then result id.
+   */
+  listWeb(owner: string): Promise<readonly WebDocument[]>
+  /**
    * Store one web document.
    * @param value - the document to keep.
    */
   putWeb(value: WebDocument): Promise<void>
+  /**
+   * Delete one saved web document.
+   * @param owner - session that owns the result.
+   * @param resultId - result id within that owner.
+   * @returns `true` when the record existed, `false` when it was already absent.
+   */
+  deleteWeb(owner: string, resultId: string): Promise<boolean>
   /**
    * Read one child's durable policy.
    * @param childId - child session id.
@@ -240,9 +257,24 @@ class NexusStoreHandle implements NexusStore {
     return this.web.get(webRecordKey(owner, resultId))
   }
 
+  async listWeb(owner: string): Promise<readonly WebDocument[]> {
+    const documents: WebDocument[] = []
+    for (const [, document] of this.web.entries()) {
+      if (document.owner === owner) documents.push(document)
+    }
+    return documents.sort((left, right) => {
+      if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1
+      return left.resultId < right.resultId ? -1 : left.resultId > right.resultId ? 1 : 0
+    })
+  }
+
   async putWeb(value: WebDocument): Promise<void> {
     const record = parseRecord(webDocumentSchema, value, 'the web document')
     await this.web.put(webRecordKey(record.owner, record.resultId), record)
+  }
+
+  async deleteWeb(owner: string, resultId: string): Promise<boolean> {
+    return this.web.delete(webRecordKey(owner, resultId))
   }
 
   async getChildPolicy(childId: string): Promise<ChildPolicy | undefined> {

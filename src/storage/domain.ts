@@ -113,6 +113,8 @@ export const webDocumentSchema: z.ZodType<WebDocument> = z.object({
   content: z.string(),
   summary: z.string().optional(),
   convertedText: z.string().optional(),
+  textBasis: z.enum(['content', 'converted-text', 'summary', 'search-results']),
+  conversionSkipped: z.boolean().optional(),
   upstreamTruncated: z.boolean(),
   savedTruncated: z.boolean(),
   createdAt: z.string(),

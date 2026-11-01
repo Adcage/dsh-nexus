@@ -160,7 +160,13 @@ export interface AgentSettings {
 export interface WebSettings {
   /** Sources kept from one search or fetch call. */
   readonly maxResults: number
-  /** Characters kept per saved page before the saved copy is marked truncated. */
+  /**
+   * Characters returned by one `read` page when the call names no limit.
+   *
+   * This is the model-facing pagination budget, NOT a storage limit: the saved
+   * document keeps its whole obtained text (up to the separate per-document
+   * byte cap) and a later page continues from the returned offset.
+   */
   readonly maxCharsPerPage: number
 }
 
@@ -173,11 +179,22 @@ export interface RuntimeSettings {
 }
 
 /**
+ * Which saved text `read` and `find` index.
+ *
+ * The record may carry raw obtained content, its readable conversion and an
+ * upstream summary at the same time. Naming the basis in the record keeps
+ * offsets meaningful: a later `read` continues in exactly the text those
+ * offsets were measured in, instead of silently switching representation.
+ */
+export type WebTextBasis = 'content' | 'converted-text' | 'summary' | 'search-results'
+
+/**
  * One saved web result, addressed by `owner` plus `resultId`.
  *
- * The three text fields stay distinct on purpose: `content` is what upstream
- * actually delivered, `convertedText` is the readable conversion of it, and
- * `summary` is whatever summary upstream supplied. A caller that wants the
+ * The text fields stay distinct on purpose: `content` is what upstream actually
+ * delivered, `convertedText` is the readable conversion of it, and `summary` is
+ * whatever summary upstream supplied. `textBasis` names which of them (or the
+ * rendered search listing) `read`/`find` address. A caller that wants the
  * original must not be handed a conversion. Truncation is recorded per cause so
  * a partial read is never presented as the whole document.
  */
@@ -200,6 +217,10 @@ export interface WebDocument {
   readonly summary?: string
   /** Readable conversion of `content`. */
   readonly convertedText?: string
+  /** Which saved text `read` and `find` address. */
+  readonly textBasis: WebTextBasis
+  /** The HTML conversion was refused by the static safety guard. */
+  readonly conversionSkipped?: boolean
   /** Upstream returned less than the full document. */
   readonly upstreamTruncated: boolean
   /** The saved copy dropped content to respect the size limit. */

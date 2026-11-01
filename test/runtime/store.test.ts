@@ -177,6 +177,7 @@ const WEB_DOCUMENT: WebDocument = {
   url: 'https://example.test/docs',
   content: 'upstream body',
   convertedText: 'readable body',
+  textBasis: 'converted-text',
   upstreamTruncated: false,
   savedTruncated: false,
   createdAt: '2026-11-01T00:00:00.000Z',
@@ -428,6 +429,33 @@ describe('openNexusStore', () => {
       await store.deleteChildPolicy('child-1')
       expect(await store.getChildPolicy('child-1')).toBeUndefined()
       await store.deleteChildPolicy('child-1')
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('lists one owner\'s web documents oldest first and deletes exactly one', async () => {
+    const harness = await createStoreHarness()
+    try {
+      const store = await harness.open()
+      const later: WebDocument = {
+        ...WEB_DOCUMENT,
+        resultId: 'web-2',
+        createdAt: '2026-11-02T00:00:00.000Z',
+        expiresAt: '2026-11-09T00:00:00.000Z',
+      }
+      await store.putWeb(later)
+      await store.putWeb(WEB_DOCUMENT)
+      await store.putWeb({ ...WEB_DOCUMENT, owner: 'sess-2', resultId: 'web-1' })
+
+      expect((await store.listWeb('sess-1')).map((document) => document.resultId)).toEqual(['web-1', 'web-2'])
+      expect((await store.listWeb('sess-2')).map((document) => document.resultId)).toEqual(['web-1'])
+      expect(await store.listWeb('sess-missing')).toEqual([])
+
+      expect(await store.deleteWeb('sess-1', 'web-1')).toBe(true)
+      expect(await store.deleteWeb('sess-1', 'web-1')).toBe(false)
+      expect(await store.getWeb('sess-1', 'web-1')).toBeUndefined()
+      expect(await store.getWeb('sess-2', 'web-1')).toBeDefined()
     } finally {
       await harness.dispose()
     }

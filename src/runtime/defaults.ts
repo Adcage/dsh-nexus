@@ -54,6 +54,8 @@ export const WAIT_MAX_MS = 30_000
 // Web calls and saved documents.
 /** Queries one search call may carry. */
 export const WEB_MAX_QUERIES = 3
+/** Native web requests Nexus keeps in flight inside one batch. */
+export const WEB_BATCH_CONCURRENCY = 2
 /** URLs one fetch call may carry. */
 export const WEB_MAX_URLS = 6
 /** Sources kept per call when the settings name no other value. */

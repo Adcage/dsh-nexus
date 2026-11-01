@@ -17,9 +17,24 @@
  */
 
 import { PassThrough, Readable, type Duplex, type Writable } from 'node:stream'
-import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId as SessionIdValue } from '@deepseek-ai/dsh-session'
+import {
+  Storage,
+  storageBackendServiceKey,
+  type KvFacet,
+  type KvUnit,
+  type KvUnitDescriptor,
+  type StorageBackend,
+} from '@deepseek-ai/dsh-storage'
+import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import { NEXUS_DOMAIN_NAME } from '../../src/storage/domain.ts'
+import { openNexusStore, type NexusStore } from '../../src/storage/store.ts'
 import {
   AttachmentError,
   AttachmentId,
@@ -854,9 +869,15 @@ class ScriptedModelAdapter extends LlmAdapter {
 /** Scripted answers for the two web capabilities. */
 export interface WebDoubleOptions {
   /** Answer for `ctx.web.search`; defaults to no sources. */
-  readonly search?: (request: WebSearchRequest) => WebSearchResult | Promise<WebSearchResult>
+  readonly search?: (request: WebSearchRequest, signal?: AbortSignal) => WebSearchResult | Promise<WebSearchResult>
   /** Answer for `ctx.web.fetch`; defaults to an empty text body with status 200. */
-  readonly fetch?: (request: WebFetchRequest) => WebFetchResult | Promise<WebFetchResult>
+  readonly fetch?: (request: WebFetchRequest, signal?: AbortSignal) => WebFetchResult | Promise<WebFetchResult>
+  /**
+   * Register the scripted providers; defaults to true. `false` mounts the real
+   * runtime with no provider at all, so provider-selection failures are the
+   * shipped ones (`WEB_PROVIDER_UNAVAILABLE`) instead of a fake.
+   */
+  readonly registerProviders?: boolean
 }
 
 /** The mounted web service plus the requests it received. */
@@ -890,23 +911,25 @@ export async function mountWebDouble(ctx: Context, options: WebDoubleOptions = {
   const searchProvider: WebSearchProvider = {
     id: WEB_DOUBLE_PROVIDER_ID,
     available: () => true,
-    async search(request) {
+    async search(request, signal) {
       searches.push(request)
-      return options.search === undefined ? { sources: [], truncated: false } : options.search(request)
+      return options.search === undefined ? { sources: [], truncated: false } : options.search(request, signal)
     },
   }
   const fetchProvider: WebFetchProvider = {
     id: WEB_DOUBLE_PROVIDER_ID,
     available: () => true,
-    async fetch(request) {
+    async fetch(request, signal) {
       fetches.push(request)
       return options.fetch === undefined
         ? { url: request.url, statusCode: 200, body: { kind: 'text', content: '' }, truncated: false }
-        : options.fetch(request)
+        : options.fetch(request, signal)
     },
   }
-  ctx.effect(() => runtime.registerSearchProvider(searchProvider), 'test support: search provider')
-  ctx.effect(() => runtime.registerFetchProvider(fetchProvider), 'test support: fetch provider')
+  if (options.registerProviders !== false) {
+    ctx.effect(() => runtime.registerSearchProvider(searchProvider), 'test support: search provider')
+    ctx.effect(() => runtime.registerFetchProvider(fetchProvider), 'test support: fetch provider')
+  }
   return { runtime, searches, fetches }
 }
 
@@ -1508,4 +1531,116 @@ function isAbsolutePath(path: string): boolean {
 function normalizePath(path: string): string {
   const slashed = path.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
   return slashed.length > 1 ? slashed.replace(/\/$/, '') : slashed
+}
+
+/** A real Nexus storage stack over a controllable project-local medium. */
+export interface NexusStoreFixture {
+  /**
+   * Open the Nexus store; call again after disposing the previous store to
+   * prove that a cold reopen reads the same durable records.
+   * @returns the opened store.
+   */
+  open(): Promise<NexusStore>
+  /** Every durable record write that reached the medium, as `table/key`. */
+  listWrites(): readonly string[]
+  /**
+   * Refuse the next record write into `table` before it reaches the medium.
+   * @param table - table whose next write fails.
+   */
+  failNextPut(table: string): void
+  /**
+   * Refuse the next record delete from `table` before it reaches the medium.
+   * @param table - table whose next delete fails.
+   */
+  failNextDelete(table: string): void
+  /**
+   * Read the raw unit document the medium holds.
+   * @returns the document text.
+   */
+  readMedium(): Promise<string>
+  /** Dispose the storage context and delete the temporary root. */
+  dispose(): Promise<void>
+}
+
+/** Project-local cache directory; the medium never touches state outside the checkout. */
+const STORE_FIXTURE_CACHE = fileURLToPath(new URL('../../node_modules/.cache/dsh-nexus-test/', import.meta.url))
+
+/**
+ * Mount the shipped storage hub, the shipped JSON backend and the Nexus domain
+ * form on a fresh temporary root.
+ *
+ * Web acquisition tests need a medium that really persists and really reopens,
+ * so this fixture mounts the production stack instead of an in-memory map. The
+ * only instrumented piece is the medium boundary, which can refuse the next
+ * write or delete of one table so a test can prove what a refused durable change
+ * leaves behind.
+ * @returns the fixture over a fresh temporary root.
+ */
+export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
+  await mkdir(STORE_FIXTURE_CACHE, { recursive: true })
+  const root = await mkdtemp(join(STORE_FIXTURE_CACHE, 'web-'))
+  const ctx = new Context()
+  await ctx.plugin(Storage)
+  const inner = new JsonStorageBackend(root)
+  const innerKv: KvFacet = inner.kv
+  const writes: string[] = []
+  let failingPut: string | undefined
+  let failingDelete: string | undefined
+  const kv: KvFacet = {
+    async open(descriptor: KvUnitDescriptor): Promise<KvUnit> {
+      const unit = await innerKv.open(descriptor)
+      return {
+        loadAll: () => unit.loadAll(),
+        async putRecord(table, key, value) {
+          if (failingPut === table) {
+            failingPut = undefined
+            throw new Error(`the medium refused the write of '${table}/${key}'`)
+          }
+          await unit.putRecord(table, key, value)
+          writes.push(`${table}/${key}`)
+        },
+        async deleteRecord(table, key) {
+          if (failingDelete === table) {
+            failingDelete = undefined
+            throw new Error(`the medium refused the delete of '${table}/${key}'`)
+          }
+          return unit.deleteRecord(table, key)
+        },
+        setGlobal: (value) => unit.setGlobal(value),
+        close: () => unit.close(),
+      }
+    },
+  }
+  const backend: StorageBackend = { kv, close: () => inner.close() }
+  await ctx.plugin({
+    name: 'nexus-fixture-json',
+    inject: ['storage'],
+    apply(pluginCtx: Context) {
+      pluginCtx.effect(() => {
+        const unregister = pluginCtx.storage.backend.register('json', backend)
+        return async () => {
+          unregister()
+          await backend.close()
+        }
+      })
+      pluginCtx.provide(storageBackendServiceKey('json'), backend)
+    },
+  })
+  await ctx.plugin(StorageDomain, { backend: 'json' })
+
+  return {
+    open: () => openNexusStore(ctx),
+    listWrites: () => [...writes],
+    failNextPut(table) {
+      failingPut = table
+    },
+    failNextDelete(table) {
+      failingDelete = table
+    },
+    readMedium: () => readFile(join(root, `${NEXUS_DOMAIN_NAME}.json`), 'utf8'),
+    async dispose() {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    },
+  }
 }
