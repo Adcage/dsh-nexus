@@ -230,14 +230,28 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
   const childPolicy = registerChildPolicy(ctx, runtime.store, runtime.coordinator)
 
   const detachShell = runtime.attach('shell', (): Promise<NexusCleanupReport> => shell.dispose())
+  const detachFacts = runtime.trackManagedResources(shell.facts())
   const detachPrompts = runtime.attach('prompt-sections', () => promptSections())
   const detachMembers = runtime.attach('nexus-agents', () => releaseMemberships())
   const detachPolicy = runtime.attach('child-policy', () => childPolicy())
 
-  // A generation unload withdraws its own registrations; the runtime keeps the
-  // same facts only for the case where the runtime outlives nothing.
-  ctx.effect(() => () => {
-    detachShell()
+  // A generation unload withdraws its own registrations. The shell surface's real
+  // disposal report is joined and published BEFORE the attachment is detached: a
+  // range it could not prove cleaned stays owed to the root runtime instead of
+  // disappearing with this generation. If the report cannot be joined, the
+  // attachment is deliberately left for the runtime's own drain.
+  ctx.effect(() => async () => {
+    let report: NexusCleanupReport | undefined
+    try {
+      report = await shell.dispose()
+    } catch {
+      report = undefined
+    }
+    if (report !== undefined) {
+      runtime.reportCleanup('shell', report)
+      detachShell()
+    }
+    detachFacts()
     detachPrompts()
     detachMembers()
     detachPolicy()

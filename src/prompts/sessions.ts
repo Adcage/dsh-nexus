@@ -96,6 +96,16 @@ export interface PromptSessions {
    * replacement or the store goes away.
    */
   drain(): Promise<void>
+  /**
+   * Refuse new durable operations; already queued work still runs and drains.
+   *
+   * Called by the runtime before its teardown joins the accepted work, so a
+   * request that arrives during shutdown cannot be refused later by a closed
+   * store after it was already admitted.
+   */
+  closeAdmissions(): void
+  /** Remove this instance's lifecycle listener; idempotent. */
+  dispose(): void
 }
 
 /** One exact Agent's effective snapshot plus its operation queue. */
@@ -145,6 +155,10 @@ class PromptSessionsHandle implements PromptSessions {
   private readonly entries = new WeakMap<Agent, AgentEntry>()
   /** Tail of the serialized durable work for one session id, across residencies. */
   private readonly queues = new Map<string, Promise<unknown>>()
+  /** Whether new durable operations are refused; set before a teardown drains. */
+  private admissionsClosed = false
+  /** Listener disposer for the instance's own Agent lifecycle fact. */
+  private readonly detachLifecycle: () => void
 
   /**
    * @param ctx - scope that owns the lifecycle listener and resolves the live parent Agent.
@@ -155,17 +169,19 @@ class PromptSessionsHandle implements PromptSessions {
     this.store = store
     // A disposed Agent's entry is dropped by exact identity: another Agent that
     // happens to share the session id keeps its own reference.
-    ctx.on('agent/disposed', ({ agent }) => {
+    this.detachLifecycle = ctx.on('agent/disposed', ({ agent }) => {
       this.entries.delete(agent)
     })
   }
 
   async initialize(agent: Agent): Promise<PromptSnapshot> {
+    this.assertAdmitting('initialize the Nexus prompt')
     const entry = this.entryFor(agent)
     return this.serialize(entry.sessionId, () => this.resolveInitial(entry))
   }
 
   async apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string): Promise<PromptSnapshot> {
+    this.assertAdmitting('apply a Nexus prompt')
     const entry = this.entries.get(agent)
     if (entry === undefined) {
       throw new NexusError(
@@ -192,6 +208,29 @@ class PromptSessionsHandle implements PromptSessions {
     // never rejects, so joining the tails waits for the durable work itself.
     while (this.queues.size > 0) {
       await Promise.all([...this.queues.values()])
+    }
+  }
+
+  closeAdmissions(): void {
+    this.admissionsClosed = true
+  }
+
+  dispose(): void {
+    this.admissionsClosed = true
+    this.detachLifecycle()
+  }
+
+  /**
+   * Refuse a new durable operation once the owner stopped admitting work.
+   * @param action - what the caller tried, for the message.
+   * @throws NexusError `RESOURCE_NOT_AVAILABLE` while shutting down.
+   */
+  private assertAdmitting(action: string): void {
+    if (this.admissionsClosed) {
+      throw new NexusError(
+        'RESOURCE_NOT_AVAILABLE',
+        `cannot ${action}: the Nexus runtime is shutting down and admits no new durable prompt work`,
+      )
     }
   }
 

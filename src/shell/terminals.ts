@@ -57,6 +57,8 @@ import type { ShellEngine } from '../protocol.ts'
 import { WAIT_DEFAULT_MS, WAIT_MAX_MS, AGENT_MAX_TERMINALS } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { CallOwner } from '../runtime/owner.ts'
+import type { ManagedCleanupState, ManagedRangeUnresolved } from '../agent/coordination.ts'
+import { managedCleanupStateOf } from '../agent/coordination.ts'
 import { resolveEngine, resolveShellCwd, type ShellExecutionConfig } from './engines.ts'
 import { assertPowerShell7 } from './process.ts'
 
@@ -341,6 +343,17 @@ export interface TerminalController {
    * @returns the terminals cleared and the ones retained with their proof.
    */
   dispose(): Promise<TerminalDisposeResult>
+  /**
+   * The managed-range cleanup fact for one exact Agent.
+   * @param agent - the Agent whose terminals are queried.
+   * @returns `clean` only when every terminal is confirmed closed.
+   */
+  cleanupOf(agent: Agent): ManagedCleanupState
+  /**
+   * Every terminal range this controller cannot prove closed.
+   * @returns one entry per pending open or unconfirmed terminal, with its Agent.
+   */
+  unresolved(): readonly ManagedRangeUnresolved[]
 }
 
 /**
@@ -544,6 +557,10 @@ interface TerminalCursorState {
 class Controller implements TerminalController {
   private readonly states = new Map<Agent, AgentState>()
   private readonly entries = new Map<string, OwnedTerminal>()
+  /** Opens that failed after the backend may have created a PTY, by exact owner. */
+  private readonly unconfirmedOpens = new Map<Agent, string[]>()
+  /** Facts this controller must keep answering after its own disposal. */
+  private retainedUnresolved: readonly ManagedRangeUnresolved[] = []
   /** Per-controller identity so a restarted ordinal counter cannot reuse an id. */
   private readonly epoch = randomUUID().replaceAll('-', '').slice(0, 12)
   private sequence = 0
@@ -581,6 +598,7 @@ class Controller implements TerminalController {
       }
       this.reserve(state)
       try {
+        const before = terminals.list(owner.agent).map((candidate) => candidate.sessionId as string)
         let snapshot: TerminalSpawnResult
         try {
           snapshot = await terminals.spawn(
@@ -593,6 +611,16 @@ class Controller implements TerminalController {
             owner.signal,
           )
         } catch (error) {
+          // A rejected spawn can still have created a PTY in the native
+          // registry. A session that appeared is an unproven range, not a clean
+          // failure; the fact keeps the owner from being treated as empty.
+          const appeared = terminals
+            .list(owner.agent)
+            .map((candidate) => candidate.sessionId as string)
+            .filter((sessionId) => !before.includes(sessionId))
+          for (const sessionId of appeared) {
+            this.recordUnconfirmedOpen(owner.agent, `${sessionId}: failed open left a native terminal session`)
+          }
           throw openFailure(error, owner.signal)
         }
         this.sequence += 1
@@ -805,6 +833,14 @@ class Controller implements TerminalController {
       }),
     )
     this.entries.clear()
+    // A terminal that survived this disposal must keep answering for its owner:
+    // clearing the table is not cleanup proof.
+    this.retainedUnresolved = this.unresolved().map((entry) => ({
+      agent: entry.agent,
+      state: 'unconfirmed',
+      detail: entry.detail,
+    }))
+    this.unconfirmedOpens.clear()
     this.states.clear()
     return { cleared, failures }
   }
@@ -911,6 +947,67 @@ class Controller implements TerminalController {
     state?.terminals.delete(entry.resourceId)
     entry.active = undefined
     if (state !== undefined) this.dropEmptyState(entry.agent)
+  }
+
+  /**
+   * The managed-range cleanup fact for one exact Agent.
+   * @param agent - the Agent whose terminals are queried.
+   * @returns `clean` only when every terminal is confirmed closed.
+   */
+  cleanupOf(agent: Agent): ManagedCleanupState {
+    return managedCleanupStateOf(this.unresolved(), agent)
+  }
+
+  /**
+   * Every terminal range this controller cannot prove closed.
+   *
+   * An open PTY is a live managed range. A terminal whose session is gone from
+   * the native owner list IS proven closed: the registry deletes a session only
+   * after its close resolved. A pending open, or a failed one that may have left
+   * a PTY, is not clean.
+   * @returns one entry per unresolved terminal, with its exact Agent.
+   */
+  unresolved(): readonly ManagedRangeUnresolved[] {
+    const unresolved: ManagedRangeUnresolved[] = [...this.retainedUnresolved]
+    const terminals = this.ctx.get('terminals')
+    const listed = (agent: Agent): readonly string[] | undefined => {
+      if (terminals === undefined) return undefined
+      try {
+        return terminals.list(agent).map((snapshot) => snapshot.sessionId as string)
+      } catch {
+        return undefined
+      }
+    }
+    for (const [agent, state] of this.states) {
+      if (state.pending > 0) {
+        unresolved.push({ agent, state: 'pending', detail: `${state.pending} terminal open(s) still in flight` })
+      }
+      const live = state.terminals.size === 0 ? [] : listed(agent)
+      for (const entry of state.terminals.values()) {
+        if (entry.cleanupUnconfirmed) {
+          unresolved.push({ agent, state: 'unconfirmed', detail: `${entry.resourceId}: cleanup-unconfirmed` })
+          continue
+        }
+        if (live === undefined) {
+          unresolved.push({ agent, state: 'unconfirmed', detail: `${entry.resourceId}: native registry unavailable` })
+          continue
+        }
+        if (live.includes(entry.sessionId as string)) {
+          unresolved.push({ agent, state: 'unconfirmed', detail: `${entry.resourceId}: still open` })
+        }
+      }
+    }
+    for (const [agent, details] of this.unconfirmedOpens) {
+      for (const detail of details) unresolved.push({ agent, state: 'unconfirmed', detail })
+    }
+    return unresolved
+  }
+
+  /** Record an open that may have left a native PTY without publishing it. */
+  private recordUnconfirmedOpen(agent: Agent, detail: string): void {
+    const existing = this.unconfirmedOpens.get(agent)
+    if (existing === undefined) this.unconfirmedOpens.set(agent, [detail])
+    else existing.push(detail)
   }
 
   /** Forget one Agent bucket when nothing is pending or owned. */

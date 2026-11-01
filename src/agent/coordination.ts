@@ -78,6 +78,71 @@ export interface WriteScope {
   readonly state: WriteScopeState
 }
 
+/**
+ * What the host can prove about one exact Agent's managed resource ranges.
+ *
+ * `clean` means every range that Agent ever started is confirmed gone; `pending`
+ * means a start is still in flight; `unconfirmed` means a range (or a failed
+ * start) is not proven cleaned. Only `clean` may release durable write authority.
+ */
+export type ManagedCleanupState = 'clean' | 'pending' | 'unconfirmed'
+
+/** Host-only exact-Agent managed-resource facts. */
+export interface ManagedResourceFacts {
+  /**
+   * The cleanup fact for one exact Agent.
+   * @param agent - the Agent whose managed ranges are queried.
+   * @returns what the host can prove about those ranges.
+   */
+  cleanupOf(agent: Agent): ManagedCleanupState
+}
+
+/** One managed range a host controller cannot prove cleaned. */
+export interface ManagedRangeUnresolved {
+  /** Exact Agent that owns the range. */
+  readonly agent: Agent
+  /** A start still in flight (`pending`), or a range/failed start without proof. */
+  readonly state: 'pending' | 'unconfirmed'
+  /** Short identifier for the report, e.g. the resource id and the reason. */
+  readonly detail: string
+}
+
+/**
+ * Fold one Agent's unresolved ranges into its cleanup fact.
+ * @param unresolved - every range the controller cannot prove cleaned.
+ * @param agent - the Agent to answer for.
+ * @returns `unconfirmed` over `pending` over `clean`.
+ */
+export function managedCleanupStateOf(
+  unresolved: readonly ManagedRangeUnresolved[],
+  agent: Agent,
+): ManagedCleanupState {
+  let state: ManagedCleanupState = 'clean'
+  for (const entry of unresolved) {
+    if (entry.agent !== agent) continue
+    if (entry.state === 'unconfirmed') return 'unconfirmed'
+    state = 'pending'
+  }
+  return state
+}
+
+/**
+ * Combine two facts about one Agent, keeping the least proven one.
+ * @param left - one controller's fact.
+ * @param right - another controller's fact.
+ * @returns `unconfirmed` over `pending` over `clean`.
+ */
+export function combineManagedCleanup(left: ManagedCleanupState, right: ManagedCleanupState): ManagedCleanupState {
+  return CLEANUP_RANK[left] >= CLEANUP_RANK[right] ? left : right
+}
+
+/** Ordering that makes "least proven" a comparison. */
+const CLEANUP_RANK: Readonly<Record<ManagedCleanupState, number>> = Object.freeze({
+  clean: 0,
+  pending: 1,
+  unconfirmed: 2,
+})
+
 /** One reservation as the teardown report lists it, including its child. */
 export interface WriteScopeEntry extends WriteScope {
   /** Child the reservation belongs to. */
@@ -137,6 +202,8 @@ export interface WriteCoordinator {
    * @returns its scope and state, or undefined when it holds none.
    */
   scopeOf(childId: SessionId): WriteScope | undefined
+  /** Refuse new reservations now; accepted work still drains. */
+  closeAdmissions(): void
   /**
    * Load the durable reservations this coordinator did not create.
    *
@@ -266,9 +333,15 @@ export function createStoreWriteScopeJournal(store: NexusStore): WriteScopeJourn
  * @param ctx - context that owns the coordinator's lifetime.
  * @param journal - durable reservation journal; omitted by a coordinator that owns
  *   no cross-restart authority.
+ * @param facts - host-managed resource facts; when given, a bound child's disposal
+ *   releases authority only for a proven-clean Agent.
  * @returns the coordinator to pass to every child consumer.
  */
-export function createWriteCoordinator(ctx: Context, journal?: WriteScopeJournal): WriteCoordinator {
+export function createWriteCoordinator(
+  ctx: Context,
+  journal?: WriteScopeJournal,
+  facts?: ManagedResourceFacts,
+): WriteCoordinator {
   const leases = new Map<string, LeaseRecord>()
   /** Agents whose creation this coordinator observed, by exact identity. */
   const createdAgents = new WeakSet<Agent>()
@@ -360,6 +433,14 @@ export function createWriteCoordinator(ctx: Context, journal?: WriteScopeJournal
       } else if (createdAgents.has(agent)) {
         continue
       }
+      // The native disposal proves the driver ended, not that every range the
+      // child owned is empty. Ask the host's managed-resource facts: only a
+      // proven-clean Agent may release durable write authority; pending or
+      // unconfirmed ranges pin the scope instead.
+      if (facts !== undefined && facts.cleanupOf(agent) !== 'clean') {
+        record.state = 'unconfirmed'
+        continue
+      }
       drop(record)
     }
   })
@@ -444,6 +525,9 @@ export function createWriteCoordinator(ctx: Context, journal?: WriteScopeJournal
     scopeOf(childId) {
       const record = recordOf(childId)
       return record === undefined ? undefined : { root: record.root, state: record.state }
+    },
+    closeAdmissions() {
+      closing = true
     },
     async restore() {
       if (journal === undefined) return

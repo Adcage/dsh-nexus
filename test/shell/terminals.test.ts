@@ -1081,3 +1081,50 @@ describe('terminal stop, close and teardown', () => {
     expect(shell.terminals.list(owner.agent)).toHaveLength(0)
   })
 })
+
+describe('per-Agent terminal cleanup facts', () => {
+  it('reports an open terminal, its confirmed close, and a pending open', async () => {
+    const shell = await openTerminalHarness()
+    const agent = shell.harness.owner.agent
+
+    // Nothing opened yet: a genuine clean case.
+    expect(shell.controller.cleanupOf(agent)).toBe('clean')
+    expect(shell.controller.unresolved()).toEqual([])
+
+    const opened = await shell.controller.open(shell.harness.owner, { cwd: CWD })
+    const resourceId = opened.terminal.resourceId
+    // An open PTY is a live managed range, not proof of cleanup.
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+    expect(shell.controller.unresolved()).toContainEqual(
+      expect.objectContaining({ agent, state: 'unconfirmed', detail: expect.stringContaining(resourceId) }),
+    )
+
+    const closed = await shell.controller.close(shell.harness.owner, resourceId)
+    expect(closed.closed).toBe(true)
+    // The native registry removes a session only after its close resolved, so
+    // absence from the native owner list is a positive cleanup fact.
+    expect(shell.controller.cleanupOf(agent)).toBe('clean')
+    expect(shell.controller.unresolved()).toEqual([])
+  }, 60_000)
+
+  it('keeps the fact unconfirmed when the native close cannot be confirmed', async () => {
+    const shell = await openTerminalHarness()
+    const agent = shell.harness.owner.agent
+    const opened = await shell.controller.open(shell.harness.owner, { cwd: CWD })
+    const backend = shell.backends.get('bash')
+    const session = backend?.sessions[0]
+    if (session === undefined) throw new Error('no scripted bash session was opened')
+    // Every close attempt fails, so neither the explicit close nor the
+    // controller's own disposal can confirm the PTY is gone.
+    session.closeFailures = 99
+
+    const closed = await shell.controller.close(shell.harness.owner, opened.terminal.resourceId)
+    expect(closed.closed).toBe(false)
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+
+    const disposed = await shell.controller.dispose()
+    expect(disposed.failures.map((failure) => failure.resourceId)).toContain(opened.terminal.resourceId)
+    // The fact survives disposal instead of being forgotten with the entries.
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+  }, 60_000)
+})

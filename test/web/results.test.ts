@@ -415,3 +415,39 @@ describe('availability', () => {
     }
   })
 })
+
+describe('closing admissions', () => {
+  it('refuses new publications and joins the one already accepted', async () => {
+    const medium = await fixture()
+    const store = await medium.open()
+    try {
+      const repository = createWebResultRepository(store, { now: createClock().now, limits: PRODUCTION_LIMITS })
+      const hold = medium.holdNextPut('web_documents')
+      const accepted = repository.save(fetchInput('sess-close'))
+      await hold.waitUntilHeld()
+
+      repository.closeAdmissions()
+      await expect(repository.save(fetchInput('sess-close', { content: 'second body' }))).rejects.toMatchObject({
+        code: 'RESOURCE_NOT_AVAILABLE',
+      })
+
+      let joined = false
+      const draining = repository.drain()
+      void draining.then(
+        () => {
+          joined = true
+        },
+        () => undefined,
+      )
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(joined).toBe(false)
+
+      hold.release()
+      await draining
+      const saved = await accepted
+      expect((await repository.read('sess-close', saved.resultId)).document.content).toBe('upstream body')
+    } finally {
+      await medium.dispose()
+    }
+  }, 60_000)
+})

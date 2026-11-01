@@ -23,6 +23,8 @@ import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 import { openNexusRuntime, NEXUS_RUNTIME_SERVICE, type NexusRuntime } from '../../src/runtime/service.ts'
 import { NEXUS_DOMAIN, PROMPTS_TABLE } from '../../src/storage/domain.ts'
 import type { PromptSnapshot } from '../../src/protocol.ts'
+import * as presetRow from '../../src/preset/index.ts'
+import { NEXUS_PRESET_ID } from '../../src/preset/definition.ts'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { ShellEnvRegistry } from '@deepseek-ai/dsh-shell-env'
 import { TerminalSessionService } from '@deepseek-ai/dsh-terminal'
@@ -31,6 +33,7 @@ import { createShellSurface } from '../../src/shell/tool.ts'
 import { mountSubagentHarness, waitFor, type SubagentHarness } from '../support/agent-harness.ts'
 import { createToolHarness, type ToolHarness } from '../support/harness.ts'
 import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
+import { mountPresetHarness, PRESET_ROUTE } from '../support/preset-harness.ts'
 
 /** Everything one lifecycle case opened and must close, in reverse order. */
 interface OpenCase {
@@ -613,4 +616,172 @@ describe('shell surface cleanup', () => {
       SessionId('writer-with-hung-shell'),
     )
   })
+})
+
+describe('managed resource cleanup facts', () => {
+  /**
+   * Mount the whole real Nexus composition over the shipped provider boundary.
+   * @param script - process script; defaults to a clean finish.
+   * @returns the started harness and its runtime.
+   */
+  async function openNexusComposition(
+    script: (spec: { readonly argv: readonly string[] }) => {
+      readonly staysOpen?: boolean
+      readonly cleanupUnconfirmed?: boolean | (() => boolean)
+    } = () => ({}),
+  ): Promise<{ harness: Awaited<ReturnType<typeof mountPresetHarness>>; runtime: NexusRuntime }> {
+    const harness = await mountPresetHarness({ subprocessScript: script })
+    const runtime = await harness.startNexus()
+    return { harness, runtime }
+  }
+
+  it('keeps the write scope when a stopped child still owns an unconfirmed shell range', async () => {
+    const { harness, runtime } = await openNexusComposition(() => ({ staysOpen: true, cleanupUnconfirmed: true }))
+    try {
+      const parent = await harness.createAgent('hung-range-parent', NEXUS_PRESET_ID)
+      await harness.runTurn(parent, 'parent')
+      const started = await harness.call(
+        'agent',
+        { action: 'start', task: 'write child', context: 'spawn', access: 'write' },
+        parent,
+      )
+      expect(started.isError, JSON.stringify(started)).toBe(false)
+      const childId = (started.value as { childId: string }).childId
+      const child = harness.ctx.agents.get(childId as never)
+      expect(child).toBeDefined()
+      const root = await canonicalDirectory(harness.workspace)
+      expect(runtime.coordinator.scopeOf(childId as never)).toEqual({ root, state: 'held' })
+
+      // The child owns a real managed range through the shipped controllers; the
+      // provider can settle the parent but never proves the range empty.
+      const run = await harness.call('shell', { action: 'run', command: 'hung-build', background: true }, child!)
+      expect(run.isError, JSON.stringify(run)).toBe(false)
+
+      const stopped = await harness.call('agent', { action: 'stop', childId }, parent)
+      expect(stopped.isError, JSON.stringify(stopped)).toBe(false)
+      // The driver ending is not cleanup: the tree stays refused and `stop` says so.
+      expect(stopped.value).toMatchObject({ released: false, scopeRetained: root })
+      expect(runtime.coordinator.scopeOf(childId as never)).toEqual({ root, state: 'unconfirmed' })
+
+      // The durable reservation survives, so a restart refuses the tree as well.
+      expect(await runtime.store.listWriteScopes()).toContainEqual({ childId, root })
+      expect(await harness.fixture.readMedium()).toContain(childId)
+
+      // No second writer may enter the tree while the range is unresolved.
+      const rival = await harness.call(
+        'agent',
+        { action: 'start', task: 'rival writer', context: 'spawn', access: 'write' },
+        parent,
+      )
+      expect(rival.isError).toBe(true)
+      expect(String(rival.error?.message)).toMatch(/write scope/)
+    } finally {
+      await harness.dispose()
+    }
+  }, 120_000)
+
+  it('releases the write scope when the stopped child owns nothing unresolved', async () => {
+    const { harness, runtime } = await openNexusComposition()
+    try {
+      const parent = await harness.createAgent('clean-child-parent', NEXUS_PRESET_ID)
+      await harness.runTurn(parent, 'parent')
+      const started = await harness.call(
+        'agent',
+        { action: 'start', task: 'write child', context: 'spawn', access: 'write' },
+        parent,
+      )
+      expect(started.isError, JSON.stringify(started)).toBe(false)
+      const childId = (started.value as { childId: string }).childId
+      const root = await canonicalDirectory(harness.workspace)
+      expect(runtime.coordinator.scopeOf(childId as never)).toEqual({ root, state: 'held' })
+
+      const stopped = await harness.call('agent', { action: 'stop', childId }, parent)
+      expect(stopped.isError, JSON.stringify(stopped)).toBe(false)
+      // Genuine clean case: no pending start, no live range, no failed start.
+      expect(stopped.value).toMatchObject({ released: true })
+      expect(runtime.coordinator.scopeOf(childId as never)).toBeUndefined()
+      await runtime.coordinator.drain()
+      expect(await runtime.store.listWriteScopes()).toEqual([])
+    } finally {
+      await harness.dispose()
+    }
+  }, 120_000)
+
+  it('keeps a retired generation unconfirmed cleanup in the root runtime', async () => {
+    const { harness, runtime } = await openNexusComposition(() => ({ staysOpen: true, cleanupUnconfirmed: true }))
+    try {
+      // Mount the production preset row as an independent generation, then bind
+      // an Agent under it, so unloading that generation leaves the runtime alive.
+      let generationCtx: Context | undefined
+      const generation = harness.ctx.plugin({
+        name: 'nexus-generation-only',
+        inject: presetRow.inject,
+        apply(pluginCtx: Context): void {
+          generationCtx = pluginCtx
+          presetRow.apply(pluginCtx, {})
+        },
+      })
+      await generation
+      if (generationCtx === undefined) throw new Error('the generation row did not activate')
+      const handle = await generationCtx.agents.create({
+        sessionId: SessionId('generation-only-agent'),
+        meta: { cwd: harness.workspace },
+        agentOptions: { ...PRESET_ROUTE },
+      })
+      const agent = handle.agent
+
+      const run = await harness.call('shell', { action: 'run', command: 'hung-build', background: true }, agent)
+      expect(run.isError, JSON.stringify(run)).toBe(false)
+      const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
+
+      // Generation-only unload: the runtime must stay alive and own the outcome.
+      await generation.dispose()
+      expect(runtime.getSettings().value).toEqual(DEFAULT_SETTINGS)
+
+      const status = await runtime.dispose()
+      expect(status.unconfirmedResources.join('\n')).toContain(resourceId)
+      expect(status.released).toBe(false)
+    } finally {
+      await harness.dispose()
+    }
+  }, 120_000)
+})
+
+describe('closing admissions', () => {
+  it('refuses new settings, prompt and web work once the runtime stops admitting', async () => {
+    const { harness, runtime } = await openCase()
+    const agent = await harness.createParent('closing-admissions')
+    await runtime.prompts.initialize(agent)
+
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    runtime.attach('slow-owned-resource', () => held)
+    const closing = runtime.dispose()
+    try {
+      await settledWork()
+
+      const before = runtime.getSettings()
+      await expect(
+        runtime.saveSettings({ ...before.value, terminal: { engine: 'pwsh' } }, before.hash),
+      ).rejects.toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      await expect(
+        runtime.prompts.apply(agent, [], (await runtime.store.readLibrary()).hash),
+      ).rejects.toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      await expect(
+        runtime.webResults.save({
+          owner: 'closing-admissions',
+          kind: 'fetch',
+          source: 'https://example.invalid/',
+          content: 'BODY',
+          textBasis: 'content',
+          upstreamTruncated: false,
+        }),
+      ).rejects.toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+    } finally {
+      release()
+      await closing
+    }
+  }, 60_000)
 })

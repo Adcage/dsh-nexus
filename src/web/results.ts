@@ -129,6 +129,17 @@ export interface WebResultRepository {
    * @throws NexusError `RESOURCE_NOT_AVAILABLE` when absent, expired or foreign.
    */
   read(owner: string, resultId: string): Promise<SavedWebText>
+  /**
+   * Refuse new publications; already accepted ones still run and drain.
+   */
+  closeAdmissions(): void
+  /**
+   * Wait until every publication accepted before the call settled.
+   *
+   * The runtime joins this before closing the store, so an accepted save cannot
+   * be refused by a closed medium after it was promised.
+   */
+  drain(): Promise<void>
 }
 
 /** Options of one repository. */
@@ -188,6 +199,8 @@ class WebResultRepositoryHandle implements WebResultRepository {
   private readonly limits: WebRetentionLimits
   /** Tail of the publication chain of each owner. */
   private readonly publishing = new Map<string, Promise<void>>()
+  /** Whether new publications are refused; set before a teardown drains. */
+  private admissionsClosed = false
 
   /**
    * @param store - the durable store.
@@ -200,6 +213,12 @@ class WebResultRepositoryHandle implements WebResultRepository {
   }
 
   async save(input: NewWebDocument): Promise<WebDocument> {
+    if (this.admissionsClosed) {
+      throw new NexusError(
+        'RESOURCE_NOT_AVAILABLE',
+        'the Nexus runtime is shutting down and admits no new saved web result',
+      )
+    }
     return this.serialize(input.owner, () => this.publish(input))
   }
 
@@ -209,6 +228,18 @@ class WebResultRepositoryHandle implements WebResultRepository {
     if (!this.isLive(document)) throw unavailable(resultId)
     const { basis, text } = basisOf(document)
     return { document, basis, text }
+  }
+
+  closeAdmissions(): void {
+    this.admissionsClosed = true
+  }
+
+  async drain(): Promise<void> {
+    // Admissions are closed before the runtime calls this, so joining one
+    // snapshot of the chains reaches every publication that was accepted.
+    while (this.publishing.size > 0) {
+      await Promise.all([...this.publishing.values()])
+    }
   }
 
   /** Whether a record is still inside its retention window. */

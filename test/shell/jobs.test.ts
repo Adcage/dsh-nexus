@@ -951,3 +951,58 @@ describe('guarded settlement and unload diagnostics', () => {
     open.splice(open.indexOf(harness), 1)
   })
 })
+
+describe('per-Agent managed range facts', () => {
+  it('reports a clean Agent, a pending start and an unconfirmed range truthfully', async () => {
+    let openGate: (() => void) | undefined
+    let announcePending: (() => void) | undefined
+    const pending = new Promise<void>((resolve) => {
+      announcePending = resolve
+    })
+    const shell = await openJobsHarness({
+      subprocess: {
+        beforeResolveExecutable: async () => {
+          announcePending?.()
+          announcePending = undefined
+          await new Promise<void>((resolve) => {
+            openGate = resolve
+          })
+        },
+        script: () => ({ staysOpen: true, cleanupUnconfirmed: true }),
+      },
+    })
+    const agent = shell.harness.owner.agent
+    const execution = await shell.harness.captureExecution()
+
+    // Nothing started yet: a genuine clean case.
+    expect(shell.controller.cleanupOf(agent)).toBe('clean')
+    expect(shell.controller.unresolved()).toEqual([])
+
+    const starting = shell.controller.run(shell.harness.owner, execution, {
+      command: 'pending',
+      cwd: CWD,
+      background: true,
+    })
+    await pending
+    // A start that has not published yet is pending, never clean.
+    expect(shell.controller.cleanupOf(agent)).toBe('pending')
+
+    openGate?.()
+    const run = await starting
+    const resourceId = run.view.resourceId
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+    expect(shell.controller.unresolved()).toContainEqual(
+      expect.objectContaining({ agent, state: 'unconfirmed', detail: expect.stringContaining(resourceId) }),
+    )
+
+    await shell.controller.stop(shell.harness.owner, resourceId)
+    // A stop that could not confirm the range keeps the fact unconfirmed.
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+
+    const disposed = await shell.controller.dispose()
+    expect(disposed.failures.map((failure) => failure.resourceId)).toContain(resourceId)
+    // The fact survives the controller's own disposal: the range is still out there.
+    expect(shell.controller.cleanupOf(agent)).toBe('unconfirmed')
+    expect(shell.controller.unresolved().map((entry) => entry.agent)).toContain(agent)
+  }, 60_000)
+})

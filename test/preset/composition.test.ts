@@ -158,10 +158,18 @@ describe('nexus preset composition', () => {
       const firstAgent = await harness.createAgent('nexus-repeat-a', NEXUS_PRESET_ID)
       await harness.runTurn(firstAgent, 'first')
       expect(harness.toolNamesOf(firstAgent)).toContain('read')
+      const firstRuntime = harness.runtime
 
       await harness.stopNexus()
       expect(harness.ctx.tools.schemas().map((schema) => schema.name).sort()).toEqual(baseline)
       expect(harness.ctx.get('nexusRuntime')).toBeUndefined()
+      // The host-fiber unload drains the generation's shell surface and the
+      // host-registered terminal backends in one ordered teardown: a clean
+      // generation reports a clean drain rather than treating the concurrent
+      // backend removal as an unconfirmed range.
+      const stopped = await firstRuntime.dispose()
+      expect(stopped.failures).toEqual([])
+      expect(stopped.released).toBe(true)
 
       // A second generation over the same host composition: the definition is
       // registered again and serves a new session.

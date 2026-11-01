@@ -535,3 +535,41 @@ describe('drain', () => {
     expect((await openCase.store.getPrompt('session-drain'))?.text).toBe(applied.text)
   })
 })
+
+describe('closing admissions', () => {
+  it('refuses new durable prompt work but still joins what it accepted', async () => {
+    const first = moduleOf('first', 'FIRST BODY')
+    const second = moduleOf('second', 'SECOND BODY')
+    const openCase = await openPromptCase({ modules: [first, second], defaultSelection: ['first'] })
+    const { agent } = await openCase.createAgent('session-closing')
+    const gate = gatePromptWrites(openCase.store)
+    const sessions = createPromptSessions(openCase.harness.ctx, gate.store)
+    await sessions.initialize(agent)
+
+    gate.holdNextPut()
+    const accepted = sessions.apply(agent, ['second'], (await openCase.store.readLibrary()).hash)
+    await gate.waitUntilHeld()
+
+    sessions.closeAdmissions()
+    await expect(sessions.apply(agent, ['first'], (await openCase.store.readLibrary()).hash)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_AVAILABLE',
+    })
+    await expect(sessions.initialize(agent)).rejects.toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+
+    let joined = false
+    const draining = sessions.drain()
+    void draining.then(
+      () => {
+        joined = true
+      },
+      () => undefined,
+    )
+    await settledWork()
+    expect(joined).toBe(false)
+
+    gate.release()
+    await draining
+    const applied = await accepted
+    expect((await openCase.store.getPrompt('session-closing'))?.text).toBe(applied.text)
+  })
+})

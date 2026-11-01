@@ -37,6 +37,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   defineTool,
   type InferValue,
@@ -45,6 +46,8 @@ import {
   type ValueSchemaSpec,
 } from '@deepseek-ai/dsh-tools'
 import type { ShellEngine } from '../protocol.ts'
+import type { ManagedCleanupState, ManagedResourceFacts } from '../agent/coordination.ts'
+import { combineManagedCleanup } from '../agent/coordination.ts'
 import { COMMAND_MAX_TIMEOUT_MS, WAIT_MAX_MS } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import { requireOwner, type CallOwner } from '../runtime/owner.ts'
@@ -419,12 +422,22 @@ export interface ShellCleanupReport {
   readonly released: boolean
   /** `resourceId: reason` for everything that stayed unconfirmed. */
   readonly unconfirmed: readonly string[]
+  /** Exact Agents whose managed ranges the surface could not prove empty. */
+  readonly unresolvedAgents: readonly Agent[]
 }
 
 /** The one `shell` tool plus the exact resource boundary behind it. */
 export interface ShellToolSurface {
   /** The registry-ready definition; unchanged from {@link createShellTool}. */
   readonly tool: ToolDefinition
+  /**
+   * The exact-Agent cleanup facts of this surface's two controllers.
+   *
+   * A bound child's Agent disposal is not a cleanup fact; the runtime asks these
+   * facts instead, and only `clean` may release that child's write authority.
+   * @returns the fact provider the runtime tracks.
+   */
+  facts(): ManagedResourceFacts
   /**
    * Release both controllers and report what cleanup proved.
    *
@@ -473,6 +486,12 @@ export function createShellSurface(ctx: Context, config: () => ShellExecutionCon
   const terminals = createTerminalController(ctx, config, { disposeOnUnload: false })
   let disposal: Promise<ShellCleanupReport> | undefined
 
+  const facts: ManagedResourceFacts = Object.freeze({
+    cleanupOf(agent: Agent): ManagedCleanupState {
+      return combineManagedCleanup(processes.cleanupOf(agent), terminals.cleanupOf(agent))
+    },
+  })
+
   const dispose = (): Promise<ShellCleanupReport> => {
     disposal ??= (async () => {
       const unconfirmed: string[] = []
@@ -491,7 +510,16 @@ export function createShellSurface(ctx: Context, config: () => ShellExecutionCon
       } catch (error) {
         unconfirmed.push(`terminals: ${error instanceof Error ? error.message : String(error)}`)
       }
-      return Object.freeze({ released: unconfirmed.length === 0, unconfirmed: Object.freeze(unconfirmed) })
+      // Both controllers retain the facts their own tables no longer hold, so the
+      // exact Agents behind the resolved ranges survive this disposal.
+      const remaining = [...processes.unresolved(), ...terminals.unresolved()]
+      for (const entry of remaining) unconfirmed.push(`${entry.agent.id}: ${entry.detail}`)
+      const unresolvedAgents = [...new Set(remaining.map((entry) => entry.agent))]
+      return Object.freeze({
+        released: unconfirmed.length === 0,
+        unconfirmed: Object.freeze(unconfirmed),
+        unresolvedAgents: Object.freeze(unresolvedAgents),
+      })
     })()
     return disposal
   }
@@ -501,7 +529,7 @@ export function createShellSurface(ctx: Context, config: () => ShellExecutionCon
   // report survives for the runtime's later drain.
   ctx.effect(() => () => dispose(), 'dsh-nexus shell surface')
 
-  return Object.freeze({ tool: buildShellTool(ctx, processes, terminals), dispose })
+  return Object.freeze({ tool: buildShellTool(ctx, processes, terminals), facts: () => facts, dispose })
 }
 
 /**

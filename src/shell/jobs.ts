@@ -43,6 +43,8 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { boundContextSummary, createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { OutputPage, ProcessStopCause, ProcessView, ShellEngine } from '../protocol.ts'
 import { NexusError } from '../runtime/errors.ts'
+import type { ManagedCleanupState, ManagedRangeUnresolved } from '../agent/coordination.ts'
+import { managedCleanupStateOf } from '../agent/coordination.ts'
 import {
   AGENT_MAX_PROCESSES,
   COMMAND_CLEANUP_GRACE_MS,
@@ -298,6 +300,17 @@ export interface ProcessController {
    * @returns the resources cleared and the ones retained with their proof.
    */
   dispose(): Promise<ProcessDisposeResult>
+  /**
+   * The managed-range cleanup fact for one exact Agent.
+   * @param agent - the Agent whose ranges are queried.
+   * @returns `clean` only when every range is confirmed gone.
+   */
+  cleanupOf(agent: Agent): ManagedCleanupState
+  /**
+   * Every managed range this controller cannot prove cleaned.
+   * @returns one entry per pending or unconfirmed range, with its exact Agent.
+   */
+  unresolved(): readonly ManagedRangeUnresolved[]
 }
 
 /** Result of one run. */
@@ -421,6 +434,10 @@ class Controller implements ProcessController {
   private readonly jobsById = new Map<JobId, OwnedProcess>()
   /** Consecutive completion wakes spent by one owner; reset by user-authored input. */
   private readonly wakeSpent = new WeakMap<Agent, number>()
+  /** Failed starts whose native record could not be proven gone, by exact owner. */
+  private readonly unconfirmedStarts = new Map<Agent, string[]>()
+  /** Facts this controller must keep answering after its own disposal. */
+  private retainedUnresolved: readonly ManagedRangeUnresolved[] = []
   private attached: PromiseLike<unknown> | undefined
   private detachController: (() => unknown) | undefined
   private detachReporter: (() => unknown) | undefined
@@ -559,7 +576,12 @@ class Controller implements ProcessController {
         entry = await runTask
       } catch (error) {
         await bounded(setupSettled, STOP_BOUND_MS)
-        await this.removeNativeRecord(jobId, owner.sessionId)
+        const recordGone = await this.removeNativeRecord(jobId, owner.sessionId)
+        if (createdEntry === undefined && !recordGone) {
+          // The process never published, and its native record stayed live: the
+          // range is not proven clean, so the owner's fact must say so.
+          this.recordUnconfirmedStart(owner.agent, `${jobId}: failed start left a live native process record`)
+        }
         if (startController.signal.aborted) throw cancelledBeforePublication(error)
         throw error
       }
@@ -729,6 +751,14 @@ class Controller implements ProcessController {
       }),
     )
     this.detachNative()
+    // A range that survived this disposal must keep answering for its owner:
+    // clearing the tables is not cleanup proof.
+    this.retainedUnresolved = this.unresolved().map((entry) => ({
+      agent: entry.agent,
+      state: 'unconfirmed',
+      detail: entry.detail,
+    }))
+    this.unconfirmedStarts.clear()
     this.entries.clear()
     this.jobsById.clear()
     this.states.clear()
@@ -914,10 +944,16 @@ class Controller implements ProcessController {
     this.dropEmptyState(entry.agent)
   }
 
-  /** Best-effort removal of a settled native record we collected ourselves. */
-  private async removeNativeRecord(jobId: JobId, sessionId: SessionId): Promise<void> {
+  /**
+   * Best-effort removal of a settled native record we collected ourselves.
+   * @param jobId - the record to drop.
+   * @param sessionId - the owner the record belongs to.
+   * @returns true when the record is proven gone (or was never ours); false when
+   *   it is still live and therefore an unproven range.
+   */
+  private async removeNativeRecord(jobId: JobId, sessionId: SessionId): Promise<boolean> {
     const jobs = this.ctx.get('jobs')
-    if (jobs === undefined) return
+    if (jobs === undefined) return true
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const view = jobs.get(jobId, sessionId)
@@ -926,13 +962,14 @@ class Controller implements ProcessController {
           continue
         }
         jobs.remove(jobId, sessionId)
-        return
+        return true
       } catch {
         // Unknown/foreign means the owner's native cleanup already dropped it;
         // this record is not a resource the controller must retain.
-        return
+        return true
       }
     }
+    return false
   }
 
   /** Project the native job record without leaking ownership or output paths. */
@@ -994,7 +1031,59 @@ class Controller implements ProcessController {
     return jobs
   }
 
-  /** Forget one Agent bucket when nothing is reserved or managed. */
+  /**
+   * The managed-range cleanup fact for one exact Agent.
+   * @param agent - the Agent whose ranges are queried.
+   * @returns `clean` only when every range is confirmed gone.
+   */
+  cleanupOf(agent: Agent): ManagedCleanupState {
+    return managedCleanupStateOf(this.unresolved(), agent)
+  }
+
+  /**
+   * Every managed range this controller cannot prove cleaned.
+   *
+   * A start still in flight is `pending`; a live range the provider never
+   * confirmed empty, or a failed start whose native record stayed live, is
+   * `unconfirmed`. Entries whose provider confirmed the range are clean. This is
+   * the fact a bound child's disposal is NOT allowed to assume.
+   * @returns one entry per unresolved range, with its exact Agent.
+   */
+  unresolved(): readonly ManagedRangeUnresolved[] {
+    const unresolved: ManagedRangeUnresolved[] = [...this.retainedUnresolved]
+    for (const [agent, state] of this.states) {
+      if (state.reservations.size > 0) {
+        unresolved.push({
+          agent,
+          state: 'pending',
+          detail: `${state.reservations.size} managed process start(s) still in flight`,
+        })
+      }
+      for (const entry of state.processes.values()) {
+        if (entry.forgotten) continue
+        const view = entry.process.view()
+        if (view.cleanupConfirmed) continue
+        unresolved.push({
+          agent,
+          state: 'unconfirmed',
+          detail: `${entry.resourceId}: ${view.status === 'stopping' ? 'cleanup-unconfirmed' : 'range-not-empty'}`,
+        })
+      }
+    }
+    for (const [agent, details] of this.unconfirmedStarts) {
+      for (const detail of details) unresolved.push({ agent, state: 'unconfirmed', detail })
+    }
+    return unresolved
+  }
+
+  /** Record a start whose native process record could not be proven gone. */
+  private recordUnconfirmedStart(agent: Agent, detail: string): void {
+    const existing = this.unconfirmedStarts.get(agent)
+    if (existing === undefined) this.unconfirmedStarts.set(agent, [detail])
+    else existing.push(detail)
+  }
+
+  /** Forget one Agent bucket when nothing is pending or owned. */
   private dropEmptyState(agent: Agent): void {
     const state = this.states.get(agent)
     if (state !== undefined && state.reservations.size === 0 && state.processes.size === 0) {

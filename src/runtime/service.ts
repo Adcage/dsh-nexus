@@ -30,7 +30,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Config } from '../config.ts'
-import { createStoreWriteScopeJournal, createWriteCoordinator, type WriteCoordinator } from '../agent/coordination.ts'
+import {
+  combineManagedCleanup,
+  createStoreWriteScopeJournal,
+  createWriteCoordinator,
+  type ManagedCleanupState,
+  type ManagedResourceFacts,
+  type WriteCoordinator,
+} from '../agent/coordination.ts'
 import { createPromptSessions, type PromptSessions } from '../prompts/sessions.ts'
 import type { RuntimeSettings } from '../protocol.ts'
 import { NexusError } from './errors.ts'
@@ -75,6 +82,13 @@ export interface NexusCleanupReport {
   readonly released: boolean
   /** Short identifiers of whatever the resource could not confirm. */
   readonly unconfirmed: readonly string[]
+  /**
+   * Exact Agents whose managed ranges the disposal could not prove empty.
+   *
+   * A retiring generation hands these to the runtime, so a later disposal edge
+   * for one of those Agents cannot treat the tree as clean.
+   */
+  readonly unresolvedAgents?: readonly Agent[]
 }
 
 /** Disposer registered with {@link NexusRuntime.attach}. */
@@ -154,12 +168,35 @@ export interface NexusRuntime {
    *
    * The runtime drains attached resources (most recent first) before it closes
    * the store, so a controller, reporter, backend registration or repository
-   * created by a preset generation is torn down in a defined order.
+   * created by a preset generation is torn down in a defined order. Each call is
+   * its own entry: two overlapping generations share the label, not the entry,
+   * so detaching one never erases the other's unresolved facts.
    * @param label - short label used in the teardown report.
    * @param dispose - the resource's own cleanup path.
    * @returns a function that detaches the registration without running it.
    */
   attach(label: string, dispose: NexusResourceDisposer): () => void
+  /**
+   * Track the managed-resource facts of one generation's shell controllers.
+   *
+   * Host-only: the runtime asks these facts when a bound child is disposed, so a
+   * pending or unconfirmed range keeps the child's write authority reserved. A
+   * detach stops the live queries; the generation publishes its final unresolved
+   * facts through {@link NexusRuntime.reportCleanup} before detaching.
+   * @param facts - the generation's exact-Agent facts.
+   * @returns a detach for exactly this registration.
+   */
+  trackManagedResources(facts: ManagedResourceFacts): () => void
+  /**
+   * Publish the completed cleanup outcome of one Nexus-owned resource.
+   *
+   * A generation that owns a resource's disposal calls this after joining the
+   * real report and before it detaches, so the unresolved facts stay with the
+   * root runtime after the generation is gone.
+   * @param label - short label used in the teardown report.
+   * @param report - the disposal's own report.
+   */
+  reportCleanup(label: string, report: NexusCleanupReport): void
   /**
    * Stop admissions, drain owned resources and pending writes, then close the store.
    *
@@ -269,6 +306,14 @@ class NexusRuntimeHandle implements NexusRuntime {
   private committed: Stored<RuntimeSettings>
   /** Exact Agents this host composed as Nexus actors. */
   private readonly members = new Set<Agent>()
+  /** Managed-resource fact providers of the live generations. */
+  private readonly resourceFacts: { readonly facts: ManagedResourceFacts }[] = []
+  /** Unconfirmed report details a retired generation handed to this runtime. */
+  private readonly retainedResources: string[] = []
+  /** Exact Agents whose ranges a retired generation could not prove empty. */
+  private readonly retainedAgents = new Set<Agent>()
+  /** Reports already folded into the teardown status (identity dedupe). */
+  private readonly recordedReports = new Set<NexusCleanupReport>()
   /** Nexus-owned resources, drained most recent first. */
   private readonly resources: { readonly label: string; readonly dispose: NexusResourceDisposer }[] = []
   private closing = false
@@ -296,6 +341,7 @@ class NexusRuntimeHandle implements NexusRuntime {
 
   async saveSettings(value: RuntimeSettings, expectedHash: string): Promise<Stored<RuntimeSettings>> {
     this.assertOpen('save the Nexus settings')
+    this.assertAdmitting('save the Nexus settings')
     const saved = frozenRecord(await this.store.saveSettings(value, expectedHash))
     this.committed = saved
     return saved
@@ -333,6 +379,51 @@ class NexusRuntimeHandle implements NexusRuntime {
     }
   }
 
+  trackManagedResources(facts: ManagedResourceFacts): () => void {
+    this.assertAdmitting('track managed resources')
+    const entry = { facts }
+    this.resourceFacts.push(entry)
+    return () => {
+      const index = this.resourceFacts.indexOf(entry)
+      if (index >= 0) this.resourceFacts.splice(index, 1)
+    }
+  }
+
+  reportCleanup(label: string, report: NexusCleanupReport): void {
+    this.recordReport(label, report)
+  }
+
+  /**
+   * The cleanup fact for one exact Agent, as this runtime can prove it now.
+   * @param agent - the Agent a bound child's write authority belongs to.
+   * @returns a retained or tracked `unconfirmed` over `pending` over `clean`.
+   */
+  managedCleanupOf(agent: Agent): ManagedCleanupState {
+    if (this.retainedAgents.has(agent)) return 'unconfirmed'
+    let state: ManagedCleanupState = 'clean'
+    for (const entry of this.resourceFacts) state = combineManagedCleanup(state, entry.facts.cleanupOf(agent))
+    return state
+  }
+
+  /**
+   * Record one completed resource report exactly once.
+   *
+   * The same report object may arrive twice (an attached disposer the runtime
+   * drained and the generation that published it), so identity is the dedupe
+   * key; unresolved facts it names stay owned by this runtime afterwards.
+   * @param label - resource label for the teardown status.
+   * @param report - the report to record.
+   */
+  private recordReport(label: string, report: NexusCleanupReport): void {
+    if (this.recordedReports.has(report)) return
+    this.recordedReports.add(report)
+    if (report.released === false) {
+      const detail = report.unconfirmed.map((item) => `${label}: ${item}`)
+      this.retainedResources.push(...(detail.length > 0 ? detail : [label]))
+    }
+    for (const agent of report.unresolvedAgents ?? []) this.retainedAgents.add(agent)
+  }
+
   dispose(): Promise<NexusRuntimeStatus> {
     this.disposal ??= this.runDisposal()
     return this.disposal
@@ -341,27 +432,31 @@ class NexusRuntimeHandle implements NexusRuntime {
   /**
    * Stop admissions, drain owned resources and pending writes, then close the store.
    *
-   * The order is the contract: a resource that reports unconfirmed cleanup or a
-   * write scope that stayed reserved keeps `released` false, and no failure is
-   * converted into success.
+   * The order is the contract: admissions close synchronously first, accepted work
+   * is joined, and only then does the store close. A resource that reports
+   * unconfirmed cleanup or a write scope that stayed reserved keeps `released`
+   * false, and no failure is converted into success.
    * @returns what the teardown proved.
    */
   private async runDisposal(): Promise<NexusRuntimeStatus> {
     this.closing = true
+    // Synchronously refuse every new admission before anything is joined, so no
+    // accepted work can be refused later by the closing store.
+    this.coordinator.closeAdmissions()
+    this.prompts.closeAdmissions()
+    this.webResults.closeAdmissions()
     const failures: string[] = []
     const unconfirmedResources: string[] = []
     for (const entry of this.resources.splice(0).reverse()) {
       try {
         const report = await entry.dispose()
-        if (report !== undefined && report.released !== true) {
-          const detail = report.unconfirmed.map((item) => `${entry.label}: ${item}`)
-          unconfirmedResources.push(...(detail.length > 0 ? detail : [entry.label]))
-        }
+        if (report !== undefined) this.recordReport(entry.label, report)
       } catch (error) {
         unconfirmedResources.push(entry.label)
         failures.push(`${entry.label}: ${describeFailure(error)}`)
       }
     }
+    unconfirmedResources.push(...this.retainedResources)
     try {
       await this.prompts.drain()
     } catch (error) {
@@ -372,8 +467,14 @@ class NexusRuntimeHandle implements NexusRuntime {
     } catch (error) {
       failures.push(`write authority: ${describeFailure(error)}`)
     }
+    try {
+      await this.webResults.drain()
+    } catch (error) {
+      failures.push(`saved web results: ${describeFailure(error)}`)
+    }
     const retainedScopes = this.coordinator.retainedScopes()
     this.members.clear()
+    this.prompts.dispose()
     try {
       await this.store.dispose()
     } catch (error) {
@@ -383,7 +484,11 @@ class NexusRuntimeHandle implements NexusRuntime {
     this.detachService()
     this.onClosed()
     return Object.freeze({
-      released: unconfirmedResources.length === 0 && retainedScopes.length === 0 && failures.length === 0,
+      released:
+        unconfirmedResources.length === 0 &&
+        retainedScopes.length === 0 &&
+        this.retainedAgents.size === 0 &&
+        failures.length === 0,
       unconfirmedResources: Object.freeze(unconfirmedResources),
       retainedScopes,
       failures: Object.freeze(failures),
@@ -423,26 +528,39 @@ class NexusRuntimeHandle implements NexusRuntime {
  */
 async function createRuntime(host: Context, config: Config, onClosed: () => void): Promise<NexusRuntime> {
   const store = await openNexusStore(host, { disposeOnUnload: false })
-  const coordinator = createWriteCoordinator(host, createStoreWriteScopeJournal(store))
+  // The coordinator asks the host's managed-resource facts; the handle answers
+  // once it is constructed, and no Agent can be disposed before this function
+  // returns.
+  let facts: ManagedResourceFacts = { cleanupOf: () => 'unconfirmed' }
+  const coordinator = createWriteCoordinator(host, createStoreWriteScopeJournal(store), {
+    cleanupOf: (agent) => facts.cleanupOf(agent),
+  })
   let detachService: (() => void) | undefined
   let handle: NexusRuntimeHandle
+  const prompts = { value: undefined as PromptSessions | undefined }
   try {
     // Every survivor of a previous process is unresolved: a restart is not a
-    // cleanup receipt, so its tree stays refused.
+    // cleanup receipt, so its tree stays refused. All fallible reads finish
+    // before the listener-owning prompt sessions exist (failed open leaves no
+    // listener behind holding a closed store).
     await coordinator.restore()
+    const initial = frozenRecord(await store.readSettings())
+    prompts.value = createPromptSessions(host, store)
     handle = new NexusRuntimeHandle({
       deployment: deepFreeze({ ...config }),
       store,
       coordinator,
-      prompts: createPromptSessions(host, store),
+      prompts: prompts.value,
       webResults: createWebResultRepository(store),
-      initial: frozenRecord(await store.readSettings()),
+      initial,
       detachService: () => {
         detachService?.()
       },
       onClosed,
     })
+    facts = { cleanupOf: (agent) => handle.managedCleanupOf(agent) }
   } catch (error) {
+    prompts.value?.dispose()
     await coordinator.dispose().catch(() => undefined)
     await store.dispose().catch(() => undefined)
     throw error

@@ -81,8 +81,11 @@ import {
   type AttachmentDouble,
   type CountingSandboxedFileSystem,
   type NexusStoreFixture,
+  type ScriptedProcessScript,
+  type SubprocessDouble,
   type WebDouble,
 } from './fixtures.ts'
+import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { Config as NexusConfigSchema } from '../../src/config.ts'
 import type { Config as NexusConfig } from '../../src/config.ts'
 import type { NexusRuntime } from '../../src/runtime/service.ts'
@@ -121,6 +124,12 @@ export interface PresetHarnessOptions {
   readonly nativeToolNames?: readonly string[]
   /** System-prompt configuration for the mounted registry. */
   readonly systemPrompt?: SystemPromptConfig
+  /**
+   * Script the process-spawn boundary for a case that must own a range the
+   * provider cannot clean (a hanging or never-confirmed process). Default: the
+   * fixture's clean, immediately finished process.
+   */
+  readonly subprocessScript?: (spec: SubprocessSpawnSpec) => ScriptedProcessScript
 }
 
 /** One mounted host composition plus the built Nexus row on top of it. */
@@ -139,6 +148,8 @@ export interface PresetHarness {
   readonly web: WebDouble
   /** Attachment store double. */
   readonly attachments: AttachmentDouble
+  /** The scripted process-spawn boundary, with its recorded spawn requests. */
+  readonly subprocess: SubprocessDouble
   /** Durable Nexus store mounted as `storageDomain`. */
   readonly fixture: NexusStoreFixture
   /** Every model request the scripted transport answered, in order. */
@@ -373,7 +384,10 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     // the executor's real policy resolution and argv path while replacing only
     // the host-side runner/process. Neither claims OS-sandbox or PTY proof.
     await mountRecordingSandbox(ctx)
-    await mountSubprocessDouble(ctx)
+    const subprocess = await mountSubprocessDouble(
+      ctx,
+      options.subprocessScript === undefined ? {} : { script: options.subprocessScript },
+    )
     await ctx.plugin(applyShellEnv, {})
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(TerminalService)
@@ -419,6 +433,7 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       fs,
       web,
       attachments,
+      subprocess,
       fixture,
       requests,
       get runtime() {
