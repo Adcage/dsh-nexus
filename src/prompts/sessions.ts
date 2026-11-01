@@ -23,11 +23,21 @@
  * - `peek` is a synchronous read of that one immutable reference, so a request
  *   being assembled can never observe a half-updated state.
  *
- * State is owned by this instance and keyed by the EXACT Agent object. A session
- * id alone is not identity: a restarted session materializes a second Agent with
- * the same id, and an operation started for the old one must not publish into
- * the new one's reference. Work for one Agent is serialized on that entry, and
- * every publication re-checks that the entry is still the live one.
+ * State is owned by this instance. Effective snapshots are keyed by the EXACT
+ * Agent object, because a session id alone is not identity: a restarted session
+ * materializes a second Agent with the same id, and an operation started for the
+ * old one must never publish into the new one's reference. Durable work, on the
+ * other hand, is serialized per SESSION ID: the registry allows one live Agent
+ * per session, so one queue per session is what makes a restart observe the
+ * previous residency's write order instead of racing it.
+ *
+ * Two limits are stated rather than hidden. A write that was already in flight
+ * when its Agent was disposed can still take effect durably while its
+ * publication is refused; the next residency's restore is queued behind exactly
+ * that write, so it observes the persisted record instead of diverging. And two
+ * independently created instances over one store are not serialized against each
+ * other — production composition must hold ONE instance across the generations
+ * that can overlap (Task 9).
  *
  * Module count and byte limits are NOT validated here: Task 10 owns the single
  * library validator behind the console save/apply/preview path, so this seam
@@ -84,12 +94,10 @@ export interface PromptSessions {
 interface AgentEntry {
   /** The exact Agent this entry belongs to; identity is the only key. */
   readonly agent: Agent
-  /** Durable session identity the snapshot is persisted under. */
+  /** Durable session identity the snapshot is persisted under and serialized by. */
   readonly sessionId: string
   /** Effective snapshot; set exactly once per publication. */
   snapshot: PromptSnapshot | undefined
-  /** Tail of this Agent's serialized operations. */
-  queue: Promise<unknown>
 }
 
 /**
@@ -127,6 +135,8 @@ class PromptSessionsHandle implements PromptSessions {
   private readonly store: NexusStore
   /** Effective state per exact Agent; a session id alone never addresses an entry. */
   private readonly entries = new WeakMap<Agent, AgentEntry>()
+  /** Tail of the serialized durable work for one session id, across residencies. */
+  private readonly queues = new Map<string, Promise<unknown>>()
 
   /**
    * @param ctx - scope that owns the lifecycle listener and resolves the live parent Agent.
@@ -144,7 +154,7 @@ class PromptSessionsHandle implements PromptSessions {
 
   async initialize(agent: Agent): Promise<PromptSnapshot> {
     const entry = this.entryFor(agent)
-    return this.serialize(entry, () => this.resolveInitial(entry))
+    return this.serialize(entry.sessionId, () => this.resolveInitial(entry))
   }
 
   async apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string): Promise<PromptSnapshot> {
@@ -155,7 +165,7 @@ class PromptSessionsHandle implements PromptSessions {
         `the Nexus prompt for session "${agent.id}" was never initialized; apply needs the exact Agent whose persona registration ran, not a session id`,
       )
     }
-    return this.serialize(entry, () => this.applySelection(entry, selection, expectedLibraryHash))
+    return this.serialize(entry.sessionId, () => this.applySelection(entry, selection, expectedLibraryHash))
   }
 
   peek(agent: Agent): PromptSnapshot {
@@ -177,24 +187,54 @@ class PromptSessionsHandle implements PromptSessions {
   private entryFor(agent: Agent): AgentEntry {
     const existing = this.entries.get(agent)
     if (existing !== undefined) return existing
-    const entry: AgentEntry = { agent, sessionId: agent.id, snapshot: undefined, queue: Promise.resolve() }
+    const entry: AgentEntry = { agent, sessionId: agent.id, snapshot: undefined }
     this.entries.set(agent, entry)
     return entry
   }
 
   /**
-   * Run one operation after every operation already queued for this Agent.
+   * Run one complete logical operation after everything already queued for the
+   * same durable session.
    *
-   * The queue carries rejections forward as "settled" so a failed restore does
-   * not dead-lock later work, while the caller still sees the original failure.
-   * @param entry - the Agent's entry.
-   * @param task - operation to run.
+   * The queue is keyed by session id, not by the live Agent: a restart mints a
+   * second Agent for the same session, and the new residency's restore must
+   * observe the old residency's durable write instead of racing it. `task` is the
+   * WHOLE operation (restore, or capture/check/write/publish), so a write can
+   * never land after newer work that was queued behind it. Only the current tail
+   * is retained; once it settles it is dropped, so an idle session keeps no queue
+   * entry. A rejection is carried forward as "settled" for the next operation
+   * while the caller still receives its own error.
+   * @param sessionId - durable session whose durable work is serialized.
+   * @param task - complete operation to run.
    * @returns the operation's result.
    */
-  private serialize<T>(entry: AgentEntry, task: () => Promise<T>): Promise<T> {
-    const next = entry.queue.then(task, task)
-    entry.queue = next.catch(() => undefined)
+  private serialize<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.queues.get(sessionId) ?? Promise.resolve()
+    const next = previous.then(task, task)
+    const settled = next.catch(() => undefined)
+    this.queues.set(sessionId, settled)
+    void settled.then(() => {
+      if (this.queues.get(sessionId) === settled) this.queues.delete(sessionId)
+    })
     return next
+  }
+
+  /**
+   * Refuse work for an Agent that is no longer the live entry for its session.
+   *
+   * A queued operation can become stale before it starts, and an Agent can be
+   * disposed while its snapshot is being captured; both must fail instead of
+   * writing for a residency that no longer exists.
+   * @param entry - the entry the queued operation was created for.
+   * @throws NexusError `NO_AGENT` when that exact Agent is no longer live here.
+   */
+  private assertLive(entry: AgentEntry): void {
+    if (this.entries.get(entry.agent) !== entry) {
+      throw new NexusError(
+        'NO_AGENT',
+        `the Nexus prompt work for session "${entry.sessionId}" was refused: this Agent was disposed before the operation could run, and a session id alone cannot address another Agent's state`,
+      )
+    }
   }
 
   /**
@@ -204,6 +244,7 @@ class PromptSessionsHandle implements PromptSessions {
    * @returns the effective snapshot.
    */
   private async resolveInitial(entry: AgentEntry): Promise<PromptSnapshot> {
+    this.assertLive(entry)
     if (entry.snapshot !== undefined) return entry.snapshot
     const saved = await this.store.getPrompt(entry.sessionId)
     if (saved !== undefined) {
@@ -218,6 +259,7 @@ class PromptSessionsHandle implements PromptSessions {
     const inherited = await this.inheritedSnapshot(entry.agent)
     if (inherited !== undefined) {
       const snapshot = freezeSnapshot(entry.sessionId, inherited.selection, inherited.modules, inherited.text)
+      this.assertLive(entry)
       await this.store.putPrompt(snapshot)
       return this.publish(entry, snapshot)
     }
@@ -229,6 +271,7 @@ class PromptSessionsHandle implements PromptSessions {
       modules,
       composePromptText(modules),
     )
+    this.assertLive(entry)
     await this.store.putPrompt(snapshot)
     return this.publish(entry, snapshot)
   }
@@ -265,6 +308,7 @@ class PromptSessionsHandle implements PromptSessions {
     selection: readonly string[],
     expectedLibraryHash: string,
   ): Promise<PromptSnapshot> {
+    this.assertLive(entry)
     if (entry.snapshot === undefined) {
       throw new NexusError(
         'NO_AGENT',
@@ -280,6 +324,7 @@ class PromptSessionsHandle implements PromptSessions {
     }
     const modules = selectedPromptModules(library.value, selection)
     const snapshot = freezeSnapshot(entry.sessionId, selection, modules, composePromptText(modules))
+    this.assertLive(entry)
     await this.store.putPrompt(snapshot)
     return this.publish(entry, snapshot)
   }
@@ -305,9 +350,10 @@ class PromptSessionsHandle implements PromptSessions {
 /**
  * Create the prompt-session state.
  *
- * One instance owns the per-Agent effective references for one plugin
- * incarnation; production composition (the Nexus preset) creates it once and
- * registers it per Agent scope (Task 9).
+ * One instance owns the per-Agent effective references and the per-session
+ * durable queues for one plugin incarnation; production composition (the Nexus
+ * preset) creates it once and registers it per Agent scope (Task 9). Two live
+ * instances over one store are not serialized against each other.
  * @param ctx - registration scope; it must reach `agents` to see a live parent.
  * @param store - durable Nexus store.
  * @returns the prompt-session state.

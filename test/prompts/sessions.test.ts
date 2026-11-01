@@ -119,6 +119,17 @@ function failureCode(run: () => unknown): unknown {
 }
 
 /**
+ * Let every operation that is already able to settle do so.
+ *
+ * A macrotask turn, not a wall-clock wait: it lets queued promise work and I/O
+ * callbacks run once, which is enough to observe whether an operation is still
+ * waiting on a held durable write.
+ */
+async function settledWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}
+
+/**
  * Wrap one real store with a gate in front of its prompt writes, so a case can
  * hold a durable write open and observe ordering. Every other member is the
  * real store's own method; the gate only decides WHEN one write proceeds.
@@ -299,6 +310,11 @@ describe('apply', () => {
 
     expect(openCase.sessions.peek(agent)).toBe(before)
     expect((await openCase.store.getPrompt('session-a'))?.text).toBe(before.text)
+
+    // A refusal must not poison the session's durable queue: the next valid apply runs.
+    const accepted = await openCase.sessions.apply(agent, ['m2'], (await openCase.store.readLibrary()).hash)
+    expect(accepted.selection).toEqual(['m2'])
+    expect(openCase.sessions.peek(agent)).toBe(accepted)
   })
 
   it('keeps the current snapshot when the durable write fails', async () => {
@@ -415,6 +431,60 @@ describe('agent identity and lifecycle', () => {
     const restored = await gated.initialize(recreated)
     expect(gated.peek(recreated)).toBe(restored)
     expect(restored.text).toBe(composePromptText([second]))
+  })
+
+  it('serializes the whole durable operation across residencies of one session id', async () => {
+    const first = moduleOf('first', 'FIRST BODY')
+    const second = moduleOf('second', 'SECOND BODY')
+    const openCase = await openPromptCase({ modules: [first, second], defaultSelection: ['first'] })
+    const originalHandle = await openCase.createAgent('session-a')
+    const gate = gatePromptWrites(openCase.store)
+    const gated = createPromptSessions(openCase.harness.ctx, gate.store)
+    expect((await gated.initialize(originalHandle.agent)).text).toBe(composePromptText([first]))
+
+    gate.holdNextPut()
+    const staleOutcome = gated
+      .apply(originalHandle.agent, ['second'], (await openCase.store.readLibrary()).hash)
+      .then((value) => ({ applied: value }), (error: unknown) => ({ refused: error }))
+    await gate.waitUntilHeld()
+
+    await originalHandle.dispose()
+
+    // The replacement residency starts while the old durable write is still
+    // held. Its initialization is started here and never awaited before the
+    // release, because a correct queue keeps it pending on that write.
+    const recreatedHandle = await openCase.createAgent('session-a')
+    const pending = gated.initialize(recreatedHandle.agent)
+    let settled = false
+    void pending.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await settledWork()
+    expect(settled).toBe(false)
+
+    gate.release()
+    expect(await staleOutcome).toMatchObject({ refused: { code: 'NO_AGENT' } })
+    const restored = await pending
+
+    // The new residency observes the serialized durable result, not the record
+    // it would have read while the old write was still invisible.
+    expect(restored.text).toBe(composePromptText([second]))
+    expect(gated.peek(recreatedHandle.agent)).toBe(restored)
+    expect((await openCase.store.getPrompt('session-a'))?.text).toBe(restored.text)
+
+    // A newer committed apply on the new residency lands after the old write and stays final.
+    const committed = await gated.apply(recreatedHandle.agent, ['first'], (await openCase.store.readLibrary()).hash)
+    expect(committed.text).toBe(composePromptText([first]))
+    expect((await openCase.store.getPrompt('session-a'))?.text).toBe(committed.text)
+    await openCase.store.dispose()
+    const reopenedStore = await openCase.fixture.open()
+    expect((await reopenedStore.getPrompt('session-a'))?.text).toBe(committed.text)
+    await reopenedStore.dispose()
   })
 
   it('keeps another agent snapshot when one agent is disposed', async () => {

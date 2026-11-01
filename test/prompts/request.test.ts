@@ -197,16 +197,23 @@ function textOf(message: GenerateOptions['messages'][number]): string {
  * Read the effective system prompt of one captured request.
  *
  * The loop sends the prompt as derived history, not as `GenerateOptions.system`.
- * Without an adapter-declared `systemPromptUpdate`, a changed prompt is
- * consolidated at the first system node, so the last system node is the
- * effective one for the next request.
+ * This scripted route declares no `systemPromptUpdate`, so the loop keeps exactly
+ * one normalized system node and refreshes it in place; a route that declared
+ * `'in-history'` would instead append a changed prompt after the cached history,
+ * and an empty rendering clears nodes through logged empty replacements. The last
+ * NON-EMPTY system node is therefore the prompt the provider would read in every
+ * one of those shapes.
  * @param options - captured request.
  * @returns the system prompt text the provider would read.
  */
 function systemText(options: GenerateOptions): string {
   const nodes = options.messages.filter((message) => message.role === 'system')
-  const last = nodes.at(-1)
-  return last === undefined ? '' : textOf(last)
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const node = nodes[index]
+    const text = node === undefined ? '' : textOf(node)
+    if (text !== '') return text
+  }
+  return ''
 }
 
 /**
