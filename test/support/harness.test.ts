@@ -37,7 +37,7 @@ describe('createToolHarness', () => {
               },
               async execute(args, exec) {
                 observed.agentId = exec.agent?.id
-                observed.sessionId = exec.agent?.id
+                observed.sessionId = exec.agent?.session.id
                 const target = await harness.ctx.fs.resolve(args.path)
                 const text = await harness.ctx.fs.readText(target)
                 const web = await harness.ctx.web.search({ query: 'nexus', maxResults: 1 })
@@ -74,6 +74,7 @@ describe('createToolHarness', () => {
         exitCode: 0,
       })
       expect(observed.agentId).toBe(SessionId('owner-a'))
+      expect(observed.sessionId).toBe(SessionId('owner-a'))
       expect(harness.web.searches).toEqual([{ query: 'nexus', maxResults: 1 }])
       expect(harness.subprocess.spawns).toHaveLength(1)
       expect(harness.subprocess.spawns[0]?.cwd).toBe('/workspace')

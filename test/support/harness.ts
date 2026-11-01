@@ -28,6 +28,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   mountAgentLoopTestDependencies,
@@ -37,10 +38,18 @@ import {
 import {
   createOwner,
   FsDouble,
+  mountAttachmentDouble,
+  mountLocalFileSystem,
+  mountModelRoute,
   mountSubprocessDouble,
   mountWebDouble,
+  CountingLocalFileSystem,
+  type AttachmentDouble,
+  type AttachmentDoubleOptions,
   type FsDoubleOptions,
   type HarnessOwner,
+  type LocalFileSystemDoubleOptions,
+  type ModelRouteOptions,
   type SubprocessDouble,
   type SubprocessDoubleOptions,
   type WebDouble,
@@ -59,10 +68,19 @@ export interface HarnessOwnerOptions {
 export interface ToolHarnessOptions {
   /** Explicit owner identity; the Agent is created under this session id. */
   readonly owner?: HarnessOwnerOptions
-  /** Session working directory; defaults to `/workspace`, a path in the fs double. */
+  /** Session working directory; defaults to the filesystem root (`/workspace` for the double). */
   readonly cwd?: string
   /** Seed files for the in-memory filesystem double. */
   readonly fs?: FsDoubleOptions
+  /**
+   * Mount the shipped host backend over this real directory instead of the
+   * in-memory double. Byte fidelity and version guards are then the backend's.
+   */
+  readonly localFs?: LocalFileSystemDoubleOptions
+  /** Register this exact model route for the created Agent. */
+  readonly model?: ModelRouteOptions
+  /** Mount an in-memory attachment store with these limits. */
+  readonly attachments?: AttachmentDoubleOptions
   /** Scripted answers for the web double. */
   readonly web?: WebDoubleOptions
   /** Scripts for the subprocess double. */
@@ -75,8 +93,14 @@ export interface ToolHarness {
   readonly ctx: Context
   /** Explicit owner, carrying the real Agent every run is attributed to. */
   readonly owner: HarnessOwner
-  /** In-memory filesystem double registered as `ctx.fs`. */
-  readonly fs: FsDouble
+  /** The mounted filesystem backend registered as `ctx.fs`. */
+  readonly fs: FileSystem
+  /** The in-memory double, when that backend was selected. */
+  readonly doubleFs: FsDouble | undefined
+  /** The counting host backend, when `localFs` was selected. */
+  readonly localFs: CountingLocalFileSystem | undefined
+  /** The in-memory attachment store, when `attachments` was selected. */
+  readonly attachments: AttachmentDouble | undefined
   /** Scripted web service registered as `ctx.web`. */
   readonly web: WebDouble
   /** Scripted subprocess service registered as `ctx.subprocess`. */
@@ -105,6 +129,7 @@ const HARNESS_SERVICES = [
   'agentLoop',
   'workingDirectory',
   'fs',
+  'attachments',
   'web',
   'subprocess',
 ] as const
@@ -116,21 +141,34 @@ const HARNESS_SERVICES = [
  */
 export async function createToolHarness(options: ToolHarnessOptions = {}): Promise<ToolHarness> {
   const ctx = new Context()
-  const cwd = options.cwd ?? '/workspace'
+  const cwd = options.cwd ?? options.localFs?.cwd ?? options.localFs?.root ?? '/workspace'
   await mountAgentLoopTestDependencies(ctx)
   provideWorkingDirectoryFixture(ctx, cwd)
   const loop = await mountAgentLoopTestHarness(ctx)
-  const agent = await loop.create(SessionId(options.owner?.sessionId ?? 'harness-session'), {}, { cwd })
+  if (options.model !== undefined) mountModelRoute(ctx, options.model)
+  const agent = await loop.create(
+    SessionId(options.owner?.sessionId ?? 'harness-session'),
+    options.model === undefined ? {} : { provider: options.model.provider, model: options.model.model },
+    { cwd },
+  )
   const owner = createOwner(agent, options.owner?.signal)
 
   let mountedFs: FsDouble | undefined
-  await ctx.plugin((pluginCtx) => {
-    mountedFs = new FsDouble(pluginCtx, options.fs)
-  })
+  let mountedLocal: CountingLocalFileSystem | undefined
+  if (options.localFs !== undefined) {
+    mountedLocal = await mountLocalFileSystem(ctx, { ...options.localFs, cwd })
+  } else {
+    await ctx.plugin((pluginCtx) => {
+      mountedFs = new FsDouble(pluginCtx, options.fs)
+    })
+  }
+  const attachments =
+    options.attachments === undefined ? undefined : await mountAttachmentDouble(ctx, options.attachments)
   const web = await mountWebDouble(ctx, options.web)
   const subprocess = await mountSubprocessDouble(ctx, options.subprocess)
-  if (mountedFs === undefined) throw new Error('the filesystem double did not mount')
-  const fs = mountedFs
+  const backend: FileSystem | undefined = mountedLocal ?? mountedFs
+  if (backend === undefined) throw new Error('no filesystem backend mounted')
+  const fs: FileSystem = backend
   let callCount = 0
   let disposed = false
 
@@ -138,6 +176,9 @@ export async function createToolHarness(options: ToolHarnessOptions = {}): Promi
     ctx,
     owner,
     fs,
+    doubleFs: mountedFs,
+    localFs: mountedLocal,
+    attachments,
     web,
     subprocess,
     async call(name, args = {}) {

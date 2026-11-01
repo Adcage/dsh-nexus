@@ -21,6 +21,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId as SessionIdValue } from '@deepseek-ai/dsh-session'
 import {
+  AttachmentError,
+  AttachmentId,
+  AttachmentStore,
+  type ImageAttachmentLimits,
+  type ImageAttachmentRef,
+  type ImageMediaType,
+  type SaveImageAttachment,
+  type StoredImageAttachment,
+} from '@deepseek-ai/dsh-attachment'
+import {
   FileSystem,
   FsError,
   FsTargetKey,
@@ -34,6 +44,8 @@ import {
   type FsWriteIntent,
   type FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import { LlmAdapter, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import WebRuntime, {
   type WebFetchProvider,
   type WebFetchRequest,
@@ -385,6 +397,349 @@ export class FsDouble extends FileSystem {
 
   private throwIfAborted(signal?: AbortSignal): void {
     if (signal?.aborted === true) throw new FsError('filesystem operation aborted', 'FS_ABORTED')
+  }
+}
+
+/** The real host filesystem backend plus the seams a test needs to observe it. */
+export interface LocalFileSystemDoubleOptions {
+  /** Absolute directory that owns every file the backend writes. */
+  readonly root: string
+  /** Base directory for relative paths; defaults to `root`. */
+  readonly cwd?: string
+}
+
+/**
+ * The shipped host backend with call counters and two controllable seams.
+ *
+ * Byte fidelity, version guards, atomic publication and parent-directory
+ * behaviour all come from `@deepseek-ai/dsh-fs-local`; the overrides only count
+ * publications, let a test run work immediately before one, and let a test
+ * refuse the next one. That keeps the filesystem claims about BOM, CRLF and
+ * untouched bytes an observation of the real backend instead of a convention
+ * of a text-only double.
+ */
+export class CountingLocalFileSystem extends LocalFileSystem {
+  /** Every `writeText` attempt, in call order (accepted or refused). */
+  readonly writes: string[] = []
+  /** Every `editText` attempt, in call order (accepted or refused). */
+  readonly edits: string[] = []
+  /** Run immediately before one write reaches the backend; used to race a create. */
+  beforeWrite?: (target: FsTarget, content: string) => Promise<void> | void
+  /** Refuse the next write with a native I/O failure before publication. */
+  failNextWrite = false
+
+  /**
+   * @param ctx - context the service registers into as `ctx.fs`.
+   * @param config - backend configuration; `cwd` is the relative-path base.
+   */
+  constructor(ctx: Context, config: { cwd: string }) {
+    // A direct construction bypasses Cordis' Config defaulting, so the shipped
+    // overwrite-diff basis has to be supplied explicitly here.
+    super(ctx, { ...config, diffBasisMaxBytes: 10 * 1024 * 1024 })
+  }
+
+  /**
+   * @param target - resolved target.
+   * @param content - complete new content.
+   * @param expected - guarded create or versioned replace.
+   * @param signal - cancellation.
+   * @returns the shipped backend's outcome.
+   */
+  override async writeText(
+    target: FsTarget,
+    content: string,
+    expected?: FsWriteIntent,
+    signal?: AbortSignal,
+  ): Promise<FsWriteOutcome> {
+    this.writes.push(target.displayPath)
+    await this.beforeWrite?.(target, content)
+    if (this.failNextWrite) {
+      this.failNextWrite = false
+      throw new FsError(`simulated atomic publication failure for ${target.displayPath}`, 'FS_IO_ERROR')
+    }
+    return super.writeText(target, content, expected, signal)
+  }
+
+  /**
+   * @param target - resolved target.
+   * @param edit - literal edit request.
+   * @param expected - version guard.
+   * @param signal - cancellation.
+   * @returns the shipped backend's outcome.
+   */
+  override async editText(
+    target: FsTarget,
+    edit: FsEditRequest,
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+  ): Promise<FsEditOutcome> {
+    this.edits.push(target.displayPath)
+    return super.editText(target, edit, expected, signal)
+  }
+}
+
+/**
+ * Mount the shipped host backend over a project-local root.
+ * @param ctx - context to mount into.
+ * @param options - root and relative-path base.
+ * @returns the mounted counting backend.
+ */
+export async function mountLocalFileSystem(
+  ctx: Context,
+  options: LocalFileSystemDoubleOptions,
+): Promise<CountingLocalFileSystem> {
+  let mounted: CountingLocalFileSystem | undefined
+  await ctx.plugin((pluginCtx) => {
+    mounted = new CountingLocalFileSystem(pluginCtx, { cwd: options.cwd ?? options.root })
+  })
+  if (mounted === undefined) throw new Error('the local filesystem backend did not mount')
+  return mounted
+}
+
+/** Deployment image limits a test may narrow. */
+export interface AttachmentDoubleOptions {
+  /** Override any of the shipped limit values. */
+  readonly imageLimits?: Partial<ImageAttachmentLimits>
+}
+
+/** The mounted attachment store plus what it was asked to persist. */
+export interface AttachmentDouble {
+  /** The `AttachmentStore` a tool reads through `ctx.attachments`. */
+  readonly store: AttachmentStore
+  /** Every accepted image save, in call order (bytes copied on entry). */
+  readonly saves: SaveImageAttachment[]
+}
+
+/** Limits used when a test does not narrow one. */
+const DEFAULT_IMAGE_LIMITS: ImageAttachmentLimits = Object.freeze({
+  maxImageBytes: 8 * 1024 * 1024,
+  maxImagesPerMessage: 8,
+  maxMessageImageBytes: 32 * 1024 * 1024,
+  maxImagePixels: 40_000_000,
+  maxImageDimension: 8192,
+  mediaTypes: Object.freeze(['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const),
+})
+
+/**
+ * Mount an `AttachmentStore` that validates and records images without touching
+ * a disk. Durable storage is an external capability; the tool contract under
+ * test is that it submits the file's real bytes and turns the returned
+ * reference into an image block.
+ * @param ctx - context to mount into.
+ * @param options - narrowed deployment limits.
+ * @returns the mounted store and its save log.
+ */
+export async function mountAttachmentDouble(
+  ctx: Context,
+  options: AttachmentDoubleOptions = {},
+): Promise<AttachmentDouble> {
+  let mounted: TestAttachmentStore | undefined
+  await ctx.plugin((pluginCtx) => {
+    mounted = new TestAttachmentStore(pluginCtx, { ...DEFAULT_IMAGE_LIMITS, ...options.imageLimits })
+  })
+  if (mounted === undefined) throw new Error('the attachment store did not mount')
+  return { store: mounted, saves: mounted.saves }
+}
+
+/** In-memory attachment store; see {@link mountAttachmentDouble}. */
+class TestAttachmentStore extends AttachmentStore {
+  readonly saves: SaveImageAttachment[] = []
+  readonly imageLimits: ImageAttachmentLimits
+
+  /**
+   * @param ctx - context the service registers into as `ctx.attachments`.
+   * @param imageLimits - resolved deployment limits.
+   */
+  constructor(ctx: Context, imageLimits: ImageAttachmentLimits) {
+    super(ctx)
+    this.imageLimits = Object.freeze({ ...imageLimits })
+  }
+
+  /**
+   * @param input - encoded bytes, declared media type and optional name.
+   * @returns after the input passes every deployment check without persisting it.
+   */
+  override async validateImage(input: SaveImageAttachment): Promise<void> {
+    this.validate(input)
+  }
+
+  /**
+   * @param input - encoded bytes, declared media type and optional name.
+   * @returns a durable-looking reference for the recorded bytes.
+   */
+  override async saveImage(input: SaveImageAttachment): Promise<ImageAttachmentRef> {
+    const dimensions = this.validate(input)
+    const save: SaveImageAttachment = {
+      data: Uint8Array.from(input.data),
+      mediaType: input.mediaType,
+      ...(input.name === undefined ? {} : { name: input.name }),
+    }
+    this.saves.push(save)
+    return {
+      attachmentId: AttachmentId(`attachment-${this.saves.length}`),
+      mediaType: input.mediaType,
+      bytes: input.data.byteLength,
+      width: dimensions.width,
+      height: dimensions.height,
+      ...(input.name === undefined ? {} : { name: input.name }),
+    }
+  }
+
+  /**
+   * @param ref - durable reference to read.
+   * @returns never; this double keeps no durable objects.
+   */
+  override async readImage(ref: ImageAttachmentRef): Promise<StoredImageAttachment> {
+    throw new AttachmentError(`no stored image ${ref.attachmentId}`, 'ATTACHMENT_NOT_FOUND')
+  }
+
+  /**
+   * Apply the deployment checks once for both validate and save.
+   * @param input - encoded bytes and declared media type.
+   * @returns the decoded dimensions.
+   */
+  private validate(input: SaveImageAttachment): { width: number; height: number } {
+    if (!this.imageLimits.mediaTypes.includes(input.mediaType)) {
+      throw new AttachmentError(`${input.mediaType} is not accepted`, 'UNSUPPORTED_IMAGE_TYPE')
+    }
+    if (input.data.byteLength > this.imageLimits.maxImageBytes) {
+      throw new AttachmentError('image exceeds the deployment byte limit', 'IMAGE_TOO_LARGE')
+    }
+    const dimensions = imageDimensions(input.data, input.mediaType)
+    if (dimensions === undefined) {
+      throw new AttachmentError(`bytes do not decode as ${input.mediaType}`, 'INVALID_IMAGE')
+    }
+    if (
+      dimensions.width > this.imageLimits.maxImageDimension ||
+      dimensions.height > this.imageLimits.maxImageDimension
+    ) {
+      throw new AttachmentError('image side exceeds the deployment limit', 'IMAGE_DIMENSION_TOO_LARGE')
+    }
+    return dimensions
+  }
+}
+
+/**
+ * Validate one image signature and return its intrinsic dimensions.
+ *
+ * Only the formats the shipped attachment path accepts can be recognized; a
+ * declared type whose bytes are something else is refused, matching the real
+ * decoder's authority over the extension.
+ * @param data - encoded image bytes.
+ * @param mediaType - type the caller declared.
+ * @returns width and height, or undefined when the bytes are not that format.
+ */
+function imageDimensions(data: Uint8Array, mediaType: ImageMediaType): { width: number; height: number } | undefined {
+  const ascii = (offset: number, value: string): boolean => {
+    if (data.byteLength < offset + value.length) return false
+    for (let index = 0; index < value.length; index += 1) {
+      if (data[offset + index] !== value.charCodeAt(index)) return false
+    }
+    return true
+  }
+  switch (mediaType) {
+    case 'image/png': {
+      if (data.byteLength < 24 || data[0] !== 0x89 || !ascii(1, 'PNG\r\n\u001a\n')) return undefined
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      return { width: view.getUint32(16), height: view.getUint32(20) }
+    }
+    case 'image/gif': {
+      if (data.byteLength < 10 || !(ascii(0, 'GIF87a') || ascii(0, 'GIF89a'))) return undefined
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      return { width: view.getUint16(6, true), height: view.getUint16(8, true) }
+    }
+    case 'image/jpeg': {
+      if (data.byteLength < 4 || data[0] !== 0xff || data[1] !== 0xd8 || data[2] !== 0xff) return undefined
+      return jpegDimensions(data)
+    }
+    case 'image/webp': {
+      if (data.byteLength < 30 || !ascii(0, 'RIFF') || !ascii(8, 'WEBP') || !ascii(12, 'VP8')) return undefined
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      return ascii(12, 'VP8 ')
+        ? { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff }
+        : undefined
+    }
+  }
+}
+
+/** Scan JPEG segments for the first start-of-frame dimensions. */
+function jpegDimensions(data: Uint8Array): { width: number; height: number } | undefined {
+  let offset = 2
+  while (offset + 9 <= data.byteLength) {
+    if (data[offset] !== 0xff) return undefined
+    const marker = data[offset + 1] ?? 0
+    const length = ((data[offset + 2] ?? 0) << 8) | (data[offset + 3] ?? 0)
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return {
+        height: ((data[offset + 5] ?? 0) << 8) | (data[offset + 6] ?? 0),
+        width: ((data[offset + 7] ?? 0) << 8) | (data[offset + 8] ?? 0),
+      }
+    }
+    if (length < 2) return undefined
+    offset += 2 + length
+  }
+  return undefined
+}
+
+/** The provider/model route a harness Agent requests, plus its declared modalities. */
+export interface ModelRouteOptions {
+  /** Provider route to register. */
+  readonly provider: string
+  /** Exact model id the Agent requests. */
+  readonly model: string
+  /** Declared input modalities; omission means "unknown", never "image". */
+  readonly inputModalities?: readonly ModelModality[]
+}
+
+/**
+ * Register one exact model route on the real `ctx.llm` registry.
+ *
+ * The image gate under test resolves capability through the shipped runtime, so
+ * the test registers an adapter rather than stubbing `llm`. Streaming is never
+ * reached: the route only serves metadata resolution.
+ * @param ctx - context with the mounted `llm` service.
+ * @param route - provider, model and declared modalities.
+ */
+export function mountModelRoute(ctx: Context, route: ModelRouteOptions): void {
+  ctx.effect(
+    () => ctx.llm.registerAdapter([route.provider], new ScriptedModelAdapter(route)),
+    `test support: model route ${route.provider}/${route.model}`,
+  )
+}
+
+/** Metadata-only adapter; see {@link mountModelRoute}. */
+class ScriptedModelAdapter extends LlmAdapter {
+  /**
+   * @param route - the single exact route this adapter serves.
+   */
+  constructor(private readonly route: ModelRouteOptions) {
+    super()
+  }
+
+  /**
+   * @param provider - route being resolved.
+   * @param model - exact model id.
+   * @returns the declared metadata for this route.
+   */
+  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    if (provider !== this.route.provider || model !== this.route.model) {
+      throw new Error(`the scripted adapter does not serve ${provider}/${model}`)
+    }
+    return {
+      provider,
+      id: model,
+      name: model,
+      ...(this.route.inputModalities === undefined
+        ? {}
+        : { inputModalities: Object.freeze([...this.route.inputModalities]) }),
+    }
+  }
+
+  /**
+   * @returns never; a test never streams a model call.
+   */
+  override async *stream(): AsyncGenerator<never> {
+    throw new Error('the scripted model adapter never streams')
   }
 }
 
