@@ -94,6 +94,8 @@ export const AGENT_BATCH_MAX_TASKS = 8
 export const AGENT_READ_DEFAULT_EVENTS = 20
 /** Largest accepted child event count. */
 export const AGENT_READ_MAX_EVENTS = 100
+/** Byte cap of the text one `agent read` page returns. */
+export const AGENT_READ_MAX_BYTES = 16 * 1024
 
 // Prompt library.
 /** Modules one library may hold. */

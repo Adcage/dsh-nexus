@@ -1586,25 +1586,38 @@ export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
   const writes: string[] = []
   let failingPut: string | undefined
   let failingDelete: string | undefined
+  // The JSON medium rewrites one document through a temp-file rename, and
+  // Windows refuses that rename while another handle is mid-replace. Sibling
+  // records of one fixture therefore queue behind each other instead of racing.
+  let mediumQueue: Promise<unknown> = Promise.resolve()
+  const serialized = <T>(operation: () => Promise<T>): Promise<T> => {
+    const next = mediumQueue.then(operation, operation)
+    mediumQueue = next.catch(() => undefined)
+    return next
+  }
   const kv: KvFacet = {
     async open(descriptor: KvUnitDescriptor): Promise<KvUnit> {
       const unit = await innerKv.open(descriptor)
       return {
         loadAll: () => unit.loadAll(),
-        async putRecord(table, key, value) {
-          if (failingPut === table) {
-            failingPut = undefined
-            throw new Error(`the medium refused the write of '${table}/${key}'`)
-          }
-          await unit.putRecord(table, key, value)
-          writes.push(`${table}/${key}`)
+        putRecord(table, key, value) {
+          return serialized(async () => {
+            if (failingPut === table) {
+              failingPut = undefined
+              throw new Error(`the medium refused the write of '${table}/${key}'`)
+            }
+            await unit.putRecord(table, key, value)
+            writes.push(`${table}/${key}`)
+          })
         },
-        async deleteRecord(table, key) {
-          if (failingDelete === table) {
-            failingDelete = undefined
-            throw new Error(`the medium refused the delete of '${table}/${key}'`)
-          }
-          return unit.deleteRecord(table, key)
+        deleteRecord(table, key) {
+          return serialized(async () => {
+            if (failingDelete === table) {
+              failingDelete = undefined
+              throw new Error(`the medium refused the delete of '${table}/${key}'`)
+            }
+            return unit.deleteRecord(table, key)
+          })
         },
         setGlobal: (value) => unit.setGlobal(value),
         close: () => unit.close(),
