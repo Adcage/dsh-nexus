@@ -52,6 +52,7 @@ import { resolveShellCwd, type ShellExecutionConfig } from './engines.ts'
 import {
   PROCESS_RESOURCE_PREFIX,
   createProcessController,
+  reportProcessFailures,
   type ProcessController,
 } from './jobs.ts'
 import {
@@ -412,6 +413,29 @@ const SHELL_OUTPUT_SCHEMA = objectNode({
 /** The canonical value type of {@link SHELL_OUTPUT_SCHEMA}. */
 type CanonicalShellValue = InferValue<typeof SHELL_OUTPUT_SCHEMA>
 
+/** What one shell surface could prove when it released its resources. */
+export interface ShellCleanupReport {
+  /** True only when every managed range and terminal confirmed cleanup. */
+  readonly released: boolean
+  /** `resourceId: reason` for everything that stayed unconfirmed. */
+  readonly unconfirmed: readonly string[]
+}
+
+/** The one `shell` tool plus the exact resource boundary behind it. */
+export interface ShellToolSurface {
+  /** The registry-ready definition; unchanged from {@link createShellTool}. */
+  readonly tool: ToolDefinition
+  /**
+   * Release both controllers and report what cleanup proved.
+   *
+   * Memoized: the first call disposes, later calls return the same report, so a
+   * scope unload followed by a runtime teardown cannot turn an unconfirmed range
+   * into a silent success.
+   * @returns the cleanup report of the one disposal.
+   */
+  dispose(): Promise<ShellCleanupReport>
+}
+
 /**
  * Register the unified `shell` tool in this scope.
  *
@@ -424,9 +448,74 @@ type CanonicalShellValue = InferValue<typeof SHELL_OUTPUT_SCHEMA>
  * @returns the registry-ready tool definition.
  */
 export function createShellTool(ctx: Context, config: () => ShellExecutionConfig): ToolDefinition {
-  const processes = createProcessController(ctx, config)
-  const terminals = createTerminalController(ctx, config)
+  return buildShellTool(
+    ctx,
+    createProcessController(ctx, config),
+    createTerminalController(ctx, config),
+  )
+}
 
+/**
+ * Build the `shell` tool together with the cleanup report its owner drains.
+ *
+ * This is the host-only construction seam: a composition that must know whether
+ * the managed process ranges and terminals really ended (the Nexus preset,
+ * which reports them to the runtime) takes the controllers' own disposal report
+ * instead of the fire-and-log unload effect. Exactly one controller pair and no
+ * extra reporter or backend is created; {@link createShellTool} keeps its
+ * previous behaviour by building a surface that owns its own unload disposal.
+ * @param ctx - registration scope providing the native services.
+ * @param config - current deployment and stored terminal settings, read per call.
+ * @returns the tool and its disposal report.
+ */
+export function createShellSurface(ctx: Context, config: () => ShellExecutionConfig): ShellToolSurface {
+  const processes = createProcessController(ctx, config, { disposeOnUnload: false })
+  const terminals = createTerminalController(ctx, config, { disposeOnUnload: false })
+  let disposal: Promise<ShellCleanupReport> | undefined
+
+  const dispose = (): Promise<ShellCleanupReport> => {
+    disposal ??= (async () => {
+      const unconfirmed: string[] = []
+      try {
+        const report = await processes.dispose()
+        reportProcessFailures(ctx, report)
+        for (const failure of report.failures) unconfirmed.push(`${failure.resourceId}: ${failure.reason}`)
+      } catch (error) {
+        unconfirmed.push(`processes: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      try {
+        const report = await terminals.dispose()
+        for (const failure of report.failures) {
+          unconfirmed.push(`${failure.resourceId}: ${failure.reason}`)
+        }
+      } catch (error) {
+        unconfirmed.push(`terminals: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return Object.freeze({ released: unconfirmed.length === 0, unconfirmed: Object.freeze(unconfirmed) })
+    })()
+    return disposal
+  }
+
+  // The scope still owns the controllers: a generation that unloads while the
+  // runtime lives releases them through this one effect, and the memoized
+  // report survives for the runtime's later drain.
+  ctx.effect(() => () => dispose(), 'dsh-nexus shell surface')
+
+  return Object.freeze({ tool: buildShellTool(ctx, processes, terminals), dispose })
+}
+
+/**
+ * Build the `shell` definition over one controller pair.
+ * @param ctx - registration scope providing the native services.
+ * @param processes - process controller this surface uses.
+ * @param terminals - terminal controller this surface uses.
+ * @returns the registry-ready definition.
+ */
+function buildShellTool(
+  ctx: Context,
+  processes: ProcessController,
+  terminals: TerminalController,
+): ToolDefinition {
   return defineTool({
     name: 'shell',
     description:

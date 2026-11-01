@@ -1,0 +1,479 @@
+/**
+ * The real host composition a Nexus preset activation needs.
+ *
+ * Everything mounted here is the shipped implementation: the Cordis Loader, the
+ * native preset registry, the production AgentLoop and Agent registry, the real
+ * session store with JSONL persistence and the SQLite query backend, the
+ * enforcing filesystem with the shared sandbox policy, the real working
+ * directory, subprocess, shell-env, job, terminal, skill, question, command and
+ * token-meter services, the real in-process subagent providers, the real
+ * storage domain and this package's own built host row.
+ *
+ * Only two members are scripted: the model transport (no request leaves the
+ * process, no account is involved) and the native web search/fetch providers.
+ * Both are external boundaries, not internal seams.
+ *
+ * Two environment variables are pinned for the duration of a case —
+ * `DSH_HOME` and `DSH_AGENTS_HOME` — so skill and instruction discovery read
+ * project-local fixtures instead of the machine's home directory. They are
+ * restored when the harness is disposed.
+ *
+ * @module dsh-nexus/test/support/preset-harness
+ */
+
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import GroupPlugin from '@deepseek-ai/cordis-plugin-group'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import type { PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
+import type { Config as SystemPromptConfig } from '@deepseek-ai/dsh-system-prompt'
+import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
+import SandboxService from '@deepseek-ai/dsh-sandbox'
+import { apply as applyShellEnv } from '@deepseek-ai/dsh-shell-env'
+import Subprocess from '@deepseek-ai/dsh-subprocess'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import TerminalService from '@deepseek-ai/dsh-terminal'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
+import UserQuestions from '@deepseek-ai/dsh-user-questions'
+import Commands from '@deepseek-ai/dsh-commands'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import { apply as applySessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import * as SpawnProvider from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import * as ForkProvider from '@deepseek-ai/dsh-subagent-fork-in-process'
+import {
+  mountAgentLoopTestDependencies,
+  mountAgentLoopTestHarness,
+  type AgentLoopTestHarness,
+} from '@deepseek-ai/dsh-agent-loop-testkit'
+import {
+  mountAttachmentDouble,
+  mountModelRoute,
+  mountNexusStoreFixture,
+  mountSandboxedFileSystem,
+  mountWebDouble,
+  type AttachmentDouble,
+  type CountingSandboxedFileSystem,
+  type NexusStoreFixture,
+  type WebDouble,
+} from './fixtures.ts'
+import type { NexusRuntime } from '../../src/runtime/service.ts'
+
+/** Project root: the Loader's resolution base and the built package location. */
+const packageRoot = fileURLToPath(new URL('../../', import.meta.url))
+
+/** Cache directory every case's state stays in; nothing leaves the checkout. */
+const CACHE_DIR = join(packageRoot, 'node_modules/.cache/dsh-nexus-test')
+
+/** Provider and model the scripted transport serves. */
+export const PRESET_ROUTE = { provider: 'nexus-preset-test', model: 'nexus-preset-model' } as const
+
+/** One assembled request the scripted transport answered. */
+export interface PresetRequest {
+  /** Request whose answer this was. */
+  readonly options: GenerateOptions
+}
+
+/** What the harness needs before it may compose anything. */
+export interface PresetHarnessOptions {
+  /**
+   * Tool names a third-party plugin contributes in the GLOBAL layer.
+   *
+   * A real Cordis plugin registers them, so a Nexus session that could no
+   * longer see them would prove a global allowlist exists. Default: none.
+   */
+  readonly thirdPartyTools?: readonly string[]
+  /**
+   * Tool names a first-party-looking plugin contributes in the GLOBAL layer.
+   *
+   * They stand in for the native rows a real deployment mounts host-wide
+   * (`bash`, `subagent`, `job_list` …) so the narrow Nexus replacement filter can
+   * be observed doing something. Default: none.
+   */
+  readonly nativeToolNames?: readonly string[]
+  /** System-prompt configuration for the mounted registry. */
+  readonly systemPrompt?: SystemPromptConfig
+}
+
+/** One mounted host composition plus the built Nexus row on top of it. */
+export interface PresetHarness {
+  /** Context carrying every mounted service and the `nexusRuntime` service. */
+  readonly ctx: Context
+  /** Case-owned project-local root. */
+  readonly root: string
+  /** Session workspace inside {@link root}. */
+  readonly workspace: string
+  /** Production AgentLoop driver. */
+  readonly loop: AgentLoopTestHarness
+  /** Filesystem backend mounted as `ctx.fs`. */
+  readonly fs: CountingSandboxedFileSystem
+  /** Scripted web providers. */
+  readonly web: WebDouble
+  /** Attachment store double. */
+  readonly attachments: AttachmentDouble
+  /** Durable Nexus store mounted as `storageDomain`. */
+  readonly fixture: NexusStoreFixture
+  /** Every model request the scripted transport answered, in order. */
+  readonly requests: PresetRequest[]
+  /**
+   * Mount the built host row: opens the runtime and registers the definition.
+   * @returns the runtime the row published.
+   */
+  startNexus(): Promise<NexusRuntime>
+  /**
+   * Unload the host row as the Loader would on a plugin disable.
+   * @returns after the row's fiber is disposed.
+   */
+  stopNexus(): Promise<void>
+  /** The runtime the host row opened, once {@link PresetHarness.startNexus} ran. */
+  readonly runtime: NexusRuntime
+  /**
+   * The tool names one Agent's assembled request advertised.
+   * @param agent - agent whose last request is read.
+   * @returns the tool names in request order.
+   */
+  toolNamesOf(agent: Agent): string[]
+  /**
+   * All text one Agent's last assembled request carried, system message first.
+   * @param agent - agent whose request is read.
+   * @returns the concatenated text blocks.
+   */
+  promptTextOf(agent: Agent): string
+  /**
+   * Create one Agent bound to a preset through the real registry.
+   * @param id - session id.
+   * @param presetId - preset to mount, or undefined for a preset-free Agent.
+   * @returns the live Agent.
+   */
+  createAgent(id: string, presetId?: string): Promise<Agent>
+  /**
+   * Dispose one Agent created by {@link PresetHarness.createAgent}.
+   * @param agent - the exact Agent to retire.
+   */
+  disposeAgent(agent: Agent): Promise<void>
+  /**
+   * Run one complete turn for an Agent and wait for its durable `turn/end`.
+   * @param agent - agent to wake.
+   * @param text - user text.
+   */
+  runTurn(agent: Agent, text: string): Promise<void>
+  /**
+   * Run one registered tool through the real registry pipeline.
+   * @param name - registered tool name.
+   * @param args - model-shaped arguments.
+   * @param agent - caller.
+   * @returns the normalized execution result.
+   */
+  call(name: string, args: Record<string, unknown>, agent: Agent): Promise<ToolExecutionResult>
+  /** Unload everything, restore the environment and delete the case root. */
+  dispose(): Promise<void>
+}
+
+/**
+ * Build the plugin object the Loader mounts from the built host entry.
+ * @returns the row this package installs.
+ */
+async function loadBuiltHostRow(): Promise<{ name: string; inject: string[]; Config: unknown; apply: unknown }> {
+  const entry = join(packageRoot, 'lib/index.js')
+  if (!existsSync(entry)) throw new Error(`missing ${entry}; run pnpm build before the preset tests`)
+  const module = (await import(pathToFileURL(entry).href)) as { default?: unknown } & Record<string, unknown>
+  const exported = (module.default ?? module) as { name?: string; inject?: string[]; Config?: unknown; apply?: unknown }
+  if (typeof exported.apply !== 'function') throw new Error(`${entry} does not export a host row`)
+  return {
+    name: exported.name ?? 'dsh-nexus',
+    inject: exported.inject ?? [],
+    Config: exported.Config,
+    apply: exported.apply,
+  }
+}
+
+/**
+ * A plugin contributing tools in the global registry layer.
+ * @param pluginName - Cordis plugin name.
+ * @param names - tool names the plugin registers.
+ * @returns the plugin to mount.
+ */
+function globalToolsPlugin(
+  pluginName: string,
+  names: readonly string[],
+): { name: string; inject: string[]; apply(ctx: Context): void } {
+  return {
+    name: pluginName,
+    inject: ['tools'],
+    apply(pluginCtx: Context) {
+      for (const toolName of names) {
+        pluginCtx.tools.register(
+          defineTool({
+            name: toolName,
+            description: `Fixture tool ${toolName}.`,
+            parameters: {},
+            output: {
+              schema: { type: 'object', additionalProperties: true },
+              render: () => [{ type: 'text', text: 'third-party' }],
+            },
+            async execute(): Promise<Record<string, never>> {
+              return {}
+            },
+          }),
+        )
+      }
+    },
+  }
+}
+
+/**
+ * Write one project-local skill fixture the native provider discovers.
+ * @param skillsHome - pinned `DSH_AGENTS_HOME`.
+ */
+async function writeSkillFixture(skillsHome: string): Promise<void> {
+  const dir = join(skillsHome, 'skills', 'nexus-fixture-skill')
+  await mkdir(dir, { recursive: true })
+  await writeFile(
+    join(dir, 'SKILL.md'),
+    '---\nname: nexus-fixture-skill\ndescription: Fixture skill proving the native skill catalog reaches a Nexus session.\n---\n\nFIXTURE SKILL BODY\n',
+    'utf8',
+  )
+}
+
+/**
+ * Register the definition a native preset would contribute, so the standard
+ * composition can be compared before and after Nexus is installed.
+ * @returns the definition.
+ */
+export function standardDefinition(): PresetDefinition {
+  return {
+    id: 'standard',
+    name: 'Standard',
+    order: 1,
+    plugins: [
+      { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65_536 } },
+      { id: 'skill-filesystem', name: '@deepseek-ai/dsh-skill-filesystem' },
+      { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
+      { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
+      { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+    ],
+  }
+}
+
+/**
+ * Mount the whole host composition and the built Nexus row.
+ * @param options - optional third-party row and prompt configuration.
+ * @returns the mounted harness.
+ */
+export async function mountPresetHarness(options: PresetHarnessOptions = {}): Promise<PresetHarness> {
+  await mkdir(CACHE_DIR, { recursive: true })
+  const root = await mkdtemp(join(CACHE_DIR, 'preset-'))
+  const workspace = join(root, 'workspace')
+  const home = join(root, 'home')
+  const agentsHome = join(root, 'agents')
+  await mkdir(workspace, { recursive: true })
+  await mkdir(home, { recursive: true })
+  await mkdir(agentsHome, { recursive: true })
+  await writeSkillFixture(agentsHome)
+  await writeFile(join(workspace, 'AGENTS.md'), '# Nexus fixture workspace\n\nFIXTURE INSTRUCTION LINE\n', 'utf8')
+
+  const previousHome = process.env.DSH_HOME
+  const previousAgentsHome = process.env.DSH_AGENTS_HOME
+  process.env.DSH_HOME = home
+  process.env.DSH_AGENTS_HOME = agentsHome
+  const restoreEnv = (): void => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    if (previousAgentsHome === undefined) delete process.env.DSH_AGENTS_HOME
+    else process.env.DSH_AGENTS_HOME = previousAgentsHome
+  }
+
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader, { baseUrl: pathToFileURL(`${packageRoot}`).href })
+    // The host boot registers the `cordis:group` builtin the same way; a preset
+    // definition that composes a group needs it.
+    ctx.loader.builtins.group = GroupPlugin
+    await mountAgentLoopTestDependencies(ctx, options.systemPrompt === undefined ? {} : { systemPrompt: options.systemPrompt })
+    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: workspace })
+    const fs = await mountSandboxedFileSystem(ctx, { root, cwd: workspace })
+    await ctx.plugin(WorkingDirectory, { defaultDirectory: workspace })
+    await ctx.plugin(applySessionPersistence, { root: join(root, 'sessions') })
+    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
+    const requests: PresetRequest[] = []
+    mountModelRoute(ctx, {
+      ...PRESET_ROUTE,
+      stream: (request) => {
+        requests.push({ options: request })
+        return scriptedAnswer(requests.length)
+      },
+    })
+    const loop = await mountAgentLoopTestHarness(ctx)
+    await ctx.plugin(SandboxService, undefined as never)
+    await ctx.plugin(applyShellEnv, {})
+    await ctx.plugin(Subprocess, undefined as never)
+    await ctx.plugin(LocalJobRegistry, {})
+    await ctx.plugin(TerminalService)
+    await ctx.plugin(SkillRegistry)
+    await ctx.plugin(SkillFilesystem)
+    await ctx.plugin(UserQuestions)
+    await ctx.plugin(Commands)
+    await ctx.plugin(TokenMeter)
+    // A deterministic provider answer, so a saved-result write is a real
+    // publication through the shipped web runtime rather than an empty body.
+    const web = await mountWebDouble(ctx, {
+      fetch: (request) => ({
+        url: request.url,
+        statusCode: 200,
+        body: { kind: 'text', content: 'FIXTURE WEB BODY' },
+        truncated: false,
+      }),
+    })
+    const attachments = await mountAttachmentDouble(ctx)
+    await ctx.plugin(SubagentRuntime, { maxDepth: 8, maxActiveSubagents: 8 })
+    await ctx.plugin(SpawnProvider)
+    await ctx.plugin(ForkProvider)
+    const fixture = await mountNexusStoreFixture({ ctx })
+    await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
+    if (options.nativeToolNames !== undefined && options.nativeToolNames.length > 0) {
+      await ctx.plugin(globalToolsPlugin('nexus-native-replacements', options.nativeToolNames))
+    }
+    if (options.thirdPartyTools !== undefined && options.thirdPartyTools.length > 0) {
+      await ctx.plugin(globalToolsPlugin('nexus-third-party-tools', options.thirdPartyTools))
+    }
+    await ctx.agentPresets.register(standardDefinition())
+    const hostRow = await loadBuiltHostRow()
+
+    let callCount = 0
+    let nexusFiber: { dispose(): Promise<unknown> } | undefined
+    const handles: { agent: Agent; dispose(): Promise<void> }[] = []
+    let disposed = false
+    return {
+      ctx,
+      root,
+      workspace,
+      loop,
+      fs,
+      web,
+      attachments,
+      fixture,
+      requests,
+      get runtime() {
+        const runtime = ctx.get('nexusRuntime')
+        if (runtime === undefined) throw new Error('the Nexus host row is not mounted')
+        return runtime
+      },
+      async startNexus() {
+        if (nexusFiber !== undefined) throw new Error('the Nexus host row is already mounted')
+        const fiber = ctx.plugin(hostRow as never, {} as never)
+        await fiber
+        nexusFiber = fiber as unknown as { dispose(): Promise<unknown> }
+        const runtime = ctx.get('nexusRuntime')
+        if (runtime === undefined) throw new Error('the host row did not publish the Nexus runtime')
+        return runtime
+      },
+      async stopNexus() {
+        const fiber = nexusFiber
+        nexusFiber = undefined
+        if (fiber !== undefined) await fiber.dispose()
+      },
+      toolNamesOf(agent) {
+        const own = requests.filter((request) => request.options.sessionId === agent.id)
+        const last = own.at(-1)
+        if (last === undefined) throw new Error(`session "${agent.id}" made no model request`)
+        return (last.options.tools ?? []).map((tool) => tool.name)
+      },
+      promptTextOf(agent) {
+        const own = requests.filter((request) => request.options.sessionId === agent.id)
+        const last = own.at(-1)
+        if (last === undefined) throw new Error(`session "${agent.id}" made no model request`)
+        return last.options.messages
+          .flatMap((message) => message.content.some((block) => block.type === 'text') ? message.content : [])
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join('\n')
+      },
+      async disposeAgent(agent) {
+        const index = handles.findIndex((handle) => handle.agent === agent)
+        if (index < 0) throw new Error(`session "${agent.id}" was not created by this harness`)
+        const [handle] = handles.splice(index, 1)
+        await handle?.dispose()
+      },
+      async createAgent(id, presetId) {
+        const handle = await ctx.agents.create({
+          sessionId: SessionId(id),
+          meta: { cwd: workspace, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
+          agentOptions: { ...PRESET_ROUTE },
+          ...(presetId === undefined
+            ? {}
+            : {
+                setup: async (agentCtx: Context) => {
+                  await ctx.agentPresets.mount(agentCtx, presetId)
+                },
+              }),
+        })
+        handles.push(handle as unknown as { agent: Agent; dispose(): Promise<void> })
+        return handle.agent
+      },
+      async runTurn(agent, text) {
+        const closed = (): number => agent.session.snapshotEvents().filter((event) => event.type === 'turn/end').length
+        const before = closed()
+        agent.followup({
+          id: MessageId(`preset-user-${before}-${Date.now()}`),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user' },
+        })
+        const deadline = Date.now() + 20_000
+        while (closed() <= before) {
+          if (Date.now() > deadline) throw new Error('the agent turn did not close')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      },
+      call(name, args, agent) {
+        callCount += 1
+        return ctx.tools.execute({
+          callId: ToolCallId(`preset-call-${callCount}`),
+          name,
+          arguments: args,
+          agent,
+          signal: new AbortController().signal,
+        })
+      },
+      async dispose() {
+        if (disposed) return
+        disposed = true
+        for (const handle of handles.splice(0).reverse()) await handle.dispose().catch(() => undefined)
+        await nexusFiber?.dispose().catch(() => undefined)
+        nexusFiber = undefined
+        await ctx.fiber.dispose()
+        restoreEnv()
+        await rm(root, { recursive: true, force: true })
+      },
+    }
+  } catch (error) {
+    restoreEnv()
+    await ctx.fiber.dispose().catch(() => undefined)
+    await rm(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
+/**
+ * One complete scripted answer, so a turn closes with text only.
+ * @param index - request ordinal, used as the answer text.
+ * @returns the stream.
+ */
+async function* scriptedAnswer(index: number): AsyncGenerator<StreamChunk> {
+  yield { type: 'block-start', index: 0, blockType: 'text' }
+  yield { type: 'text-delta', index: 0, text: `answer-${index}` }
+  yield { type: 'block-end', index: 0, block: { type: 'text', text: `answer-${index}` } }
+  yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+  yield { type: 'finish', reason: { kind: 'stop' } }
+}

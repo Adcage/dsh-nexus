@@ -358,26 +358,60 @@ interface RecoveryCursorState extends OutputCursorState {
   readonly stderrFromSpill: boolean
 }
 
+/** How one controller is constructed. */
+export interface ProcessControllerOptions {
+  /**
+   * Register the unload effect that disposes the controller, default true.
+   *
+   * A composition that must observe the cleanup report itself (the Nexus preset
+   * reporting to {@link NexusRuntime}) passes `false` and disposes through its
+   * own ordered seam, so the report is produced exactly once by the owner that
+   * can act on it.
+   */
+  readonly disposeOnUnload?: boolean
+}
+
 /** Build the host-only controller and attach its native controller/reporter effects. */
 export function createProcessController(
   ctx: Context,
   config: () => ShellExecutionConfig,
+  options: ProcessControllerOptions = {},
 ): ProcessController {
   const controller = new Controller(ctx, config)
+  if (options.disposeOnUnload !== false) {
+    registerProcessDisposal(ctx, controller)
+  }
+  return controller
+}
+
+/**
+ * Attach the unload effect that disposes one controller and logs its failures.
+ * @param ctx - context owning the effect.
+ * @param controller - the controller to dispose on unload.
+ */
+export function registerProcessDisposal(ctx: Context, controller: ProcessController): void {
   ctx.effect(
     () => async () => {
       const result = await controller.dispose()
-      for (const failure of result.failures) {
-        ctx
-          .logger('dsh-nexus-shell')
-          .warn(
-            `shell process ${failure.resourceId} was not cleaned up on unload (${failure.reason}); the managed range may survive until the host reaps it`,
-          )
-      }
+      reportProcessFailures(ctx, result)
     },
     'dsh-nexus shell process controller',
   )
-  return controller
+}
+
+/**
+ * Log the resources one process disposal could not confirm.
+ * @param ctx - context used for the diagnostic channel.
+ * @param result - the controller's own disposal report.
+ */
+export function reportProcessFailures(ctx: Context, result: ProcessDisposeResult): void {
+  for (const failure of result.failures) {
+    ctx
+      .logger('dsh-nexus-shell')
+      .warn(
+        `shell process ${failure.resourceId} was not cleaned up on unload (${failure.reason}); the managed range may survive until the host reaps it`,
+      )
+  }
 }
 
 /** The controller implementation; see {@link ProcessController}. */

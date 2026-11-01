@@ -37,6 +37,7 @@ import { NexusError } from './errors.ts'
 import type { ShellExecutionConfig } from '../shell/engines.ts'
 import { openNexusStore, type NexusStore, type Stored } from '../storage/store.ts'
 import type { WriteScopeEntry } from '../agent/coordination.ts'
+import { createWebResultRepository, type WebResultRepository } from '../web/results.ts'
 
 /** Stable Cordis service name hosting the one Nexus runtime of a deployment. */
 export const NEXUS_RUNTIME_SERVICE = 'nexusRuntime'
@@ -99,6 +100,14 @@ export interface NexusRuntime {
   readonly coordinator: WriteCoordinator
   /** The one prompt-session owner shared by every Nexus preset generation. */
   readonly prompts: PromptSessions
+  /**
+   * The one saved-web-result repository over {@link NexusRuntime.store}.
+   *
+   * Its publication chain is per durable owner, so it belongs to the runtime and
+   * not to a generation: two overlapping generations sharing this instance
+   * cannot both observe one free retention slot.
+   */
+  readonly webResults: WebResultRepository
   /**
    * The committed settings record and the hash a later save must present.
    * @returns the immutable committed record; the hash is only a lost-update guard.
@@ -212,6 +221,7 @@ interface RuntimeParts {
   readonly store: NexusStore
   readonly coordinator: WriteCoordinator
   readonly prompts: PromptSessions
+  readonly webResults: WebResultRepository
   readonly initial: Stored<RuntimeSettings>
   readonly detachService: () => void
   readonly onClosed: () => void
@@ -252,6 +262,7 @@ class NexusRuntimeHandle implements NexusRuntime {
   readonly store: NexusStore
   readonly coordinator: WriteCoordinator
   readonly prompts: PromptSessions
+  readonly webResults: WebResultRepository
   private readonly deployment: Config
   private readonly detachService: () => void
   private readonly onClosed: () => void
@@ -271,6 +282,7 @@ class NexusRuntimeHandle implements NexusRuntime {
     this.store = parts.store
     this.coordinator = parts.coordinator
     this.prompts = parts.prompts
+    this.webResults = parts.webResults
     this.deployment = parts.deployment
     this.committed = parts.initial
     this.detachService = parts.detachService
@@ -423,6 +435,7 @@ async function createRuntime(host: Context, config: Config, onClosed: () => void
       store,
       coordinator,
       prompts: createPromptSessions(host, store),
+      webResults: createWebResultRepository(store),
       initial: frozenRecord(await store.readSettings()),
       detachService: () => {
         detachService?.()

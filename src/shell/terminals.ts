@@ -457,21 +457,43 @@ class LazyDialectBackend implements TerminalBackend {
   }
 }
 
+/** How one terminal controller is constructed. */
+export interface TerminalControllerOptions {
+  /**
+   * Register the unload effect that disposes the controller, default true.
+   *
+   * A composition that must read the cleanup report itself passes `false` and
+   * disposes through its own ordered seam, so one owner reports the truth once.
+   */
+  readonly disposeOnUnload?: boolean
+}
+
 /**
  * Build the host-only terminal controller.
  * @param ctx - host context providing the native terminal registry.
  * @param config - current deployment and terminal settings.
+ * @param options - whether this controller owns its own unload disposal.
  * @returns the controller the shell tool calls.
  */
 export function createTerminalController(
   ctx: Context,
   config: () => ShellExecutionConfig,
+  options: TerminalControllerOptions = {},
 ): TerminalController {
   const controller = new Controller(ctx, config)
+  if (options.disposeOnUnload !== false) registerTerminalDisposal(ctx, controller)
+  return controller
+}
+
+/**
+ * Attach the unload effect that disposes one terminal controller.
+ * @param ctx - context owning the effect.
+ * @param controller - the controller to dispose on unload.
+ */
+export function registerTerminalDisposal(ctx: Context, controller: TerminalController): void {
   ctx.effect(() => async () => {
     await controller.dispose()
   }, 'dsh-nexus shell terminal controller')
-  return controller
 }
 
 /** One Agent's pending opens and live terminals. */

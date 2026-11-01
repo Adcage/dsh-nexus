@@ -3,33 +3,68 @@
  *
  * The Loader row mounts this module in the harness process; the manifest's
  * `dsh.client` declaration loads the browser half (`./client`) in the web GUI.
- * The row therefore exists from the start, while the host behaviour it will
- * compose — the Nexus preset, scoped tools, prompt contributions, the runtime
- * service and the console routes — is added by the tasks that own each seam.
+ * It is the one owner of Nexus host state:
  *
- * `name` is the row id: it must equal the package name and the `name` in
- * `cordis.patch.yml`. Nothing is registered here yet, so `inject` is empty and
- * unloading the row leaves no trace.
+ * - it opens (or joins) the single {@link NexusRuntime} — one durable store, one
+ *   committed settings record, one write coordinator, one prompt-session owner
+ *   and one saved-result repository — and publishes it as `nexusRuntime`;
+ * - it registers the isolated native terminal backends once, in the host realm
+ *   where the terminal service lives, instead of once per preset generation;
+ * - it detects which native mechanism the host realm already supplies and
+ *   registers the fixed Nexus preset definition under the id `nexus`.
+ *
+ * Composition order is the contract. The runtime is opened from this row's own
+ * activation (so the store and the teardown effect belong to this fiber), the
+ * preset is registered afterwards, and no preset diagnostic is awaited here:
+ * the registry audits a mounted tree against the settled host Loader, and
+ * waiting for that inside the row's own activation would wait on itself.
  *
  * @module dsh-nexus
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config as NexusConfig } from './config.ts'
+import { createNexusPreset } from './preset/definition.ts'
+import { detectNativeComposition } from './preset/native.ts'
+import { registerTerminalBackends } from './shell/terminals.ts'
+import { NEXUS_RUNTIME_INJECT, openNexusRuntime } from './runtime/service.ts'
 
 /** Loader row id; mirrors the package name and `cordis.patch.yml`. */
 export const name = 'dsh-nexus'
 
-/** Services required before this plugin may mount; none until a seam needs one. */
-export const inject: string[] = []
+/**
+ * Services this row needs before it may activate.
+ *
+ * `storageDomain` comes from the runtime opener's own cold path; `agentPresets`
+ * is the registry the preset definition is declared into. A row that activated
+ * without them would throw mid-composition and leave the deployment without a
+ * runtime, so both are declared rather than discovered.
+ */
+export const inject: string[] = [...NEXUS_RUNTIME_INJECT, 'agentPresets']
 
 export { Config } from './config.ts'
 
 /**
- * Host-half entry point. The parameters are the shape every later registration
- * seam receives; this module currently contributes no host behaviour, which is
- * why it installs no effect and holds no service.
- * @param _ctx - host plugin context.
- * @param _config - validated deployment configuration for the row.
+ * Host-half entry point.
+ *
+ * @param ctx - host plugin context; it owns the runtime, the terminal backends
+ *   and the registered preset definition.
+ * @param config - validated deployment configuration for the row.
+ * @throws NexusError when the native storage service is missing, when the
+ *   inherited compaction capability is ambiguous, or when the preset definition
+ *   cannot be mounted.
  */
-export function apply(_ctx: Context, _config: NexusConfig): void {}
+export async function apply(ctx: Context, config: NexusConfig): Promise<void> {
+  const runtime = await openNexusRuntime(ctx, config)
+
+  // One registration per composed realm: the terminal service is a host
+  // service, so every Nexus generation consumes these same backends. Registering
+  // them per generation would be a native duplicate-backend failure.
+  const removeBackends = registerTerminalBackends(ctx, () => runtime.getShellConfig())
+  runtime.attach('terminal-backends', () => removeBackends())
+
+  const native = detectNativeComposition(ctx)
+  const definition = createNexusPreset(config, native)
+  const unregister = await ctx.agentPresets.register(definition)
+  ctx.effect(() => unregister, 'dsh-nexus preset definition')
+}

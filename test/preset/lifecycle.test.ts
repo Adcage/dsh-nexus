@@ -23,7 +23,13 @@ import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 import { openNexusRuntime, NEXUS_RUNTIME_SERVICE, type NexusRuntime } from '../../src/runtime/service.ts'
 import { NEXUS_DOMAIN, PROMPTS_TABLE } from '../../src/storage/domain.ts'
 import type { PromptSnapshot } from '../../src/protocol.ts'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { ShellEnvRegistry } from '@deepseek-ai/dsh-shell-env'
+import { TerminalSessionService } from '@deepseek-ai/dsh-terminal'
+import type { ShellExecutionConfig } from '../../src/shell/engines.ts'
+import { createShellSurface } from '../../src/shell/tool.ts'
 import { mountSubagentHarness, waitFor, type SubagentHarness } from '../support/agent-harness.ts'
+import { createToolHarness, type ToolHarness } from '../support/harness.ts'
 import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
 
 /** Everything one lifecycle case opened and must close, in reverse order. */
@@ -531,5 +537,80 @@ describe('teardown', () => {
     const status = await runtime.dispose()
 
     expect(status).toMatchObject({ released: true, unconfirmedResources: [], retainedScopes: [], failures: [] })
+  })
+})
+
+describe('shell surface cleanup', () => {
+  /**
+   * Mount the real tool pipeline with the native job, terminal and shell-env
+   * registries and one shell surface whose provider refuses cleanup proof.
+   * @returns the mounted harness and the surface.
+   */
+  async function openSurface(): Promise<{
+    harness: ToolHarness
+    surface: ReturnType<typeof createShellSurface>
+  }> {
+    const harness = await createToolHarness({
+      cwd: process.cwd(),
+      subprocess: { script: () => ({ staysOpen: true, cleanupUnconfirmed: true }) },
+    })
+    await harness.ctx.plugin(LocalJobRegistry)
+    await harness.ctx.plugin(TerminalSessionService)
+    await harness.ctx.plugin(ShellEnvRegistry)
+    const config: ShellExecutionConfig = {
+      deployment: {},
+      terminal: { engine: 'bash', bashPath: process.execPath },
+    }
+    const surface = createShellSurface(harness.ctx, () => config)
+    harness.ctx.tools.register(surface.tool)
+    openCases.push({ close: async () => { await harness.dispose() } })
+    return { harness, surface }
+  }
+
+  it('reports a managed range it could not confirm instead of claiming release', async () => {
+    const { harness, surface } = await openSurface()
+    const run = await harness.call('shell', { action: 'run', command: 'sleep', background: true })
+    expect(run.isError, JSON.stringify(run)).toBe(false)
+    const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
+
+    const report = await surface.dispose()
+    expect(report.released).toBe(false)
+    expect(report.unconfirmed.join('\n')).toContain(resourceId)
+    // Memoized: the scope unload that runs next cannot turn the same range into
+    // a silent success.
+    expect(await surface.dispose()).toBe(report)
+  })
+
+  it('makes the runtime drain report the unconfirmed range and the retained write scope', async () => {
+    const { harness, surface } = await openSurface()
+    const fixture = await mountNexusStoreFixture({ ctx: harness.ctx })
+    const runtime = await mountRuntimeRow(harness.ctx)
+    openCases.push({
+      close: async () => {
+        await runtime.dispose()
+        await fixture.dispose()
+      },
+    })
+
+    const parent = harness.owner.agent
+    const dir = join(harness.owner.agent.session.header.cwd ?? harness.owner.agent.session.header.cwd ?? process.cwd())
+    await mkdir(dir, { recursive: true })
+    // A writer child's reservation is durable authority; a shell range that
+    // cannot prove cleanup is a second, independent uncertainty.
+    await runtime.coordinator.acquire(parent, SessionId('writer-with-hung-shell'), dir)
+    const run = await harness.call('shell', { action: 'run', command: 'sleep', background: true })
+    expect(run.isError, JSON.stringify(run)).toBe(false)
+    const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
+    runtime.attach('shell', () => surface.dispose())
+
+    const status = await runtime.dispose()
+    expect(status.released).toBe(false)
+    expect(status.unconfirmedResources.join('\n')).toContain(resourceId)
+    expect(status.retainedScopes.map((scope) => scope.childId)).toContain(SessionId('writer-with-hung-shell'))
+    // The Agent's disposal alone did not release the reservation: it is still
+    // the durable authority a restart will refuse.
+    expect(runtime.coordinator.retainedScopes().map((scope) => scope.childId)).toContain(
+      SessionId('writer-with-hung-shell'),
+    )
   })
 })

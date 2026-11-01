@@ -223,18 +223,27 @@ type CanonicalWebValue = InferValue<typeof WEB_OUTPUT_SCHEMA>
  * and `ctx.tools` must be available in this scope, and the caller supplies the
  * opened store. Composition decides *when* to register; this factory never
  * registers itself.
+ *
+ * The saved-result repository is injectable because its publication chain is
+ * per durable owner: two repositories over one store would let two overlapping
+ * preset generations both observe a free slot and exceed the owner's caps. A
+ * host that composes more than one generation passes the ONE repository it owns;
+ * the default keeps a single-generation composition working unchanged.
  * @param ctx - registration scope providing the native services.
  * @param store - the opened Nexus store that keeps saved results.
  * @param settings - current runtime settings, read once per call.
+ * @param repository - the authoritative saved-result repository; defaults to a
+ *   repository over `store` for a scope that owns the store outright.
  * @returns the registry-ready tool definition.
  */
 export function createWebTool(
   ctx: Context,
   store: NexusStore,
   settings: () => RuntimeSettings,
+  repository: WebResultRepository = createWebResultRepository(store),
 ): ToolDefinition {
   const backend = createDshWebBackend(ctx)
-  const results = createWebResultRepository(store)
+  const results = repository
 
   return defineTool({
     name: 'web',
