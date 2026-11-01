@@ -193,16 +193,63 @@ describe('writer isolation', () => {
     })
   })
 
-  it('does not keep authority for a writer whose owner and child are both gone', async () => {
+  it('does not reclaim a lease because its owner Agent is gone', async () => {
     const { harness, parent, first } = await openScopes()
     const coordinator = createWriteCoordinator(harness.ctx)
+    // A ghost owner and an absent child are the SAME negative evidence a
+    // silently failed native rollback leaves behind, so they prove nothing.
     const ghostOwner = { id: SessionId('ghost-parent') } as Agent
     await coordinator.acquire(ghostOwner, SessionId('ghost-child'), first)
 
-    // The live parent re-admits a writer over the same tree: a lease whose
-    // authorizing Agent and writer are both absent is not authority.
-    const reclaimed = await coordinator.acquire(parent, SessionId('writer-live'), first)
-    expect(reclaimed.cwd).toBe(await canonicalDirectory(first))
-    reclaimed.release()
+    await expect(coordinator.acquire(parent, SessionId('writer-live'), first)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+  })
+
+  it('does not reclaim a lease because its owner Agent was replaced', async () => {
+    const { harness, parent, first } = await openScopes()
+    const coordinator = createWriteCoordinator(harness.ctx)
+    // The recorded owner is not the live instance for that session id: exactly
+    // the state after the delegating session's Agent is re-instantiated.
+    const replacedOwner = { id: parent.id } as Agent
+    await coordinator.acquire(replacedOwner, SessionId('replaced-child'), first)
+
+    await expect(coordinator.acquire(parent, SessionId('writer-after-replacement'), first)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+  })
+
+  it('keeps a pinned scope through a same-child reacquire and a later disposal', async () => {
+    const { harness, parent, first, second } = await openScopes()
+    const coordinator = createWriteCoordinator(harness.ctx)
+    await coordinator.acquire(parent, SessionId('pinned-child'), first)
+    coordinator.pin(SessionId('pinned-child'))
+    expect(coordinator.scopeOf(SessionId('pinned-child'))).toMatchObject({
+      state: 'unconfirmed',
+      root: await canonicalDirectory(first),
+    })
+
+    // Re-acquiring the same child id for the same tree keeps the pinned scope
+    // without turning it back into an ordinarily releasable lease.
+    const again = await coordinator.acquire(parent, SessionId('pinned-child'), first)
+    expect(again.cwd).toBe(await canonicalDirectory(first))
+    harness.ctx.emit('agent/disposed', { agent: { id: SessionId('pinned-child') } as Agent })
+    await expect(coordinator.acquire(parent, SessionId('after-disposal'), first)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+    // And it cannot be moved to another tree, because moving would release it.
+    await expect(coordinator.acquire(parent, SessionId('pinned-child'), second)).rejects.toMatchObject({
+      code: 'WRITE_SCOPE_BUSY',
+    })
+  })
+
+  it('still releases an ordinary lease on the native disposal edge', async () => {
+    const { harness, parent, first } = await openScopes()
+    const coordinator = createWriteCoordinator(harness.ctx)
+    await coordinator.acquire(parent, SessionId('ordinary-child'), first)
+    harness.ctx.emit('agent/disposed', { agent: { id: SessionId('ordinary-child') } as Agent })
+    expect(coordinator.scopeOf(SessionId('ordinary-child'))).toBeUndefined()
+    const next = await coordinator.acquire(parent, SessionId('ordinary-next'), first)
+    next.release()
   })
 })

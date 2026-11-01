@@ -157,6 +157,8 @@ interface AgentValue {
   readonly messageId?: string
   readonly accepted?: boolean
   readonly released?: boolean
+  /** Root a child still holds after a stop whose release could not be confirmed. */
+  readonly scopeRetained?: string
   readonly batchMode?: BatchMode
   readonly items?: readonly BatchItem[]
 }
@@ -238,6 +240,7 @@ const AGENT_OUTPUT_SCHEMA = objectNode({
   messageId: { type: 'string' },
   accepted: { type: 'boolean' },
   released: { type: 'boolean' },
+  scopeRetained: { type: 'string' },
   batchMode: { type: 'string', enum: ['parallel', 'sequence'] },
   items: { type: 'array', items: ITEM_SCHEMA },
 })
@@ -389,8 +392,8 @@ async function runAction(runtime: ChildRuntime, owner: CallOwner, input: AgentIn
     }
     case 'stop': {
       const childId = requireChildId(input.childId)
-      const { released } = await runtime.stop(owner, SessionId(childId))
-      return { action: 'stop', childId, released }
+      const released = await runtime.stop(owner, SessionId(childId))
+      return { action: 'stop', childId, ...released }
     }
     case 'batch':
       return runBatch(runtime, owner, input.mode, input.tasks, owner.signal)
@@ -733,7 +736,9 @@ function renderAgentValue(value: AgentValue): string {
     case 'interrupt':
       return `interrupt requested for child ${value.childId}; the signal was issued, which is not proof that it stopped`
     case 'stop':
-      return `child ${value.childId} released by the native runtime`
+      return value.released === false
+        ? `child ${value.childId}: the native runtime released nothing for it, and the write scope "${value.scopeRetained ?? ''}" is still held because an earlier start's cleanup is unconfirmed — it is NOT cleaned up`
+        : `child ${value.childId} released by the native runtime`
     case 'batch': {
       const items = value.items ?? []
       const rows = items.map((item) =>
@@ -773,6 +778,7 @@ function presentationOf(value: AgentValue): { readonly [key: string]: string | n
   if (value.messageId !== undefined) meta['messageId'] = value.messageId
   if (value.accepted !== undefined) meta['accepted'] = value.accepted
   if (value.released !== undefined) meta['released'] = value.released
+  if (value.scopeRetained !== undefined) meta['scopeRetained'] = value.scopeRetained
   if (value.batchMode !== undefined) meta['batchMode'] = value.batchMode
   if (value.items !== undefined) {
     meta['itemCount'] = value.items.length

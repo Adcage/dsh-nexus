@@ -179,7 +179,7 @@ export interface ChildRuntime {
   wait(owner: CallOwner, childId: SessionId, timeoutMs?: number): Promise<ChildWaitView>
   message(owner: CallOwner, childId: SessionId, text: string): Promise<{ readonly messageId: string }>
   interrupt(owner: CallOwner, childId: SessionId): Promise<{ readonly accepted: true }>
-  stop(owner: CallOwner, childId: SessionId): Promise<{ readonly released: true }>
+  stop(owner: CallOwner, childId: SessionId): Promise<{ readonly released: boolean; readonly scopeRetained?: string }>
 }
 
 /** Dependencies one runtime needs. */
@@ -423,10 +423,11 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
    * can be true while a published child is still running. Deleting the durable
    * policy would drop the only narrowing/recovery authority for that id and
    * releasing the lease would let a second writer into a tree a possibly live
-   * writer still mutates. The reservation is therefore retained and the caller
-   * is told so explicitly, with the child id and the actual scope, so the child
-   * stays discoverable and stop-able; the native `agent/disposed` edge releases
-   * the lease later.
+   * writer still mutates. The reservation is therefore retained, its scope is
+   * PINNED so no absence or owner-replacement heuristic can reclaim it, and the
+   * caller is told so explicitly with the child id and the actual scope. There is
+   * no public unlock for that pinned scope: an explicit release by its holder or
+   * a coordinator scope restart (a Task 9 lifetime concern) is the only end.
    * @param owner - exact caller.
    * @param childId - reserved child id.
    * @param provider - resolved in-process provider name.
@@ -468,9 +469,11 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       })
       return { access: admitted.policy.access, cwd: admitted.policy.cwd, activation }
     } catch (error) {
-      // No cleanup receipt: keep the durable narrowing authority AND the write
-      // scope. The error carries the child id and the retained scope so the
-      // caller keeps control of that identity.
+      // No cleanup receipt: pin the scope so no absence or replacement heuristic
+      // can reclaim it, and keep the durable narrowing authority. The error
+      // carries the child id and the retained scope so the caller keeps control
+      // of that identity.
+      coordinator.pin(childId)
       throw new NexusError(
         'RESOURCE_NOT_AVAILABLE',
         `child "${childId}" did not start and its cleanup is unconfirmed, so its policy record and write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) are retained for that child id; it stays discoverable and stop-able, and a second writer on that workspace root is refused until the native runtime releases it`,
@@ -679,7 +682,11 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       } catch (error) {
         throw translateNative(error, `stopping child "${childId}"`)
       }
-      return { released: true }
+      // The native drain is a no-op for an activation that is not resident, so
+      // it is not proof that a retained reservation was cleaned up. Report the
+      // scope still held by that child instead of claiming a release.
+      const scope = coordinator.scopeOf(childId)
+      return scope === undefined ? { released: true } : { released: false, scopeRetained: scope.root }
     },
   }
 }

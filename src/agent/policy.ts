@@ -41,11 +41,12 @@
  * registry is negative evidence that can occur while a published child is still
  * alive. Public API therefore offers no positive "nothing was created" receipt
  * for a start that was attempted, and the reservation (policy record plus write
- * lease) stays held until the native `agent/disposed` edge. The consequence is
- * stated rather than hidden: a reservation whose rollback silently failed and
- * whose child is already gone has no public path to release it, so `stop` on
- * that id is an accepted no-op that does NOT clear the lease. It is never
- * force-unlocked.
+ * lease) stays held and pinned: absence of an Agent, a replaced Agent for the
+ * same session id, and a later disposal of that child id are all negative
+ * evidence, so none of them releases it. The consequence is stated rather than
+ * hidden: a reservation whose rollback silently failed and whose child is
+ * already gone has no public path to release it, `stop` on that id is an
+ * accepted no-op that does NOT clear the lease, and it is never force-unlocked.
  *
  * @module dsh-nexus/agent/policy
  */

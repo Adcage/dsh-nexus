@@ -22,7 +22,7 @@ import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { RuntimeSettings } from '../../src/protocol.ts'
 import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 import { createAgentTool } from '../../src/agent/tool.ts'
-import { createWriteCoordinator, type WriteCoordinator } from '../../src/agent/coordination.ts'
+import { canonicalDirectory, createWriteCoordinator, type WriteCoordinator } from '../../src/agent/coordination.ts'
 import { registerChildPolicy } from '../../src/agent/policy.ts'
 import type { NexusStore } from '../../src/storage/store.ts'
 import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
@@ -388,11 +388,19 @@ describe('failed native start cleanup authority', () => {
       testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-uncertain'), harness.workspace),
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
 
+    // A new residency of that same child id being disposed is NOT a cleanup
+    // fact for the uncertain token, so it must not unlock the scope either.
+    harness.ctx.emit('agent/disposed', { agent: { id: reserved } as Agent })
+    await expect(
+      testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-disposal'), harness.workspace),
+    ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
+
     // The retained child id stays controllable, and the SDK limit is explicit:
     // `stop` is an accepted native no-op for an activation that is not resident,
     // so it does NOT clear the retained scope and must not pretend to.
-    const stop = await testCase.call({ action: 'stop', childId: reserved })
-    expect(stop.isError).toBe(false)
+    const stop = valueOf(await testCase.call({ action: 'stop', childId: reserved }))
+    expect(stop).toMatchObject({ action: 'stop', childId: reserved, released: false })
+    expect(stop.scopeRetained).toBe(await canonicalDirectory(harness.workspace))
     await expect(
       testCase.coordinator.acquire(testCase.parent, SessionId('writer-after-stop'), harness.workspace),
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })

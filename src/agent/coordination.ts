@@ -25,11 +25,16 @@
  * two preset generations of the same deployment share one lease table while an
  * unloaded plugin cannot leave a live writer in it.
  *
- * A lease outlives a child's turn on purpose: a resumable child that finished a
- * turn still owns its scope until the native runtime proves it released the
- * child (`agent/disposed`) or the caller completed a targeted drain. A result,
- * an error, an interrupt acknowledgement or an inferred idle state are NOT
- * release proof.
+ * A lease has two lifetimes. An ordinary (`held`) lease belongs to a child the
+ * runtime published, and it ends on the native `agent/disposed` edge for that
+ * child or on an explicit {@link WriteLease.release}. A lease whose child start
+ * rejected with unconfirmed cleanup is marked `unconfirmed` by its owner and has
+ * NO automatic end: absence of an Agent or a Session, a replaced Agent for the
+ * same session id, and a later residency's disposal are all negative evidence,
+ * so none of them may unlock a scope a possibly live writer still uses. Only an
+ * explicit release or the coordinator's own scope teardown (a Task 9 lifetime
+ * concern) ends such a lease. A result, an error, an interrupt acknowledgement
+ * or an inferred idle state are never release proof either.
  *
  * @module dsh-nexus/agent/coordination
  */
@@ -51,6 +56,20 @@ export interface WriteLease {
   release(): void
 }
 
+/**
+ * Why one scope is still reserved: `held` for a child the runtime published,
+ * `unconfirmed` when a rejected start left its cleanup unproven.
+ */
+export type WriteScopeState = 'held' | 'unconfirmed'
+
+/** One child's reserved scope as the host may report it, without releasing it. */
+export interface WriteScope {
+  /** Canonical root the child still holds. */
+  readonly root: string
+  /** Why it is still held. */
+  readonly state: WriteScopeState
+}
+
 /** The single lease table shared by every Nexus child consumer in a deployment. */
 export interface WriteCoordinator {
   /**
@@ -64,6 +83,21 @@ export interface WriteCoordinator {
    * @throws NexusError `INVALID_ARGUMENT` when the directory cannot be canonicalized.
    */
   acquire(owner: Agent, childId: SessionId, cwd: string): Promise<WriteLease>
+  /**
+   * Mark one child's held scope as cleanup-unconfirmed.
+   *
+   * After this, nothing releases the scope except an explicit release or the
+   * coordinator's own teardown: absence of an Agent or Session, a replaced
+   * owner, and a later disposal of that child id are all negative evidence.
+   * @param childId - child whose reservation is retained.
+   */
+  pin(childId: SessionId): void
+  /**
+   * Report the scope one child still holds, without releasing it.
+   * @param childId - child to look up.
+   * @returns its scope and state, or undefined when it holds none.
+   */
+  scopeOf(childId: SessionId): WriteScope | undefined
 }
 
 /** One row of the lease table. */
@@ -74,6 +108,8 @@ interface LeaseRecord {
   readonly root: string
   /** Comparison key: case-folded on Windows, otherwise the canonical root. */
   readonly key: string
+  /** Why this scope is still reserved; see {@link WriteScopeState}. */
+  state: WriteScopeState
   released: boolean
 }
 
@@ -134,26 +170,18 @@ export function scopesOverlap(left: string, right: string): boolean {
 /**
  * Create the deployment's write coordinator.
  *
- * `ctx` supplies the live Agent registry: a lease whose owner Agent and child
- * are both provably gone no longer holds authority, so a later writer is not
- * blocked forever by a torn-down session. The coordinator also releases a lease
- * when the native runtime disposes that exact child — the confirmed-release
- * edge, never an inferred idle state.
- * @param ctx - context providing the Agent registry.
+ * The coordinator releases an ordinary lease when the native runtime disposes the
+ * child that holds it — the confirmed-release edge, never an inferred idle
+ * state. It never reclaims one because an Agent is absent or replaced: that is
+ * the same negative evidence a silently failed rollback leaves behind, so a
+ * cleanup-unconfirmed reservation stays reserved.
+ * @param ctx - context that owns the coordinator's lifetime.
  * @returns the coordinator to pass to every child consumer.
  */
 export function createWriteCoordinator(ctx: Context): WriteCoordinator {
   const leases = new Map<string, LeaseRecord>()
 
-  /** Whether a record's writer and authorizing Agent are both gone. */
-  const abandoned = (record: LeaseRecord): boolean => {
-    const agents = ctx.get('agents')
-    if (agents === undefined) return false
-    if (agents.get(record.owner.id) === record.owner) return false
-    return agents.get(record.childId) === undefined
-  }
-
-  /** Release one record; the caller has already proven the writer is gone. */
+  /** Release one record after an explicit release or a bound child's disposal. */
   const drop = (record: LeaseRecord): void => {
     record.released = true
     if (leases.get(record.key) === record) leases.delete(record.key)
@@ -161,6 +189,9 @@ export function createWriteCoordinator(ctx: Context): WriteCoordinator {
 
   const disposeListener = ctx.on('agent/disposed', ({ agent }) => {
     for (const record of [...leases.values()]) {
+      // An unconfirmed reservation has no trusted identity: a disposal of the
+      // same id may be a later residency, so it is not a cleanup fact.
+      if (record.state === 'unconfirmed') continue
       if (record.childId === agent.id) drop(record)
     }
   })
@@ -169,6 +200,14 @@ export function createWriteCoordinator(ctx: Context): WriteCoordinator {
     leases.clear()
   }, 'nexus write coordinator')
 
+  /** The one record a child holds, if any. */
+  const recordOf = (childId: SessionId): LeaseRecord | undefined => {
+    for (const record of leases.values()) {
+      if (record.childId === childId) return record
+    }
+    return undefined
+  }
+
   return {
     async acquire(owner, childId, cwd) {
       const root = await canonicalDirectory(cwd)
@@ -176,10 +215,6 @@ export function createWriteCoordinator(ctx: Context): WriteCoordinator {
       // Prove the requested tree is free BEFORE touching this child's current
       // lease: a refused move must leave the child holding what it already had.
       for (const record of [...leases.values()]) {
-        if (abandoned(record)) {
-          drop(record)
-          continue
-        }
         if (record.childId === childId) continue
         if (scopesOverlap(record.root, root)) {
           throw new NexusError(
@@ -189,16 +224,31 @@ export function createWriteCoordinator(ctx: Context): WriteCoordinator {
         }
       }
       for (const record of [...leases.values()]) {
-        // One child holds one scope: the same tree keeps the existing lease, and
-        // a new tree now replaces it after the availability check above.
-        if (record.childId === childId) {
-          if (record.key === key) return leaseOf(record)
-          drop(record)
+        if (record.childId !== childId) continue
+        // One child holds one scope: the same tree keeps the existing lease. A
+        // different tree replaces it only for an ordinary lease; an unconfirmed
+        // reservation cannot be moved, because moving it would release it.
+        if (record.key === key) return leaseOf(record)
+        if (record.state === 'unconfirmed') {
+          throw new NexusError(
+            'WRITE_SCOPE_BUSY',
+            `child "${childId}" still holds the write scope "${record.root}" after a start with unconfirmed cleanup, so that scope cannot be moved or replaced; release or restart the deployment scope to recover it`,
+          )
         }
+        drop(record)
       }
-      const record: LeaseRecord = { owner, childId, root, key, released: false }
+      const record: LeaseRecord = { owner, childId, root, key, state: 'held', released: false }
       leases.set(key, record)
       return leaseOf(record)
+    },
+    pin(childId) {
+      const record = recordOf(childId)
+      if (record === undefined || record.released) return
+      record.state = 'unconfirmed'
+    },
+    scopeOf(childId) {
+      const record = recordOf(childId)
+      return record === undefined ? undefined : { root: record.root, state: record.state }
     },
   }
 
