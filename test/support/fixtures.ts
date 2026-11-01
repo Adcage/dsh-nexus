@@ -1015,6 +1015,42 @@ export function createScriptedOutputReader(
   }
 }
 
+/**
+ * Raw-byte output reader for output that is not valid UTF-8.
+ *
+ * Same retained-window and spill contract as {@link createScriptedOutputReader},
+ * but the bytes are decoded non-fatally exactly as the native collector does.
+ * `totalBytes` lets an edge case report a whole-stream size larger than the
+ * bytes kept here, for streams that crossed a provider cap.
+ * @param bytes - raw capture bytes.
+ * @param options - retained-window size, spill path and reported total.
+ * @returns a non-consuming reader with the shipped offset contract.
+ */
+export function createScriptedRawOutputReader(
+  bytes: Uint8Array,
+  options: { readonly memoryBytes?: number; readonly spillPath?: string; readonly totalBytes?: number } = {},
+): ScriptedOutputReader {
+  const buffer = Buffer.from(bytes)
+  const memoryBytes = options.memoryBytes ?? buffer.length
+  const total = options.totalBytes ?? buffer.length
+  let spillActive = options.spillPath !== undefined && memoryBytes < total
+  return {
+    readFrom(fromByte) {
+      const windowStart = Math.max(0, total - memoryBytes)
+      const start = Math.max(fromByte, windowStart)
+      return {
+        text: buffer.subarray(start).toString('utf8'),
+        nextOffset: total,
+        lossy: fromByte < windowStart,
+        ...(spillActive && options.spillPath !== undefined ? { spillPath: options.spillPath } : {}),
+      }
+    },
+    withdrawSpill() {
+      spillActive = false
+    },
+  }
+}
+
 /** A live output reader that can grow and finish between reads. */
 export interface ScriptedLiveOutputReader extends ScriptedOutputReader {
   /** Append the next raw bytes exactly as a pipe chunk would arrive. */
@@ -1103,6 +1139,14 @@ export interface ScriptedProcessScript {
   readonly stdout?: string
   /** Text captured on stderr. */
   readonly stderr?: string
+  /**
+   * The collected readers to expose instead of synthesizing them from the
+   * text. Used when a case needs a real spill file or raw non-UTF-8 bytes.
+   */
+  readonly readers?: {
+    readonly stdout?: SubprocessOutputReader
+    readonly stderr?: SubprocessOutputReader
+  }
   /** Exit code; `null` means it died by signal. Defaults to 0. */
   readonly exitCode?: number | null
   /** Terminating signal reported by `done`. */
@@ -1111,8 +1155,16 @@ export interface ScriptedProcessScript {
   readonly staysOpen?: boolean
   /** Reject `done` instead of reporting an outcome, simulating a provider failure. */
   readonly doneError?: Error
-  /** `waitForExit` can never prove the managed range empty. */
-  readonly cleanupUnconfirmed?: boolean
+  /**
+   * `waitForExit` can never prove the managed range empty. A function makes the
+   * fact mutable, so a case can retry cleanup after the first attempt failed.
+   */
+  readonly cleanupUnconfirmed?: boolean | (() => boolean)
+  /**
+   * Ignore `terminate()`: the parent outcome never settles and the range never
+   * clears, which is the provider-hang shape the consumer must bound.
+   */
+  readonly ignoreTerminate?: boolean
   /**
    * The parent exits normally but the managed range keeps a survivor until
    * `terminate()`; this is the live-grandchild shape.
@@ -1126,6 +1178,10 @@ export interface SubprocessDoubleOptions {
   readonly script?: (spec: SubprocessSpawnSpec) => ScriptedProcessScript
   /** Script for one terminal spawn; defaults to a clean, immediately finished session. */
   readonly terminalScript?: (spec: SubprocessTerminalSpawnSpec) => ScriptedProcessScript
+  /** Awaited by `resolveExecutable`; lets a case keep a start pending deterministically. */
+  readonly beforeResolveExecutable?: (command: string) => Promise<void> | void
+  /** Refuse every ordinary spawn with this error instead of publishing a handle. */
+  readonly failSpawnWith?: Error
 }
 
 /** The mounted subprocess service plus what it was asked to start. */
@@ -1176,6 +1232,7 @@ class ScriptedSubprocessRuntime extends SubprocessRuntime {
    * @returns the command unchanged: the double performs no PATH lookup.
    */
   async resolveExecutable(command: string): Promise<string> {
+    await this.options.beforeResolveExecutable?.(command)
     return command
   }
 
@@ -1191,6 +1248,7 @@ class ScriptedSubprocessRuntime extends SubprocessRuntime {
    * @returns a handle driven by the configured script.
    */
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
+    if (this.options.failSpawnWith !== undefined) throw this.options.failSpawnWith
     this.spawns.push(spec)
     return new ScriptedProcess(spec, this.options.script?.(spec) ?? {})
   }
@@ -1231,7 +1289,8 @@ class ScriptedProcess implements SubprocessHandle {
   private finished = false
   private rangeEmpty: boolean
   private readonly staysOpen: boolean
-  private readonly cleanupUnconfirmed: boolean
+  private readonly cleanupUnconfirmed: boolean | (() => boolean)
+  private readonly ignoreTerminate: boolean
   private readonly survivingRange: boolean
   private rangeWaiters: Array<() => void> = []
 
@@ -1243,17 +1302,24 @@ class ScriptedProcess implements SubprocessHandle {
     const stdoutText = script.stdout ?? ''
     const stderrText = script.stderr ?? ''
     this.staysOpen = script.staysOpen === true
-    this.cleanupUnconfirmed = script.cleanupUnconfirmed === true
+    this.cleanupUnconfirmed = script.cleanupUnconfirmed ?? false
+    this.ignoreTerminate = script.ignoreTerminate === true
     this.survivingRange = script.survivingRange === true
     this.rangeEmpty = !this.survivingRange
     this.stdin = spec.stdio.stdin === 'pipe' ? new PassThrough() : undefined
     this.stdout = spec.stdio.stdout === 'pipe' ? Readable.from([stdoutText]) : undefined
     this.stderr = spec.stdio.stderr === 'pipe' ? Readable.from([stderrText]) : undefined
     this.control = spec.stdio.control === 'pipe' ? new PassThrough() : undefined
-    this.collected = {
-      ...(typeof spec.stdio.stdout === 'object' ? { stdout: createCollectReader(stdoutText) } : {}),
-      ...(typeof spec.stdio.stderr === 'object' ? { stderr: createCollectReader(stderrText) } : {}),
-    }
+    const readers = script.readers
+    this.collected = readers !== undefined
+      ? {
+          ...(readers.stdout === undefined ? {} : { stdout: readers.stdout }),
+          ...(readers.stderr === undefined ? {} : { stderr: readers.stderr }),
+        }
+      : {
+          ...(typeof spec.stdio.stdout === 'object' ? { stdout: createCollectReader(stdoutText) } : {}),
+          ...(typeof spec.stdio.stderr === 'object' ? { stderr: createCollectReader(stderrText) } : {}),
+        }
     if (script.doneError !== undefined) {
       this.finished = true
       const rejected = Promise.reject<SubprocessOutcome>(script.doneError)
@@ -1276,6 +1342,7 @@ class ScriptedProcess implements SubprocessHandle {
   /** End the parent process and, when it owns one, the managed range. */
   terminate(): void {
     this.terminateCalls += 1
+    if (this.ignoreTerminate) return
     if (this.survivingRange) {
       this.rangeEmpty = true
       for (const wake of this.rangeWaiters.splice(0)) wake()
@@ -1290,7 +1357,7 @@ class ScriptedProcess implements SubprocessHandle {
    * @returns whether the managed range is empty before the bound aborted.
    */
   async waitForExit(signal?: AbortSignal): Promise<boolean> {
-    if (this.cleanupUnconfirmed) return false
+    if (this.cleanupUnconfirmedNow()) return false
     if (signal?.aborted === true) return false
     if (this.survivingRange && !this.rangeEmpty) {
       await waitForSignal(this.rangeWaiters, signal)
@@ -1301,6 +1368,11 @@ class ScriptedProcess implements SubprocessHandle {
       () => undefined,
     )
     return true
+  }
+
+  /** Resolve the mutable cleanup fact for one attempt. */
+  private cleanupUnconfirmedNow(): boolean {
+    return typeof this.cleanupUnconfirmed === 'function' ? this.cleanupUnconfirmed() : this.cleanupUnconfirmed
   }
 }
 

@@ -28,8 +28,10 @@ export interface ProcessOutputStreams {
 }
 
 /** Opaque cursor payload; never exposed as an API shape. */
-interface CursorState {
+export interface OutputCursorState {
+  /** Whole-stream stdout byte offset to resume from. */
   readonly stdoutOffset: number
+  /** Whole-stream stderr byte offset to resume from. */
   readonly stderrOffset: number
   /** At least one requested byte has already fallen out of the retained tail. */
   readonly lost: boolean
@@ -74,8 +76,8 @@ export class ManagedOutput {
     const state: { stdoutOffset: number; stderrOffset: number; lost: boolean; stderrStarted: boolean } =
       cursor === undefined
         ? { stdoutOffset: 0, stderrOffset: 0, lost: false, stderrStarted: false }
-        : decodeCursor(cursor, this.resourceId)
-    let remaining = pageLimit(limit)
+        : decodeOutputCursor(cursor, this.resourceId)
+    let remaining = outputPageLimit(limit)
     let lost = state.lost
     let text = ''
 
@@ -223,7 +225,7 @@ function dropLeadingReplacements(text: string, count: number): string {
  * is located by monotonic probing instead of re-measuring decoded text (which
  * would be wrong for a window that begins mid-code-point).
  */
-function findWindowStart(reader: SubprocessOutputReader, fromByte: number, end: number): number {
+export function findWindowStart(reader: SubprocessOutputReader, fromByte: number, end: number): number {
   let low = fromByte
   let high = end
   while (low < high) {
@@ -250,7 +252,7 @@ function findWindowStart(reader: SubprocessOutputReader, fromByte: number, end: 
  * @param complete - whether the native output source has ended.
  * @returns the page text safe to return now.
  */
-function holdPendingTail(page: string, streamText: string, complete: boolean): string {
+export function holdPendingTail(page: string, streamText: string, complete: boolean): string {
   if (complete || page !== streamText) return page
   let end = page.length
   for (let held = 0; held < 3 && end > 0 && page[end - 1] === '\uFFFD'; held += 1) end -= 1
@@ -262,7 +264,7 @@ function holdPendingTail(page: string, streamText: string, complete: boolean): s
  * code point. A single code point larger than a tiny caller limit is returned
  * whole so the cursor always makes progress.
  */
-function takeUtf8Prefix(text: string, maxBytes: number): string {
+export function takeUtf8Prefix(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return ''
   let used = 0
   let end = 0
@@ -277,7 +279,7 @@ function takeUtf8Prefix(text: string, maxBytes: number): string {
 }
 
 /** Validate and clamp one requested page size. */
-function pageLimit(limit: number | undefined): number {
+export function outputPageLimit(limit: number | undefined): number {
   if (limit === undefined) return PROCESS_READ_MAX_BYTES
   if (!Number.isFinite(limit) || limit < 1) {
     throw new NexusError('INVALID_ARGUMENT', 'the output read limit must be a positive finite number of bytes')
@@ -286,7 +288,7 @@ function pageLimit(limit: number | undefined): number {
 }
 
 /** Encode one cursor for the process that produced it. */
-function encodeCursor(resourceId: string, state: CursorState): string {
+function encodeCursor(resourceId: string, state: OutputCursorState): string {
   const payload = JSON.stringify({
     v: 1,
     id: resourceId,
@@ -299,7 +301,7 @@ function encodeCursor(resourceId: string, state: CursorState): string {
 }
 
 /** Decode and validate a cursor, rejecting foreign/malformed values. */
-function decodeCursor(cursor: string, resourceId: string): CursorState {
+export function decodeOutputCursor(cursor: string, resourceId: string): OutputCursorState {
   const invalid = (): NexusError =>
     new NexusError(
       'INVALID_ARGUMENT',

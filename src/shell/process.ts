@@ -62,8 +62,12 @@ export interface RunInput {
   readonly cwd: string
   /** Engine to start; defaults to the stored terminal engine (`bash` initially). */
   readonly engine?: ShellEngine
-  /** Command timeout in milliseconds; defaults to 120 000 and is bounded 1..600 000. */
-  readonly timeoutMs?: number
+  /**
+   * Command timeout in milliseconds; defaults to 120 000 and is bounded
+   * 1..600 000. `null` disables the automatic timeout for a published
+   * background run whose owner lifecycle owns the stop.
+   */
+  readonly timeoutMs?: number | null
   /** Extra child environment entries; `DSH_*` and `BASH_FUNC_*` entries here are ignored. */
   readonly env?: Readonly<Record<string, string>>
 }
@@ -231,9 +235,10 @@ function engineArgv(spec: ShellEngineSpec, executable: string, command: string):
   return [executable, ...spec.args, commandArg]
 }
 
-/** Validate and default the ordinary-command timeout. */
-function resolveTimeout(value: number | undefined): number {
+/** Validate and default the ordinary-command timeout; `null` disables it. */
+function resolveTimeout(value: number | null | undefined): number | null {
   if (value === undefined) return COMMAND_DEFAULT_TIMEOUT_MS
+  if (value === null) return null
   if (!Number.isFinite(value) || value < COMMAND_MIN_TIMEOUT_MS || value > COMMAND_MAX_TIMEOUT_MS) {
     throw new NexusError(
       'INVALID_ARGUMENT',
@@ -378,7 +383,7 @@ function manageProcess(
   initialSandbox: ManagedSandboxFacts | undefined,
   confined: ConfinedExecution | undefined,
   owner: CallOwner,
-  timeoutMs: number,
+  timeoutMs: number | null,
 ): ManagedProcess {
   const resourceId = `proc_${randomUUID()}`
   // Native `done` settles only after the output streams close (or the
@@ -515,10 +520,12 @@ function manageProcess(
     void stop('cancel')
   }
 
-  timer = setTimeout(() => {
-    void stop('timeout')
-  }, timeoutMs)
-  timer.unref()
+  if (timeoutMs !== null) {
+    timer = setTimeout(() => {
+      void stop('timeout')
+    }, timeoutMs)
+    timer.unref()
+  }
   if (owner.signal.aborted) void stop('cancel')
   else owner.signal.addEventListener('abort', onAbort, { once: true })
 
