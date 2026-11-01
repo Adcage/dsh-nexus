@@ -8,7 +8,14 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
 import { ZodError, type ZodType } from 'zod'
-import type { ChildPolicy, PromptLibrary, PromptSnapshot, RuntimeSettings, WebDocument } from '../protocol.ts'
+import type {
+  ChildPolicy,
+  PromptLibrary,
+  PromptSnapshot,
+  RuntimeSettings,
+  WebDocument,
+  WriteScopeRecord,
+} from '../protocol.ts'
 import { DEFAULT_LIBRARY, DEFAULT_SETTINGS } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import {
@@ -19,12 +26,14 @@ import {
   SETTINGS_TABLE,
   SINGLETON_KEY,
   WEB_TABLE,
+  WRITE_SCOPE_TABLE,
   childPolicySchema,
   promptLibrarySchema,
   promptSnapshotSchema,
   runtimeSettingsSchema,
   webDocumentSchema,
   webRecordKey,
+  writeScopeSchema,
 } from './domain.ts'
 
 /** A record plus the hash a later writer must present to replace it. */
@@ -125,6 +134,24 @@ export interface NexusStore {
    * @param childId - child session id; deleting an absent policy is not an error.
    */
   deleteChildPolicy(childId: string): Promise<void>
+  /**
+   * List the write-scope reservations that were durable when they were written.
+   *
+   * A record here is evidence that a child was admitted into a tree, never proof
+   * that the tree is clean: the caller treats every survivor as unresolved.
+   * @returns one record per child whose reservation still exists.
+   */
+  listWriteScopes(): Promise<readonly WriteScopeRecord[]>
+  /**
+   * Persist one write-scope reservation.
+   * @param value - the reservation to keep.
+   */
+  putWriteScope(value: WriteScopeRecord): Promise<void>
+  /**
+   * Delete one child's reservation after its scope was positively released.
+   * @param childId - child whose scope is released; deleting an absent record is not an error.
+   */
+  deleteWriteScope(childId: string): Promise<void>
   /** Close the store; idempotent. */
   dispose(): Promise<void>
 }
@@ -188,6 +215,7 @@ class NexusStoreHandle implements NexusStore {
   private readonly prompts: KvTable<string, PromptSnapshot>
   private readonly web: KvTable<string, WebDocument>
   private readonly childPolicies: KvTable<string, ChildPolicy>
+  private readonly writeScopes: KvTable<string, WriteScopeRecord>
 
   /**
    * @param domain - the opened Nexus domain this store owns.
@@ -199,6 +227,7 @@ class NexusStoreHandle implements NexusStore {
     this.prompts = domain.table(PROMPTS_TABLE)
     this.web = domain.table(WEB_TABLE)
     this.childPolicies = domain.table(CHILD_POLICY_TABLE)
+    this.writeScopes = domain.table(WRITE_SCOPE_TABLE)
   }
 
   /** Materialize the two singleton records so a save always has a record to replace. */
@@ -290,9 +319,37 @@ class NexusStoreHandle implements NexusStore {
     await this.childPolicies.delete(childId)
   }
 
+  async listWriteScopes(): Promise<readonly WriteScopeRecord[]> {
+    return [...this.writeScopes.entries()].map(([, record]) => record)
+  }
+
+  async putWriteScope(value: WriteScopeRecord): Promise<void> {
+    const record = parseRecord(writeScopeSchema, value, 'the write-scope reservation')
+    await this.writeScopes.put(record.childId, record)
+  }
+
+  async deleteWriteScope(childId: string): Promise<void> {
+    await this.writeScopes.delete(childId)
+  }
+
   async dispose(): Promise<void> {
     await this.domain.close()
   }
+}
+
+/**
+ * Options for {@link openNexusStore}.
+ */
+export interface OpenNexusStoreOptions {
+  /**
+   * Close the store when the calling plugin unloads; defaults to true.
+   *
+   * A composing runtime that owns a real teardown ORDER (drain owned work, then
+   * close) passes false and closes the store itself: Cordis runs the effects of
+   * one fiber concurrently, so two independent disposers cannot promise that the
+   * store outlives the work that still writes to it.
+   */
+  readonly disposeOnUnload?: boolean
 }
 
 /**
@@ -303,9 +360,10 @@ class NexusStoreHandle implements NexusStore {
  * two singleton records are materialized here, before the store is handed out, so
  * every later save is a conditional replace instead of a first-write race.
  * @param ctx - context with `storageDomain` active.
+ * @param options - unload behaviour; see {@link OpenNexusStoreOptions}.
  * @returns the opened store.
  */
-export async function openNexusStore(ctx: Context): Promise<NexusStore> {
+export async function openNexusStore(ctx: Context, options: OpenNexusStoreOptions = {}): Promise<NexusStore> {
   const domain = await ctx.storageDomain.open(NEXUS_DOMAIN)
   const store = new NexusStoreHandle(domain)
   try {
@@ -314,6 +372,6 @@ export async function openNexusStore(ctx: Context): Promise<NexusStore> {
     await domain.close()
     throw error
   }
-  ctx.effect(() => () => store.dispose(), 'nexusStore')
+  if (options.disposeOnUnload !== false) ctx.effect(() => () => store.dispose(), 'nexusStore')
   return store
 }

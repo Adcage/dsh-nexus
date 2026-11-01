@@ -501,3 +501,37 @@ describe('agent identity and lifecycle', () => {
     expect(failureCode(() => openCase.sessions.peek(firstHandle.agent))).toBe('NO_AGENT')
   })
 })
+
+describe('drain', () => {
+  it('joins a held durable write before the store it belongs to may close', async () => {
+    const first = moduleOf('first', 'FIRST BODY')
+    const second = moduleOf('second', 'SECOND BODY')
+    const openCase = await openPromptCase({ modules: [first, second], defaultSelection: ['first'] })
+    const { agent } = await openCase.createAgent('session-drain')
+    const gate = gatePromptWrites(openCase.store)
+    const sessions = createPromptSessions(openCase.harness.ctx, gate.store)
+    await sessions.initialize(agent)
+
+    gate.holdNextPut()
+    const applying = sessions.apply(agent, ['second'], (await openCase.store.readLibrary()).hash)
+    await gate.waitUntilHeld()
+
+    let drained = false
+    const joining = sessions.drain()
+    void joining.then(
+      () => {
+        drained = true
+      },
+      () => undefined,
+    )
+    await settledWork()
+    // A no-op drain would report completion while the write is still in flight.
+    expect(drained).toBe(false)
+
+    gate.release()
+    await joining
+    const applied = await applying
+    expect(applied.text).toBe(composePromptText([second]))
+    expect((await openCase.store.getPrompt('session-drain'))?.text).toBe(applied.text)
+  })
+})

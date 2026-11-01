@@ -256,3 +256,18 @@ export interface ChildPolicy {
   /** Effective depth cap that applies to this child's own descendants. */
   readonly maxDepth: number
 }
+
+/**
+ * Durable evidence that one child's write scope was reserved.
+ *
+ * A reservation is written before the child is admitted, so a process that
+ * stops without confirming the child's cleanup leaves proof behind instead of
+ * silently freeing a tree a possibly live writer still uses. Only an explicit
+ * release deletes the record; the record alone is never a cleanup claim.
+ */
+export interface WriteScopeRecord {
+  /** Child session id the scope was reserved for. */
+  readonly childId: string
+  /** Canonical root of the reserved tree. */
+  readonly root: string
+}

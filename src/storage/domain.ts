@@ -12,7 +12,14 @@
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
-import type { ChildPolicy, PromptLibrary, PromptSnapshot, RuntimeSettings, WebDocument } from '../protocol.ts'
+import type {
+  ChildPolicy,
+  PromptLibrary,
+  PromptSnapshot,
+  RuntimeSettings,
+  WebDocument,
+  WriteScopeRecord,
+} from '../protocol.ts'
 import {
   AGENT_MAX_CONCURRENCY,
   AGENT_MAX_DEPTH,
@@ -39,6 +46,8 @@ export const PROMPTS_TABLE = 'prompts'
 export const WEB_TABLE = 'web_documents'
 /** Table holding the durable policy of each internal child. */
 export const CHILD_POLICY_TABLE = 'child_policies'
+/** Table holding one write-scope reservation per child whose cleanup is unresolved. */
+export const WRITE_SCOPE_TABLE = 'write_scopes'
 
 /**
  * Key of a table that holds exactly one record. Keys stay opaque because the
@@ -121,6 +130,12 @@ export const webDocumentSchema: z.ZodType<WebDocument> = z.object({
   expiresAt: z.string(),
 })
 
+/** One write-scope reservation as stored. */
+export const writeScopeSchema: z.ZodType<WriteScopeRecord> = z.object({
+  childId: z.string(),
+  root: z.string(),
+})
+
 /** One internal child's durable policy as stored. */
 export const childPolicySchema: z.ZodType<ChildPolicy> = z.object({
   childId: z.string(),
@@ -161,5 +176,6 @@ export const NEXUS_DOMAIN = defineDomain({
     [PROMPTS_TABLE]: domainTable(promptSnapshotSchema),
     [WEB_TABLE]: domainTable(webDocumentSchema),
     [CHILD_POLICY_TABLE]: domainTable(childPolicySchema),
+    [WRITE_SCOPE_TABLE]: domainTable(writeScopeSchema),
   },
 })

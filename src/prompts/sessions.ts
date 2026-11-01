@@ -88,6 +88,14 @@ export interface PromptSessions {
    * @throws NexusError `NO_AGENT` when this Agent has no effective snapshot.
    */
   peek(agent: Agent): PromptSnapshot
+  /**
+   * Wait until every durable operation already queued for any session settled.
+   *
+   * A runtime teardown calls this before it closes the store: an outgoing
+   * generation's write must reach the medium before the record is relied on by a
+   * replacement or the store goes away.
+   */
+  drain(): Promise<void>
 }
 
 /** One exact Agent's effective snapshot plus its operation queue. */
@@ -177,6 +185,14 @@ class PromptSessionsHandle implements PromptSessions {
       )
     }
     return entry.snapshot
+  }
+
+  async drain(): Promise<void> {
+    // Every queued operation is already the whole logical unit, and a settled tail
+    // never rejects, so joining the tails waits for the durable work itself.
+    while (this.queues.size > 0) {
+      await Promise.all([...this.queues.values()])
+    }
   }
 
   /**

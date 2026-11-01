@@ -1533,8 +1533,35 @@ function normalizePath(path: string): string {
   return slashed.length > 1 ? slashed.replace(/\/$/, '') : slashed
 }
 
+/**
+ * How a store fixture attaches to a case.
+ */
+export interface NexusStoreFixtureOptions {
+  /**
+   * Mount on an existing context instead of a fresh one. The caller keeps
+   * ownership of that context (a lifecycle case needs the real native stack on
+   * the same context); disposal then only removes the medium this fixture made.
+   */
+  readonly ctx?: Context
+  /**
+   * Reuse an existing medium root instead of creating a temporary one. A restart
+   * case opens a second context over the same medium; the owner deletes it.
+   */
+  readonly root?: string
+}
+
+/** One held medium write and the handles that open it again. */
+export interface MediumHold {
+  /** Resolves once the next write into the table reached the hold. */
+  waitUntilHeld(): Promise<void>
+  /** Let the held write proceed to the medium. */
+  release(): void
+}
+
 /** A real Nexus storage stack over a controllable project-local medium. */
 export interface NexusStoreFixture {
+  /** Project-local medium root the fixture uses. */
+  readonly root: string
   /**
    * Open the Nexus store; call again after disposing the previous store to
    * prove that a cold reopen reads the same durable records.
@@ -1554,6 +1581,12 @@ export interface NexusStoreFixture {
    */
   failNextDelete(table: string): void
   /**
+   * Hold the next record write into `table` before it reaches the medium.
+   * @param table - table whose next write is held.
+   * @returns the hold; nothing reaches the medium until it is released.
+   */
+  holdNextPut(table: string): MediumHold
+  /**
    * Read the raw unit document the medium holds.
    * @returns the document text.
    */
@@ -1567,19 +1600,26 @@ const STORE_FIXTURE_CACHE = fileURLToPath(new URL('../../node_modules/.cache/dsh
 
 /**
  * Mount the shipped storage hub, the shipped JSON backend and the Nexus domain
- * form on a fresh temporary root.
+ * form over a project-local medium root.
  *
  * Web acquisition tests need a medium that really persists and really reopens,
  * so this fixture mounts the production stack instead of an in-memory map. The
- * only instrumented piece is the medium boundary, which can refuse the next
- * write or delete of one table so a test can prove what a refused durable change
- * leaves behind.
- * @returns the fixture over a fresh temporary root.
+ * only instrumented piece is the medium boundary, which can refuse or hold the
+ * next write or delete of one table so a test can prove what a refused durable
+ * change leaves behind.
+ *
+ * A lifecycle case passes its own context so the runtime, the real native Agent
+ * stack and the medium share one scope, and passes the medium root when it needs
+ * a second context over the same records (a restart).
+ * @param options - context and medium root to reuse; both default to fresh ones.
+ * @returns the fixture over the medium root.
  */
-export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
+export async function mountNexusStoreFixture(options: NexusStoreFixtureOptions = {}): Promise<NexusStoreFixture> {
   await mkdir(STORE_FIXTURE_CACHE, { recursive: true })
-  const root = await mkdtemp(join(STORE_FIXTURE_CACHE, 'web-'))
-  const ctx = new Context()
+  const ownedRoot = options.root === undefined
+  const root = options.root ?? (await mkdtemp(join(STORE_FIXTURE_CACHE, 'web-')))
+  const ownedCtx = options.ctx === undefined
+  const ctx = options.ctx ?? new Context()
   await ctx.plugin(Storage)
   const inner = new JsonStorageBackend(root)
   const innerKv: KvFacet = inner.kv
@@ -1595,6 +1635,18 @@ export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
     mediumQueue = next.catch(() => undefined)
     return next
   }
+  let heldTable: string | undefined
+  let announceHeld: (() => void) | undefined
+  let openHold: (() => void) | undefined
+  const heldWrite = async (table: string): Promise<void> => {
+    if (heldTable !== table) return
+    heldTable = undefined
+    await new Promise<void>((resolve) => {
+      openHold = resolve
+      announceHeld?.()
+      announceHeld = undefined
+    })
+  }
   const kv: KvFacet = {
     async open(descriptor: KvUnitDescriptor): Promise<KvUnit> {
       const unit = await innerKv.open(descriptor)
@@ -1606,6 +1658,7 @@ export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
               failingPut = undefined
               throw new Error(`the medium refused the write of '${table}/${key}'`)
             }
+            await heldWrite(table)
             await unit.putRecord(table, key, value)
             writes.push(`${table}/${key}`)
           })
@@ -1642,6 +1695,7 @@ export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
   await ctx.plugin(StorageDomain, { backend: 'json' })
 
   return {
+    root,
     open: () => openNexusStore(ctx),
     listWrites: () => [...writes],
     failNextPut(table) {
@@ -1650,10 +1704,26 @@ export async function mountNexusStoreFixture(): Promise<NexusStoreFixture> {
     failNextDelete(table) {
       failingDelete = table
     },
+    holdNextPut(table) {
+      heldTable = table
+      return {
+        waitUntilHeld() {
+          return new Promise<void>((resolve) => {
+            announceHeld = resolve
+          })
+        },
+        release() {
+          openHold?.()
+          openHold = undefined
+        },
+      }
+    },
     readMedium: () => readFile(join(root, `${NEXUS_DOMAIN_NAME}.json`), 'utf8'),
     async dispose() {
-      await ctx.fiber.dispose()
-      await rm(root, { recursive: true, force: true })
+      openHold?.()
+      openHold = undefined
+      if (ownedCtx) await ctx.fiber.dispose()
+      if (ownedRoot) await rm(root, { recursive: true, force: true })
     },
   }
 }
