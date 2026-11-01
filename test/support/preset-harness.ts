@@ -1,17 +1,31 @@
 /**
  * The real host composition a Nexus preset activation needs.
  *
- * Everything mounted here is the shipped implementation: the Cordis Loader, the
- * native preset registry, the production AgentLoop and Agent registry, the real
- * session store with JSONL persistence and the SQLite query backend, the
- * enforcing filesystem with the shared sandbox policy, the real working
- * directory, subprocess, shell-env, job, terminal, skill, question, command and
- * token-meter services, the real in-process subagent providers, the real
- * storage domain and this package's own built host row.
+ * Mounted from the shipped implementations: the Cordis Loader, the native preset
+ * registry, the production AgentLoop and Agent registry, the real session store
+ * with JSONL persistence and the SQLite query backend, the enforcing filesystem
+ * with the shared sandbox policy, the real working-directory, shell-env,
+ * job-registry, terminal, skill, question, command, token-meter and
+ * in-process subagent services, the real storage domain, the real native
+ * `agent-instructions`/skill/question/todo rows through the definition, and
+ * this package's own built host row.
  *
- * Only two members are scripted: the model transport (no request leaves the
- * process, no account is involved) and the native web search/fetch providers.
- * Both are external boundaries, not internal seams.
+ * Scripted members — every one of them an EXTERNAL boundary, never an internal
+ * seam:
+ *
+ * - the model transport (no request leaves the process, no account is involved);
+ * - the native web search/fetch providers;
+ * - the process-spawn boundary (`mountSubprocessDouble`, a
+ *   `SubprocessRuntime` implementation: no real child process);
+ * - the confinement runner (`mountRecordingSandbox`, a `SandboxProvider`
+ *   implementation: the executor's real policy resolution and full-argv
+ *   confinement path run, only the host-side runner is replaced).
+ *
+ * Consequence stated rather than implied: this harness proves NO actual OS
+ * sandbox, NO Windows ConPTY and NO real Git Bash/pwsh7 execution. Those stay
+ * Task 4/5/14 evidence. The abstract `SandboxProvider`/`SubprocessRuntime`
+ * service definitions are deliberately NOT mounted as if they were loadable
+ * implementations.
  *
  * Two environment variables are pinned for the duration of a case —
  * `DSH_HOME` and `DSH_AGENTS_HOME` — so skill and instruction discovery read
@@ -37,9 +51,7 @@ import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import type { Config as SystemPromptConfig } from '@deepseek-ai/dsh-system-prompt'
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
-import SandboxService from '@deepseek-ai/dsh-sandbox'
 import { apply as applyShellEnv } from '@deepseek-ai/dsh-shell-env'
-import Subprocess from '@deepseek-ai/dsh-subprocess'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import TerminalService from '@deepseek-ai/dsh-terminal'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
@@ -62,13 +74,17 @@ import {
   mountAttachmentDouble,
   mountModelRoute,
   mountNexusStoreFixture,
+  mountRecordingSandbox,
   mountSandboxedFileSystem,
+  mountSubprocessDouble,
   mountWebDouble,
   type AttachmentDouble,
   type CountingSandboxedFileSystem,
   type NexusStoreFixture,
   type WebDouble,
 } from './fixtures.ts'
+import { Config as NexusConfigSchema } from '../../src/config.ts'
+import type { Config as NexusConfig } from '../../src/config.ts'
 import type { NexusRuntime } from '../../src/runtime/service.ts'
 
 /** Project root: the Loader's resolution base and the built package location. */
@@ -182,21 +198,55 @@ export interface PresetHarness {
 }
 
 /**
+ * The export shape the built host entry must present: the public Cordis plugin
+ * fields plus this package's own deployment config schema.
+ *
+ * The Loader row is a module, so the test verifies each field it depends on at
+ * runtime and then uses the package's real `Config` type. Nothing is erased to
+ * `never`: a wrong export shape fails here with a message instead of a cast.
+ */
+interface NexusHostRowPlugin {
+  readonly name: string
+  readonly inject: string[]
+  readonly Config: typeof NexusConfigSchema
+  readonly apply: (ctx: Context, config: NexusConfig) => Promise<void>
+}
+
+/**
+ * Verify one imported module is the host row this package promises.
+ * @param module - the imported module namespace or its default export.
+ * @param entry - path shown in a failure, for the operator.
+ * @returns the row, typed by the public plugin contract.
+ * @throws when a required export is missing or has the wrong type.
+ */
+function asNexusHostRow(module: Record<string, unknown>, entry: string): NexusHostRowPlugin {
+  const candidate = (module.default ?? module) as Record<string, unknown>
+  const { name, inject, Config, apply } = candidate
+  if (typeof name !== 'string' || name === '') {
+    throw new Error(`${entry} exports no row name; the Loader row must be named like the package`)
+  }
+  if (!Array.isArray(inject) || inject.some((service) => typeof service !== 'string')) {
+    throw new Error(`${entry} exports no string[] inject list; the row's cold-path services must be declared`)
+  }
+  if (Config === undefined) throw new Error(`${entry} exports no Config schema; the row's config would not be validated`)
+  if (typeof apply !== 'function') throw new Error(`${entry} exports no apply function; the row would mount nothing`)
+  return {
+    name,
+    inject: inject as string[],
+    Config: Config as typeof NexusConfigSchema,
+    apply: apply as NexusHostRowPlugin['apply'],
+  }
+}
+
+/**
  * Build the plugin object the Loader mounts from the built host entry.
  * @returns the row this package installs.
  */
-async function loadBuiltHostRow(): Promise<{ name: string; inject: string[]; Config: unknown; apply: unknown }> {
+async function loadBuiltHostRow(): Promise<NexusHostRowPlugin> {
   const entry = join(packageRoot, 'lib/index.js')
   if (!existsSync(entry)) throw new Error(`missing ${entry}; run pnpm build before the preset tests`)
-  const module = (await import(pathToFileURL(entry).href)) as { default?: unknown } & Record<string, unknown>
-  const exported = (module.default ?? module) as { name?: string; inject?: string[]; Config?: unknown; apply?: unknown }
-  if (typeof exported.apply !== 'function') throw new Error(`${entry} does not export a host row`)
-  return {
-    name: exported.name ?? 'dsh-nexus',
-    inject: exported.inject ?? [],
-    Config: exported.Config,
-    apply: exported.apply,
-  }
+  const module = (await import(pathToFileURL(entry).href)) as Record<string, unknown>
+  return asNexusHostRow(module, entry)
 }
 
 /**
@@ -316,9 +366,15 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       },
     })
     const loop = await mountAgentLoopTestHarness(ctx)
-    await ctx.plugin(SandboxService, undefined as never)
+    // External boundaries: the confinement runner and the process-spawn provider
+    // implement the shipped abstract contracts (`SandboxProvider`,
+    // `SubprocessRuntime`). The base definitions are not loadable, so mounting
+    // them would leave method-less services behind; these implementations keep
+    // the executor's real policy resolution and argv path while replacing only
+    // the host-side runner/process. Neither claims OS-sandbox or PTY proof.
+    await mountRecordingSandbox(ctx)
+    await mountSubprocessDouble(ctx)
     await ctx.plugin(applyShellEnv, {})
-    await ctx.plugin(Subprocess, undefined as never)
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(TerminalService)
     await ctx.plugin(SkillRegistry)
@@ -372,7 +428,7 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       },
       async startNexus() {
         if (nexusFiber !== undefined) throw new Error('the Nexus host row is already mounted')
-        const fiber = ctx.plugin(hostRow as never, {} as never)
+        const fiber = ctx.plugin(hostRow, {})
         await fiber
         nexusFiber = fiber as unknown as { dispose(): Promise<unknown> }
         const runtime = ctx.get('nexusRuntime')
