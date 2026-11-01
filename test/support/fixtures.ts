@@ -54,7 +54,13 @@ import {
 } from '@deepseek-ai/dsh-sandbox'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import SandboxedFileSystem from '@deepseek-ai/dsh-fs-sandbox'
-import { LlmAdapter, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
+import {
+  LlmAdapter,
+  type GenerateOptions,
+  type LlmResolvedModelInfo,
+  type ModelModality,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import WebRuntime, {
   type WebFetchProvider,
   type WebFetchRequest,
@@ -784,6 +790,11 @@ export interface ModelRouteOptions {
   readonly model: string
   /** Declared input modalities; omission means "unknown", never "image". */
   readonly inputModalities?: readonly ModelModality[]
+  /**
+   * One controlled model stream. Omitted means the adapter refuses to stream:
+   * route-metadata tests never reach a request.
+   */
+  readonly stream?: (options: GenerateOptions) => AsyncIterable<StreamChunk>
 }
 
 /**
@@ -831,10 +842,12 @@ class ScriptedModelAdapter extends LlmAdapter {
   }
 
   /**
-   * @returns never; a test never streams a model call.
+   * @param options - the assembled request the Agent loop would send.
+   * @returns the case's controlled stream, or a refusal when none was supplied.
    */
-  override async *stream(): AsyncGenerator<never> {
-    throw new Error('the scripted model adapter never streams')
+  override async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
+    if (this.route.stream === undefined) throw new Error('the scripted model adapter never streams')
+    yield* this.route.stream(options)
   }
 }
 

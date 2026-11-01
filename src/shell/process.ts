@@ -70,6 +70,12 @@ export interface RunInput {
   readonly timeoutMs?: number | null
   /** Extra child environment entries; `DSH_*` and `BASH_FUNC_*` entries here are ignored. */
   readonly env?: Readonly<Record<string, string>>
+  /**
+   * Host-assigned resource id. The native background-job owner passes the
+   * registry-issued job id so one run has one identity; an ordinary caller may
+   * omit it and receives a fresh private id.
+   */
+  readonly resourceId?: string
 }
 
 /** Confinement facts retained on the host side for the tool layer to render. */
@@ -89,7 +95,7 @@ export interface ManagedSandboxFacts {
  * to the console. Task 5 consumes this type for jobs and stop/status control.
  */
 export interface ManagedProcess {
-  /** Host-assigned opaque id used by cursors and the tool layer. */
+  /** Opaque id used by cursors and the tool layer; the native job id when one owns the run. */
   readonly resourceId: string
   /** The provider handle; the native `done` is the parent outcome only, not range proof. */
   readonly handle: SubprocessHandle
@@ -220,7 +226,7 @@ export async function startProcess(
     }
     throw new NexusError('SHELL_UNAVAILABLE', `could not start ${spec.engine} in "${input.cwd}"`, { cause: error })
   }
-  return manageProcess(handle, sandboxFacts, confined, owner, timeoutMs)
+  return manageProcess(handle, sandboxFacts, confined, owner, timeoutMs, input.resourceId)
 }
 
 /** The confined facts retained until settlement. */
@@ -269,8 +275,20 @@ async function resolveExecutable(
   }
 }
 
-/** Verify an explicitly selected PowerShell is major version 7 before running commands. */
-async function assertPowerShell7(
+/**
+ * Verify an explicitly selected PowerShell is major version 7 before running
+ * commands or opening a persistent terminal.
+ *
+ * The probe is a real spawn through the provider, so an incompatible path is
+ * rejected before the caller publishes anything that a shell would own.
+ * @param subprocess - provider used for the probe.
+ * @param spec - resolved engine invocation (`pwsh` argv shape).
+ * @param executable - executable the probe runs.
+ * @param cwd - absolute directory the probe runs in.
+ * @param signal - caller cancellation; bounded by the probe timeout.
+ * @throws NexusError `SHELL_UNAVAILABLE` when the program is not PowerShell 7.
+ */
+export async function assertPowerShell7(
   subprocess: SubprocessRuntime,
   spec: ShellEngineSpec,
   executable: string,
@@ -384,8 +402,9 @@ function manageProcess(
   confined: ConfinedExecution | undefined,
   owner: CallOwner,
   timeoutMs: number | null,
+  requestedResourceId: string | undefined,
 ): ManagedProcess {
-  const resourceId = `proc_${randomUUID()}`
+  const resourceId = requestedResourceId ?? `proc_${randomUUID()}`
   // Native `done` settles only after the output streams close (or the
   // provider's drain grace), so it is the output-completion fact for the
   // trailing-UTF-8 hold. It is NOT the managed-range cleanup proof used below.

@@ -64,7 +64,7 @@ import {
   takeUtf8Prefix,
   type OutputCursorState,
 } from './output.ts'
-import { startProcess, type ManagedProcess, type RunInput } from './process.ts'
+import { startProcess, type ManagedProcess, type ManagedSandboxFacts, type RunInput } from './process.ts'
 
 declare module '@deepseek-ai/dsh-jobs/view' {
   interface JobKindMap {
@@ -83,6 +83,9 @@ declare module '@deepseek-ai/dsh-llm' {
 /** Native job kind for every Nexus shell command. */
 const JOB_KIND = 'nexus-shell'
 
+/** Prefix of every process resource id (the native job id this controller passes down). */
+export const PROCESS_RESOURCE_PREFIX = 'nexus-shell-'
+
 /** Native controller name; duplicate names remain independent by contract. */
 const CONTROLLER_NAME = 'dsh-nexus-shell'
 
@@ -94,6 +97,14 @@ const STOP_BOUND_MS = COMMAND_CLEANUP_GRACE_MS + 500
 
 /** Extra time the native wait gets beyond the settlement guard it must observe. */
 const NATIVE_WAIT_MARGIN_MS = 1_000
+
+/**
+ * Consecutive completion wakes one owner may receive before notices degrade to
+ * queued injection. Any user-authored input resets the count. The bound keeps a
+ * job that starts another job from waking its owner forever, while a normal
+ * background workflow still reaches an idle owner without polling.
+ */
+const COMPLETION_WAKE_BUDGET = 4
 
 /** One command request the shell tool maps its validated arguments into. */
 export interface ProcessRunRequest {
@@ -176,6 +187,10 @@ export interface ProcessStatusResult {
   readonly background: boolean
   /** Native job record while it exists; absent after a collected foreground call or owner teardown. */
   readonly job: ProcessJobStatus | undefined
+  /** Current confinement facts; `denied`/`runnerFailed` can settle after publication. */
+  readonly sandbox?: ManagedSandboxFacts
+  /** Truthful cleanup diagnostic while the managed range is not confirmed empty. */
+  readonly cleanupError?: string
 }
 
 /** One owned resource in a list. */
@@ -293,6 +308,12 @@ export interface ProcessRunResult {
   readonly background: boolean
   /** Native job id, present for background runs while the record is live. */
   readonly jobId?: JobId
+  /** Per-stream truth for the first page; the same facts a later `read` reports. */
+  readonly recovery: readonly OutputSourceTruth[]
+  /** Confinement facts of this run, when a policy was resolved. */
+  readonly sandbox?: ManagedSandboxFacts
+  /** Truthful cleanup diagnostic while the managed range is not confirmed empty. */
+  readonly cleanupError?: string
 }
 
 /** One Agent's reservations and live entries. */
@@ -350,6 +371,8 @@ class Controller implements ProcessController {
   private readonly states = new Map<Agent, AgentState>()
   private readonly entries = new Map<string, OwnedProcess>()
   private readonly jobsById = new Map<JobId, OwnedProcess>()
+  /** Consecutive completion wakes spent by one owner; reset by user-authored input. */
+  private readonly wakeSpent = new WeakMap<Agent, number>()
   private attached: PromiseLike<unknown> | undefined
   private detachController: (() => unknown) | undefined
   private detachReporter: (() => unknown) | undefined
@@ -384,6 +407,9 @@ class Controller implements ProcessController {
         () => jobs.events.subscribe({ owners: 'all' }, (event) => this.report(event)),
         'dsh-nexus shell job reporter',
       )
+      jobCtx.on('agent/inbox/claimed', ({ agent, message }) => {
+        if (message.source.kind === 'user') this.wakeSpent.delete(agent)
+      })
     })
   }
 
@@ -510,12 +536,17 @@ class Controller implements ProcessController {
         entry.armGuard(timeoutMs + STOP_BOUND_MS)
       }
 
-      const page = await this.readForEntry(entry, undefined)
+      const first = await this.readForEntry(entry, undefined)
+      const sandbox = entry.process.sandbox
+      const cleanupError = entry.process.cleanupError
       return {
-        view: entry.process.view(),
-        page: page.page,
+        view: first.view,
+        page: first.page,
+        recovery: first.recovery,
         background,
         ...(background ? { jobId } : {}),
+        ...(sandbox === undefined ? {} : { sandbox }),
+        ...(cleanupError === undefined ? {} : { cleanupError }),
       }
     } catch (error) {
       // Any failure before an entry exists must not hold an active-process slot.
@@ -572,10 +603,14 @@ class Controller implements ProcessController {
 
   status(owner: CallOwner, resourceId: string): ProcessStatusResult {
     const entry = this.requireEntry(owner, resourceId)
+    const sandbox = entry.process.sandbox
+    const cleanupError = entry.process.cleanupError
     return {
       view: entry.process.view(),
       background: entry.background,
       job: this.jobStatus(entry),
+      ...(sandbox === undefined ? {} : { sandbox }),
+      ...(cleanupError === undefined ? {} : { cleanupError }),
     }
   }
 
@@ -669,6 +704,7 @@ class Controller implements ProcessController {
     const input: RunInput = {
       command: options.request.command,
       cwd: options.request.cwd,
+      resourceId: options.jobId,
       ...(options.request.engine === undefined ? {} : { engine: options.request.engine }),
       ...(options.timeoutMs === null ? { timeoutMs: null } : { timeoutMs: options.timeoutMs }),
     }
@@ -931,7 +967,7 @@ class Controller implements ProcessController {
     const status = view.cleanupConfirmed
       ? `${event.job.status}${event.job.detail === undefined ? '' : `: ${event.job.detail}`}`
       : `${event.job.status}: cleanup not confirmed; the resource stays controllable`
-    const notice = `background shell job ${entry.jobId} finished [${status}]. Read its output with the shell tool action read (resourceId: ${entry.resourceId}); stop or close it before forgetting it.`
+    const notice = `background shell job ${entry.resourceId} finished [${status}]. Read its output with the shell tool action read (resourceId: ${entry.resourceId}); stop or close it before forgetting it.`
     const message = createUserMessage({
       content: [{ type: 'text', text: notice }],
       source: {
@@ -941,7 +977,18 @@ class Controller implements ProcessController {
       },
     })
     try {
-      entry.agent.inject(message)
+      if (entry.agent.status === 'idle') {
+        const spent = this.wakeSpent.get(entry.agent) ?? 0
+        if (spent < COMPLETION_WAKE_BUDGET) {
+          this.wakeSpent.set(entry.agent, spent + 1)
+          entry.agent.followup(message)
+        } else {
+          entry.agent.inject(message)
+        }
+      } else {
+        // A busy driver claims injected context at its next step boundary.
+        entry.agent.inject(message)
+      }
     } catch (error) {
       this.ctx.logger('dsh-nexus-shell').warn(`could not deliver a shell completion notice: ${describe(error)}`)
     }

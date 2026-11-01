@@ -14,9 +14,12 @@
  *   engine that cannot be resolved fails that open with `SHELL_UNAVAILABLE`; it
  *   never falls back to the other dialect.
  * - {@link createTerminalController} is the host-only adapter the shell tool maps
- *   its validated arguments onto. It mints Nexus resource ids (`nexus-term-N`,
- *   never the native PTY id), enforces the per-Agent terminal cap and fences every
- *   operation with the caller's exact live Agent instance.
+ *   its validated arguments onto. It mints Nexus resource ids
+ *   (`nexus-term-<controller-epoch>-<n>`, never the native PTY id), enforces the
+ *   per-Agent terminal cap and fences every operation with the caller's exact
+ *   live Agent instance. The epoch makes a reopened controller mint fresh ids, so
+ *   an id remembered from an earlier controller generation cannot address a new
+ *   terminal merely because the ordinal counter restarted.
  *
  * Resource families stay separate: a background-process `resourceId` is a native
  * job id, a terminal `resourceId` is a Nexus-minted terminal id, and neither a
@@ -30,6 +33,7 @@
  * @module dsh-nexus/shell/terminals
  */
 
+import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -53,7 +57,11 @@ import type { ShellEngine } from '../protocol.ts'
 import { WAIT_DEFAULT_MS, WAIT_MAX_MS, AGENT_MAX_TERMINALS } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { CallOwner } from '../runtime/owner.ts'
-import { resolveEngine, type ShellExecutionConfig } from './engines.ts'
+import { resolveEngine, resolveShellCwd, type ShellExecutionConfig } from './engines.ts'
+import { assertPowerShell7 } from './process.ts'
+
+/** Prefix of every Nexus-minted terminal resource id. */
+export const TERMINAL_RESOURCE_PREFIX = 'nexus-term-'
 
 /** Native backend type that runs the `bash` dialect. */
 export const TERMINAL_BACKEND_BASH = 'nexus-bash'
@@ -430,6 +438,21 @@ class LazyDialectBackend implements TerminalBackend {
 
   async spawn(spec: TerminalBackendSpawnSpec): Promise<TerminalBackendSession> {
     const resolved = await resolveEngine(this.engine, this.config())
+    if (this.engine === 'pwsh') {
+      // The native backend trusts its configured executable; PowerShell 7 is a
+      // Nexus requirement, so an incompatible explicit path is rejected before
+      // any persistent PTY exists.
+      const subprocess = this.ctx.get('subprocess')
+      if (subprocess === undefined) {
+        throw new NexusError(
+          'SHELL_UNAVAILABLE',
+          'verifying PowerShell 7 requires the native ctx.subprocess service',
+        )
+      }
+      const signal = spec.signal ?? new AbortController().signal
+      const cwd = await resolveShellCwd(this.ctx, spec.owner, spec.cwd, signal)
+      await assertPowerShell7(subprocess, resolved, resolved.executable, cwd, signal)
+    }
     return createNativeTerminalBackend(this.ctx, this.engine, resolved.executable).spawn(spec)
   }
 }
@@ -499,6 +522,8 @@ interface TerminalCursorState {
 class Controller implements TerminalController {
   private readonly states = new Map<Agent, AgentState>()
   private readonly entries = new Map<string, OwnedTerminal>()
+  /** Per-controller identity so a restarted ordinal counter cannot reuse an id. */
+  private readonly epoch = randomUUID().replaceAll('-', '').slice(0, 12)
   private sequence = 0
   private disposed = false
 
@@ -550,7 +575,7 @@ class Controller implements TerminalController {
         }
         this.sequence += 1
         const entry = new OwnedTerminal(
-          `nexus-term-${this.sequence}`,
+          `${TERMINAL_RESOURCE_PREFIX}${this.epoch}-${this.sequence}`,
           owner.agent,
           engine,
           snapshot.sessionId,

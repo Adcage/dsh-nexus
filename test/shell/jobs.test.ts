@@ -13,6 +13,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ShellExecutionConfig } from '../../src/shell/engines.ts'
 import { createProcessController, type ProcessController } from '../../src/shell/jobs.ts'
@@ -241,6 +242,8 @@ describe('background jobs', () => {
   it('publishes a native job and reports its settlement exactly once', async () => {
     const shell = await openJobsHarness({ script: () => ({ staysOpen: true }) })
     const owner = shell.harness.owner
+    const notices: { readonly source: { readonly kind: string }; readonly content: readonly { readonly type: string; readonly text?: string }[] }[] = []
+    shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => notices.push(message))
     const execution = await shell.harness.captureExecution()
     const started = await shell.controller.run(owner, execution, {
       command: 'long running work',
@@ -263,8 +266,10 @@ describe('background jobs', () => {
     expect(secondStop.cleanupConfirmed).toBe(true)
 
     await until(() => shell.harness.ctx.jobs.get(jobId, owner.sessionId).status === 'killed')
-    await until(() => owner.agent.inbox.nextStep.length === 1)
-    const notice = owner.agent.inbox.nextStep[0]!
+    // An idle owner is woken with an ordinary follow-up turn, so the notice is
+    // claimed from the inbox; the inserted event is where a test observes it.
+    await until(() => notices.length === 1)
+    const notice = notices[0]!
     expect(notice.source.kind).toBe('dsh-nexus')
     const text = noticeText(notice)
     expect(text).toContain(jobId)
@@ -272,7 +277,46 @@ describe('background jobs', () => {
 
     // A second settlement cannot produce a second report.
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 25))
-    expect(owner.agent.inbox.nextStep).toHaveLength(1)
+    expect(notices).toHaveLength(1)
+  })
+
+  it('bounds consecutive completion wakes and queues the next notice', async () => {
+    const shell = await openJobsHarness({ script: () => ({ staysOpen: true }) })
+    const owner = shell.harness.owner
+    const notices: { readonly source: { readonly kind: string } }[] = []
+    shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => notices.push(message))
+    const execution = await shell.harness.captureExecution()
+
+    for (let index = 0; index < 5; index += 1) {
+      const started = await shell.controller.run(owner, execution, {
+        command: `wake ${index}`,
+        cwd: CWD,
+        background: true,
+      })
+      await shell.controller.stop(owner, started.view.resourceId)
+      await until(() => notices.length === index + 1)
+      if (index < 4) {
+        // A wake opens a turn; the failed turn settles back to idle before the
+        // next settlement, so each of the first four is delivered as a wake.
+        await until(() => owner.agent.status === 'idle')
+        expect(owner.agent.inbox.nextStep).toHaveLength(0)
+      }
+    }
+    // The fifth notice exceeds the fixed consecutive-wake budget and is queued
+    // for the next step instead of opening another turn.
+    await until(() => owner.agent.inbox.nextStep.filter((message) => message.source.kind === 'dsh-nexus').length === 1)
+    expect(notices).toHaveLength(5)
+
+    // A user-authored message resets the budget: the next completion wakes again
+    // and is claimed, leaving no queued dsh-nexus notice behind.
+    owner.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }))
+    await until(() => owner.agent.status === 'idle')
+    await until(() => owner.agent.inbox.nextStep.every((message) => message.source.kind !== 'dsh-nexus'))
+    const sixth = await shell.controller.run(owner, execution, { command: 'wake again', cwd: CWD, background: true })
+    await shell.controller.stop(owner, sixth.view.resourceId)
+    await until(() => notices.length === 6)
+    await until(() => owner.agent.status === 'idle')
+    expect(owner.agent.inbox.nextStep.filter((message) => message.source.kind === 'dsh-nexus')).toHaveLength(0)
   })
 
   it('does not notify a settlement a waiting caller already collected', async () => {

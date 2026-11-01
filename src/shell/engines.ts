@@ -1,11 +1,15 @@
 /**
- * Shell-engine resolution for the Nexus execution substrate.
+ * Shell-engine and working-directory resolution for the Nexus execution
+ * substrate.
  *
- * Resolution is a pure, context-free decision: an explicitly configured
+ * Engine resolution is a pure, context-free decision: an explicitly configured
  * executable wins, otherwise a real Git for Windows / PowerShell 7 installation
  * is discovered from standard locations and PATH. Nothing here spawns a
  * process, so discovery can run before a Context exists and a runtime version
- * probe stays in the ctx-bearing executor (`process.ts`).
+ * probe stays in the ctx-bearing executor (`process.ts`). The session-directory
+ * helper is the one context-bearing member: it reads the native
+ * `workingDirectory` fact so relative shell cwd values share the session's
+ * effective directory instead of a second notion of it.
  *
  * The result carries argv fields separately from the command text: the command
  * is always one element, so spaces and CJK text are never re-quoted by an
@@ -15,7 +19,9 @@
  */
 
 import { lstatSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Config } from '../config.ts'
 import type { RuntimeSettings, ShellEngine } from '../protocol.ts'
 import { NexusError } from '../runtime/errors.ts'
@@ -44,6 +50,18 @@ export interface ShellEngineSpec {
   readonly dialect: ShellEngine
 }
 
+/** The native session-directory service one shell start resolves against. */
+export interface SessionDirectoryPort {
+  /**
+   * Validate the current directory and restore the original project when it
+   * disappeared.
+   * @param agent - live Agent owning the session.
+   * @param signal - cancellation for the filesystem inspection.
+   * @returns the existing absolute session directory.
+   */
+  ensure(agent: Agent, signal?: AbortSignal): Promise<string>
+}
+
 /** Inputs a caller may override for deterministic discovery tests. */
 export interface EngineDiscovery {
   /** Environment to inspect; defaults to the live process environment. */
@@ -57,6 +75,50 @@ const BASH_ARGS: readonly string[] = ['--noprofile', '--norc', '-c']
 
 /** Fixed pwsh arguments: no logo/profile, noninteractive, command text next. */
 const PWSH_ARGS: readonly string[] = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command']
+
+/**
+ * Require the native session-directory owner.
+ *
+ * The shell tool and the persistent-terminal backend both resolve a relative or
+ * omitted `cwd` against the calling session's effective directory. Reading that
+ * fact from the native service (rather than the immutable session header) keeps
+ * a durable directory change effective without letting either action change it.
+ * @param ctx - host context that should provide `workingDirectory`.
+ * @returns the native directory owner.
+ * @throws NexusError `UNSUPPORTED_CAPABILITY` when the service is not composed.
+ */
+export function requireSessionDirectory(ctx: Context): SessionDirectoryPort {
+  const service = ctx.get('workingDirectory') as SessionDirectoryPort | undefined
+  if (service === undefined) {
+    throw new NexusError(
+      'UNSUPPORTED_CAPABILITY',
+      'resolving a shell working directory requires the native ctx.workingDirectory service',
+    )
+  }
+  return service
+}
+
+/**
+ * Resolve one shell working directory against the native session directory.
+ *
+ * An omitted value means the session's effective directory; a relative value is
+ * resolved against it. The function never commits a directory change.
+ * @param ctx - host context providing `workingDirectory`.
+ * @param agent - live Agent owning the session.
+ * @param requested - model-supplied absolute or relative directory, or undefined.
+ * @param signal - cancellation for the filesystem inspection.
+ * @returns the absolute directory to start the shell in.
+ */
+export async function resolveShellCwd(
+  ctx: Context,
+  agent: Agent,
+  requested: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const base = await requireSessionDirectory(ctx).ensure(agent, signal)
+  if (requested === undefined) return base
+  return isAbsolute(requested) ? requested : resolve(base, requested)
+}
 
 /**
  * Resolve the executable and fixed arguments of one engine.

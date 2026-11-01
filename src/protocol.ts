@@ -72,7 +72,10 @@ export type ProcessStopCause = 'user' | 'timeout' | 'cancel' | 'dispose'
  * surviving descendant stays `stopping` with `cleanupConfirmed: false`.
  */
 export interface ProcessView {
-  /** Host-assigned opaque resource id; unique for this plugin instance. */
+  /**
+   * Opaque resource id the caller uses for later control. For a managed shell
+   * command it is the native background-job id the registry issued.
+   */
   readonly resourceId: string
   /** Resource family; process ranges and terminals are never interchangeable. */
   readonly kind: 'process'
