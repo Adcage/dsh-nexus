@@ -188,7 +188,7 @@ describe('child policy admission', () => {
     expect(await readFile(target, 'utf8')).toBe('before\n')
     // The native fence refused before any mutation reached the backend.
     expect(harness.fs.edits).toHaveLength(0)
-    harness.release()
+    harness.releaseFor('read-child')
   })
 
   it('lets a write child mutate inside its granted workspace and refuses the tree above it', async () => {
@@ -212,7 +212,7 @@ describe('child policy admission', () => {
     await expect(
       harness.ctx.fs.writeText(outside, 'escaped\n', { kind: 'createIfAbsent' }, undefined, policy),
     ).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
-    harness.release()
+    harness.releaseFor('write-child')
   })
 
   it('refuses a write child whose directory escapes the parent workspace', async () => {
@@ -339,14 +339,14 @@ describe('policy revalidation beyond creation', () => {
     await harness.ctx.subagents.sendMessage(testCase.parent, started.childId, [{ type: 'text', text: 'next turn' }], {
       signal: new AbortController().signal,
     })
-    harness.release()
+    harness.releaseFor('read-child')
     await waitFor(() => harness.requestsOf('read-child').length >= 2, 'the second child request')
 
     // The second request itself carried the narrowed policy, so the widening
     // never reached the model.
     expect(requestPolicy(testCase, 'read-child', 1)).toContain('read-only')
     expect(effectiveMode(testCase, started.child)).toBe('read-only')
-    harness.release()
+    harness.releaseFor('read-child')
   })
 
   it('keeps a read-only child read-only after a cold resume', async () => {
@@ -354,10 +354,16 @@ describe('policy revalidation beyond creation', () => {
     const { harness } = testCase
     const started = await startChild(testCase, 'read-child', 'read', harness.workspace)
     await waitFor(() => harness.requestsOf('read-child').length === 1, 'the child request')
-    harness.release()
+    harness.releaseFor('read-child')
     await started.child.whenIdle()
     await harness.ctx.subagents.drainChildren(testCase.parent, [started.childId])
     expect(harness.ctx.agents.get(started.childId)).toBeUndefined()
+
+    // The native settlement notice wakes the parent in its own turn. With
+    // answers held, that turn waits for a permit as well, so a release has to
+    // name its session instead of waking whichever answer queued first.
+    await waitFor(() => harness.heldSessions().includes(testCase.parent.id), 'the parent settlement turn')
+    expect(harness.heldSessions()).not.toContain('read-child')
 
     await harness.ctx.subagents.sendMessage(testCase.parent, started.childId, [{ type: 'text', text: 'resume' }], {
       signal: new AbortController().signal,
@@ -368,7 +374,10 @@ describe('policy revalidation beyond creation', () => {
     await waitFor(() => harness.requestsOf('read-child').length >= 2, 'the resumed child request')
     expect(effectiveMode(testCase, resumed)).toBe('read-only')
     expect(requestPolicy(testCase, 'read-child', 1)).toContain('read-only')
-    harness.release()
+    // The resumed child's answer is released while the parent's notice turn
+    // stays held: the release belongs to that child session alone.
+    harness.releaseFor('read-child')
+    expect(harness.heldSessions()).toContain(testCase.parent.id)
   })
 
   it('re-acquires the write scope when a writer is cold-resumed', async () => {
@@ -378,7 +387,7 @@ describe('policy revalidation beyond creation', () => {
     await mkdir(scope, { recursive: true })
     const started = await startChild(testCase, 'write-child', 'write', scope)
     await waitFor(() => harness.requestsOf('write-child').length === 1, 'the child request')
-    harness.release()
+    harness.releaseFor('write-child')
     await started.child.whenIdle()
     await harness.ctx.subagents.drainChildren(testCase.parent, [started.childId])
 
@@ -399,6 +408,6 @@ describe('policy revalidation beyond creation', () => {
       testCase.coordinator.acquire(testCase.parent, SessionId('third-writer'), scope),
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
     expect(effectiveMode(testCase, resumed)).toBe('workspace-write')
-    harness.release()
+    harness.releaseFor('write-child')
   })
 })

@@ -203,7 +203,7 @@ describe('parallel versus sequence write coordination', () => {
     // released, so the two children never overlap.
     await waitFor(() => childRequests().length === 1, 'the first sequence request')
     const firstSession = childRequests()[0]?.options.sessionId
-    harness.release()
+    harness.releaseFor(firstSession ?? '')
     await waitFor(() => childRequests().length === 2, 'the second sequence request')
     const secondSession = childRequests()[1]?.options.sessionId
     expect(firstSession).not.toBe(secondSession)

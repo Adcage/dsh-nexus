@@ -117,7 +117,7 @@ describe('start and inspect children', () => {
     expect(childIds(listed)).toEqual([childId])
     const status = valueOf(await testCase.call({ action: 'status', childId }))
     expect(status).toMatchObject({ action: 'status', childId })
-    harness.release()
+    harness.releaseFor(childId)
   })
 
   it('forks the parent conversation as a creation-time snapshot', async () => {
@@ -237,7 +237,7 @@ describe('read, wait and control', () => {
     // Releasing the held answer of the child being stopped lets its turn abort;
     // the sibling's answer stays held, so it stays live.
     const stopping = testCase.call({ action: 'stop', childId: firstId })
-    harness.release()
+    harness.releaseFor(firstId)
     const stopped = valueOf(await stopping)
     expect(stopped).toMatchObject({ action: 'stop', released: true })
     await waitFor(() => harness.ctx.agents.get(SessionId(firstId)) === undefined, 'the stopped child to be released')
@@ -252,7 +252,7 @@ describe('read, wait and control', () => {
     const started = valueOf(await testCase.call({ action: 'start', task: 'first task' }))
     const childId = started.childId as string
     await waitFor(() => harness.requestsOf(childId).length === 1, 'the first request')
-    harness.release()
+    harness.releaseFor(childId)
     await waitFor(() => harness.ctx.agents.get(SessionId(childId)) === undefined, 'the child to settle')
 
     const continued = valueOf(await testCase.call({ action: 'continue', childId, text: 'second task' }))
@@ -263,7 +263,7 @@ describe('read, wait and control', () => {
     expect(resumed.session.header.parentSession).toBe(parent.id)
     expect(childIds(valueOf(await testCase.call({ action: 'list' })))).toEqual([childId])
     await waitFor(() => harness.requestsOf(childId).length === 2, 'the resumed request')
-    harness.release()
+    harness.releaseFor(childId)
   })
 
   it('bounds a wait without stopping the child', async () => {
@@ -301,7 +301,7 @@ describe('read, wait and control', () => {
     const refused = await testCase.call({ action: 'list' }, stale)
     expect(refused.isError).toBe(true)
     expect(refused.error?.info).toMatchObject({ code: 'NO_AGENT' })
-    harness.release()
+    harness.releaseFor(childId)
   })
 })
 

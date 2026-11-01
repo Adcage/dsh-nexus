@@ -136,10 +136,19 @@ export interface SubagentHarness {
   runTurn(agent: Agent, text: string): Promise<void>
   /** Let the next held scripted answer proceed (one permit per call). */
   release(): void
+  /**
+   * Let the next held scripted answer of ONE session proceed. A parent turn
+   * started by a settlement notice also waits for a permit, so a release that
+   * names a session can never wake the wrong answer.
+   * @param sessionId - session whose held answer may proceed.
+   */
+  releaseFor(sessionId: string): void
   /** Let every held scripted answer proceed. */
   releaseAll(): void
   /** Number of scripted answers currently waiting for a permit. */
   readonly held: number
+  /** Sessions whose scripted answer is waiting for a permit, oldest first. */
+  heldSessions(): string[]
   /** Unload the composition and delete the temp root. */
   dispose(): Promise<void>
 }
@@ -203,8 +212,14 @@ export async function mountSubagentHarness(options: SubagentHarnessOptions = {})
     release() {
       permits.release()
     },
+    releaseFor(sessionId) {
+      permits.release(sessionId)
+    },
     releaseAll() {
       permits.releaseAll()
+    },
+    heldSessions() {
+      return permits.heldSessions()
     },
     get held() {
       return permits.held
@@ -264,7 +279,7 @@ async function* scriptedStream(
   const held = options.hold === true || (options.hold === 'children' && isChildSession(request.sessionId))
   if (typeof answer === 'string') {
     requests.push({ options: request, answer })
-    if (held) await permits.acquire()
+    if (held) await permits.acquire(request.sessionId)
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: answer }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
@@ -273,41 +288,66 @@ async function* scriptedStream(
     return
   }
   requests.push({ options: request, answer: '' })
-  if (held) await permits.acquire()
+  if (held) await permits.acquire(request.sessionId)
   yield* answer
 }
 
-/** Counting permits that hold one scripted answer each. */
+/** Permits that hold one scripted answer each, attributed to its session. */
 interface Permits {
-  acquire(): Promise<void>
-  release(): void
+  /**
+   * Wait for this session's answer to be let through.
+   * @param sessionId - session the request was stamped for (absent on an unowned call).
+   */
+  acquire(sessionId: string | undefined): Promise<void>
+  /**
+   * Let the oldest waiting answer proceed, or one of a named session.
+   * @param sessionId - only release an answer waiting for this session.
+   */
+  release(sessionId?: string): void
+  /** Let every held answer proceed; used by teardown so no stream waits forever. */
   releaseAll(): void
+  /** Number of answers currently waiting. */
   readonly held: number
+  /** Sessions of the waiting answers, oldest first. */
+  heldSessions(): string[]
 }
 
-/** Build a fresh permit set. */
+/**
+ * Build a fresh permit set.
+ *
+ * A parent turn that runs because of a child's settlement notice also answers
+ * through the scripted transport, so the pool keeps each waiter's session and a
+ * named release can never wake the wrong answer. Teardown releases everything.
+ */
 function createPermits(): Permits {
   let available = 0
-  const waiting: (() => void)[] = []
+  const waiting: { readonly sessionId: string; readonly grant: () => void }[] = []
   return {
-    async acquire() {
+    async acquire(sessionId = '') {
       if (available > 0) {
         available -= 1
         return
       }
-      await new Promise<void>((resolve) => waiting.push(resolve))
+      await new Promise<void>((resolve) => waiting.push({ sessionId, grant: resolve }))
     },
-    release() {
-      const next = waiting.shift()
-      if (next === undefined) available += 1
-      else next()
+    release(sessionId) {
+      const index = sessionId === undefined ? 0 : waiting.findIndex((waiter) => waiter.sessionId === sessionId)
+      if (index < 0 || waiting.length === 0) {
+        if (sessionId === undefined) available += 1
+        return
+      }
+      const [waiter] = waiting.splice(index, 1)
+      waiter?.grant()
     },
     releaseAll() {
-      while (waiting.length > 0) waiting.shift()?.()
+      while (waiting.length > 0) waiting.shift()?.grant()
       available = 0
     },
     get held() {
       return waiting.length
+    },
+    heldSessions() {
+      return waiting.map((waiter) => waiter.sessionId)
     },
   }
 }
