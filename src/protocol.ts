@@ -1,0 +1,164 @@
+/**
+ * Browser-safe data shared by the host half, the console and the store.
+ *
+ * Everything here is plain JSON: no `Context`, `Agent`, process or terminal
+ * handle, and no environment snapshot may cross into these types, because the
+ * console posts the same records over HTTP and the store persists them. Host
+ * identity (`Agent`) and lifecycle handles stay in their owning modules.
+ *
+ * Record shapes that the store persists are validated against these types by
+ * `storage/domain.ts`; the console only reads them.
+ *
+ * @module dsh-nexus/protocol
+ */
+
+/** One editable system-prompt module: the durable unit of the prompt library. */
+export interface PromptModule {
+  /** Stable identifier referenced by `PromptLibrary.defaultSelection` and a snapshot's `selection`. */
+  readonly id: string
+  /** Console label; never concatenated into the prompt text. */
+  readonly name: string
+  /** The literal body appended to the system prompt when selected. */
+  readonly body: string
+}
+
+/**
+ * The whole prompt library. `modules` carries the bodies; `defaultSelection`
+ * is the ordered selection a new session starts from, so array order is the
+ * order the prompt is assembled in.
+ */
+export interface PromptLibrary {
+  readonly modules: readonly PromptModule[]
+  readonly defaultSelection: readonly string[]
+}
+
+/**
+ * The complete prompt text one session was assembled with. `modules` keeps the
+ * actual bodies, not references into a library that may change later, so a
+ * request in flight and a reopened session both see the same text.
+ */
+export interface PromptSnapshot {
+  /** Durable session this snapshot belongs to. */
+  readonly sessionId: string
+  /** Module ids in assembly order. */
+  readonly selection: readonly string[]
+  /** The module bodies as they were selected. */
+  readonly modules: readonly PromptModule[]
+  /** The exact system-prompt text handed to the model. */
+  readonly text: string
+}
+
+/** Shell dialect Nexus can start; both are supported, `bash` is the default. */
+export type ShellEngine = 'bash' | 'pwsh'
+
+/** File-tool limits a user may tune in the console. */
+export interface FileSettings {
+  /** Lines returned by a `read` that names no `limit`. */
+  readonly defaultLines: number
+  /** Byte cap of one `read` result. */
+  readonly maxOutputBytes: number
+}
+
+/**
+ * Terminal preferences. A program path saved here outranks the deployment
+ * default and only affects terminals started later, never a running one.
+ */
+export interface TerminalSettings {
+  /** Engine started when a call names none. */
+  readonly engine: ShellEngine
+  /** Explicit bash executable, when it is not the deployment default. */
+  readonly bashPath?: string
+  /** Explicit PowerShell 7 executable, when it is not the deployment default. */
+  readonly pwshPath?: string
+}
+
+/** Optional role defaults for internal children; capability is not limited here. */
+export interface AgentRoleDefaults {
+  /** Name shown for the child. */
+  readonly name?: string
+  /** Task guidance placed in the child's user content, not its system prompt. */
+  readonly instructions?: string
+  /** Model the child starts with. */
+  readonly model?: string
+}
+
+/** Internal-child limits and role defaults. */
+export interface AgentSettings {
+  /** Concurrent children one parent may run. */
+  readonly concurrency: number
+  /** Effective depth cap for descendants. */
+  readonly maxDepth: number
+  /** Role values applied to a child that names none. */
+  readonly role?: AgentRoleDefaults
+}
+
+/** Web-tool result limits. */
+export interface WebSettings {
+  /** Sources kept from one search or fetch call. */
+  readonly maxResults: number
+  /** Characters kept per saved page before the saved copy is marked truncated. */
+  readonly maxCharsPerPage: number
+}
+
+/** The stored settings record: one value for the whole installation. */
+export interface RuntimeSettings {
+  readonly files: FileSettings
+  readonly terminal: TerminalSettings
+  readonly agents: AgentSettings
+  readonly web: WebSettings
+}
+
+/**
+ * One saved web result, addressed by `owner` plus `resultId`.
+ *
+ * The three text fields stay distinct on purpose: `content` is what upstream
+ * actually delivered, `convertedText` is the readable conversion of it, and
+ * `summary` is whatever summary upstream supplied. A caller that wants the
+ * original must not be handed a conversion. Truncation is recorded per cause so
+ * a partial read is never presented as the whole document.
+ */
+export interface WebDocument {
+  /** Session that owns the result; durable ownership, not a live Agent. */
+  readonly owner: string
+  /** Result id used by `web read/find`; unique within its owner. */
+  readonly resultId: string
+  /** Which call produced this document. */
+  readonly kind: 'search' | 'fetch'
+  /** Provider or source label, for diagnostics and the console. */
+  readonly source: string
+  /** Source URL; absent for a search query document. */
+  readonly url?: string
+  /** Search query; present only for a `search` document. */
+  readonly query?: string
+  /** The text upstream actually delivered. */
+  readonly content: string
+  /** Upstream-supplied summary, kept apart from the content and the conversion. */
+  readonly summary?: string
+  /** Readable conversion of `content`. */
+  readonly convertedText?: string
+  /** Upstream returned less than the full document. */
+  readonly upstreamTruncated: boolean
+  /** The saved copy dropped content to respect the size limit. */
+  readonly savedTruncated: boolean
+  /** ISO-8601 time the document was obtained. */
+  readonly createdAt: string
+  /** ISO-8601 time after which the document may be evicted. */
+  readonly expiresAt: string
+}
+
+/**
+ * The durable authorization of one internal child, kept so a cold session can
+ * re-verify it instead of trusting a resource id alone.
+ */
+export interface ChildPolicy {
+  /** Child session id the policy was granted to. */
+  readonly childId: string
+  /** Session that started the child. */
+  readonly parentSessionId: string
+  /** Canonical working directory the child was granted. */
+  readonly cwd: string
+  /** Filesystem access granted to the child. */
+  readonly access: 'read' | 'write'
+  /** Effective depth cap that applies to this child's own descendants. */
+  readonly maxDepth: number
+}
