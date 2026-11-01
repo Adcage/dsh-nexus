@@ -58,6 +58,8 @@ export class ManagedOutput {
   constructor(
     private readonly resourceId: string,
     private readonly streams: ProcessOutputStreams,
+    /** Native output-completion fact; defaults to a fixed, complete buffer. */
+    private readonly isOutputComplete: () => boolean = () => true,
   ) {}
 
   /**
@@ -68,6 +70,7 @@ export class ManagedOutput {
    * @throws NexusError `INVALID_ARGUMENT` for a malformed or foreign cursor/limit.
    */
   read(cursor?: string, limit?: number): OutputPage {
+    const outputComplete = this.isOutputComplete()
     const state: { stdoutOffset: number; stderrOffset: number; lost: boolean; stderrStarted: boolean } =
       cursor === undefined
         ? { stdoutOffset: 0, stderrOffset: 0, lost: false, stderrStarted: false }
@@ -77,9 +80,14 @@ export class ManagedOutput {
     let text = ''
 
     const stdout = readAligned(this.streams.stdout ?? EMPTY_READER, state.stdoutOffset)
-    const stdoutPage = takeUtf8Prefix(stdout.text, remaining)
+    const stdoutRaw = takeUtf8Prefix(stdout.text, remaining)
+    // A live reader can end in the middle of a UTF-8 character. Its decode is
+    // a trailing U+FFFD whose byte width is not the number of source bytes
+    // consumed, so hold the decoded tail until more bytes or output completion
+    // arrive; the cursor stays exactly before it.
+    const stdoutPage = holdPendingTail(stdoutRaw, stdout.text, outputComplete)
     const stdoutBytes = Buffer.byteLength(stdoutPage, 'utf8')
-    state.stdoutOffset = stdout.start + stdoutBytes
+    state.stdoutOffset = Math.min(stdout.start + stdoutBytes, stdout.end)
     remaining -= stdoutBytes
     text += stdoutPage
     lost = lost || stdout.lossy
@@ -94,12 +102,15 @@ export class ManagedOutput {
       const prefix = state.stderrStarted ? '' : marker
       const prefixBytes = state.stderrStarted ? 0 : markerBytes
       if (remaining > prefixBytes) {
-        const stderrPage = takeUtf8Prefix(stderr.text, remaining - prefixBytes)
+        const stderrRaw = takeUtf8Prefix(stderr.text, remaining - prefixBytes)
+        const stderrPage = holdPendingTail(stderrRaw, stderr.text, outputComplete)
         const stderrBytes = Buffer.byteLength(stderrPage, 'utf8')
-        state.stderrOffset = stderr.start + stderrBytes
-        text += prefix + stderrPage
-        state.stderrStarted = true
+        state.stderrOffset = Math.min(stderr.start + stderrBytes, stderr.end)
         lost = lost || stderr.lossy
+        if (stderrPage.length > 0) {
+          text += prefix + stderrPage
+          state.stderrStarted = true
+        }
       }
       // With no room for the marker, the stderr text stays unread for the
       // next page; its native offset is not advanced.
@@ -127,13 +138,17 @@ interface AlignedRead {
 function readAligned(reader: SubprocessOutputReader, fromByte: number): AlignedRead {
   const first = reader.readFrom(fromByte)
   if (!first.lossy) {
-    return alignCroppedWindow(reader, {
+    // A non-lossy cursor is a boundary this module returned (or the stream
+    // start). Leading-crop alignment applies only to a retained window whose
+    // head slid out of memory; running it here would misread a genuinely
+    // unfinished live tail as a cropped prefix.
+    return {
       text: first.text,
       start: fromByte,
       end: first.nextOffset,
       lossy: false,
       ...(first.spillPath === undefined ? {} : { spillPath: first.spillPath }),
-    })
+    }
   }
   const start = findWindowStart(reader, fromByte, first.nextOffset)
   const aligned = reader.readFrom(start)
@@ -217,6 +232,29 @@ function findWindowStart(reader: SubprocessOutputReader, fromByte: number, end: 
     else high = middle
   }
   return low
+}
+
+/**
+ * Hold a decoded trailing U+FFFD while the output can still grow.
+ *
+ * A live reader that ends inside a multi-byte character decodes the unfinished
+ * bytes to trailing U+FFFD characters. Their UTF-8 width is not the source-byte
+ * count, so returning them would advance the cursor past bytes the next chunk
+ * needs. The last three replacement characters (the most a UTF-8 prefix can
+ * leave) are held until the next page or until output completion makes the
+ * decoded tail final; a longer literal run returns its earlier characters
+ * immediately and is preserved in order. Only a page that actually reaches the
+ * live stream end is held; a page cut before the tail is untouched.
+ * @param page - the page text just taken.
+ * @param streamText - the full decoded text available from this stream.
+ * @param complete - whether the native output source has ended.
+ * @returns the page text safe to return now.
+ */
+function holdPendingTail(page: string, streamText: string, complete: boolean): string {
+  if (complete || page !== streamText) return page
+  let end = page.length
+  for (let held = 0; held < 3 && end > 0 && page[end - 1] === '\uFFFD'; held += 1) end -= 1
+  return page.slice(0, end)
 }
 
 /**

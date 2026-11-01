@@ -381,7 +381,19 @@ function manageProcess(
   timeoutMs: number,
 ): ManagedProcess {
   const resourceId = `proc_${randomUUID()}`
-  const output = new ManagedOutput(resourceId, handle.collected)
+  // Native `done` settles only after the output streams close (or the
+  // provider's drain grace), so it is the output-completion fact for the
+  // trailing-UTF-8 hold. It is NOT the managed-range cleanup proof used below.
+  let outputComplete = false
+  void handle.done.then(
+    () => {
+      outputComplete = true
+    },
+    () => {
+      outputComplete = true
+    },
+  )
+  const output = new ManagedOutput(resourceId, handle.collected, () => outputComplete)
   let status: ProcessStatus = 'running'
   let exitCode: number | null = null
   let signal: string | null = null

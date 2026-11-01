@@ -1015,6 +1015,88 @@ export function createScriptedOutputReader(
   }
 }
 
+/** A live output reader that can grow and finish between reads. */
+export interface ScriptedLiveOutputReader extends ScriptedOutputReader {
+  /** Append the next raw bytes exactly as a pipe chunk would arrive. */
+  append(data: Uint8Array | string): void
+  /** Mark the stream complete: no further bytes will arrive. */
+  end(): void
+  /** Whether the stream has ended. */
+  readonly complete: boolean
+}
+
+/**
+ * Raw-byte live reader with the native collector's growing-window semantics.
+ *
+ * `readFrom` concatenates the retained chunks and decodes the requested byte
+ * suffix, exactly like `OutputCollector`, so a chunk split inside a UTF-8
+ * character is observable as a trailing U+FFFD until the next append. The
+ * caller controls the output-completion fact through {@link complete}.
+ * @param initial - first raw bytes (string is encoded as UTF-8).
+ * @param options - retained-window size and optional spill path.
+ * @returns a non-consuming live reader.
+ */
+export function createScriptedLiveOutputReader(
+  initial: Uint8Array | string = '',
+  options: { readonly memoryBytes?: number; readonly spillPath?: string } = {},
+): ScriptedLiveOutputReader {
+  const chunks: Buffer[] = []
+  const maxBytes = options.memoryBytes ?? Number.POSITIVE_INFINITY
+  let retainedBytes = 0
+  let total = 0
+  let spillActive = false
+  let complete = false
+  const push = (data: Uint8Array | string): void => {
+    const chunk = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)
+    total += chunk.length
+    retainedBytes += chunk.length
+    chunks.push(chunk)
+    let overflowed = false
+    while (retainedBytes > maxBytes) {
+      const head = chunks[0]
+      if (head === undefined) break
+      const excess = retainedBytes - maxBytes
+      if (head.length <= excess) {
+        chunks.shift()
+        retainedBytes -= head.length
+      } else {
+        chunks[0] = head.subarray(excess)
+        retainedBytes -= excess
+      }
+      overflowed = true
+    }
+    if (overflowed && options.spillPath !== undefined) spillActive = true
+  }
+  push(initial)
+  return {
+    readFrom(fromByte) {
+      const buffer = Buffer.concat(chunks)
+      const windowStart = total - retainedBytes
+      const lossy = fromByte < windowStart
+      const start = Math.max(fromByte, windowStart)
+      return {
+        text: buffer.subarray(start - windowStart).toString('utf8'),
+        nextOffset: total,
+        lossy,
+        ...(spillActive && options.spillPath !== undefined ? { spillPath: options.spillPath } : {}),
+      }
+    },
+    withdrawSpill() {
+      spillActive = false
+    },
+    append(data) {
+      if (complete) throw new Error('cannot append to a completed scripted live output')
+      push(data)
+    },
+    end() {
+      complete = true
+    },
+    get complete() {
+      return complete
+    },
+  }
+}
+
 /** What a scripted process or terminal does. */
 export interface ScriptedProcessScript {
   /** Text captured on stdout. */

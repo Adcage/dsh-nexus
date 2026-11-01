@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import { NexusError } from '../../src/runtime/errors.ts'
 import { ManagedOutput } from '../../src/shell/output.ts'
-import { createScriptedOutputReader } from '../support/fixtures.ts'
+import { createScriptedLiveOutputReader, createScriptedOutputReader } from '../support/fixtures.ts'
 
 /** Read every page through a fresh cursor until the stream is empty. */
 function readAll(output: ManagedOutput): { text: string; pages: number; lossy: boolean } {
@@ -199,6 +199,126 @@ ${stderr}`)
     expect(pages).toBeGreaterThan(1)
   })
 
+  it.each([
+    ['2-byte é', 'é', 1],
+    ['3-byte 中 at byte 1', '中', 1],
+    ['3-byte 中 at byte 2', '中', 2],
+    ['4-byte 🙂 at byte 1', '🙂', 1],
+    ['4-byte 🙂 at byte 2', '🙂', 2],
+    ['4-byte 🙂 at byte 3', '🙂', 3],
+  ])('reassembles a live %s split before the next chunk arrives', (_name, char, splitAt) => {
+    const bytes = Buffer.from(char, 'utf8')
+    const prefix = 'START|'
+    const reader = createScriptedLiveOutputReader(Buffer.concat([Buffer.from(prefix, 'utf8'), bytes.subarray(0, splitAt)]))
+    const output = new ManagedOutput(`proc_live_${char.length}_${splitAt}`, { stdout: reader }, () => reader.complete)
+    const first = output.read()
+    expect(first.lossy).toBe(false)
+    expect(first.text).toBe(prefix)
+    expect(first.text).not.toContain('\uFFFD')
+    reader.append(Buffer.concat([bytes.subarray(splitAt), Buffer.from('|END', 'utf8')]))
+    reader.end()
+    const rest = drain(output, first.cursor)
+    expect(first.text + rest.text).toBe(`${prefix}${char}|END`)
+    expect(first.text + rest.text).not.toContain('\uFFFD')
+    expect(rest.endedEmpty).toBe(true)
+  })
+
+  it('does not treat a pending trailing character as stream completion or emit its replacement early', () => {
+    const bytes = Buffer.from('中', 'utf8')
+    const reader = createScriptedLiveOutputReader(bytes.subarray(0, 1))
+    const output = new ManagedOutput('proc_live_pending', { stdout: reader }, () => reader.complete)
+    const first = output.read()
+    expect(first.text).toBe('')
+    expect(first.lossy).toBe(false)
+    reader.append(bytes.subarray(1))
+    reader.end()
+    expect(output.read(first.cursor).text).toBe('中')
+  })
+
+  it('preserves a genuine literal U+FFFD at a live tail until more bytes or EOF', () => {
+    const literal = Buffer.from([0xef, 0xbf, 0xbd])
+    const reader = createScriptedLiveOutputReader(Buffer.concat([Buffer.from('START|', 'utf8'), literal]))
+    const output = new ManagedOutput('proc_live_literal_tail', { stdout: reader }, () => reader.complete)
+    const first = output.read()
+    expect(first.text).toBe('START|')
+    reader.append('|END')
+    reader.end()
+    const rest = drain(output, first.cursor)
+    expect(first.text + rest.text).toBe('START|\uFFFD|END')
+
+    const completeReader = createScriptedLiveOutputReader(Buffer.concat([Buffer.from('START|', 'utf8'), literal]))
+    completeReader.end()
+    const completeOutput = new ManagedOutput('proc_live_literal_eof', { stdout: completeReader }, () => completeReader.complete)
+    expect(completeOutput.read().text).toBe('START|\uFFFD')
+  })
+
+  it('bounds a live literal U+FFFD run while preserving every character', () => {
+    const literalRun = Buffer.from([0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd])
+    const reader = createScriptedLiveOutputReader(Buffer.concat([Buffer.from('START|', 'utf8'), literalRun]))
+    const output = new ManagedOutput('proc_live_literal_run', { stdout: reader }, () => reader.complete)
+    const first = output.read()
+    expect(first.text).toBe('START|�')
+    reader.append('|END')
+    reader.end()
+    const rest = drain(output, first.cursor)
+    expect(first.text + rest.text).toBe('START|����|END')
+  })
+
+  it('preserves a literal U+FFFD immediately next to a split character', () => {
+    const char = Buffer.from('中', 'utf8')
+    const literal = Buffer.from([0xef, 0xbf, 0xbd])
+
+    const before = createScriptedLiveOutputReader(
+      Buffer.concat([Buffer.from('START|', 'utf8'), literal, char.subarray(0, 1)]),
+    )
+    const beforeOutput = new ManagedOutput('proc_live_literal_before', { stdout: before }, () => before.complete)
+    const first = beforeOutput.read()
+    expect(first.text).toBe('START|')
+    before.append(Buffer.concat([char.subarray(1), Buffer.from('|END', 'utf8')]))
+    before.end()
+    expect(beforeOutput.read(first.cursor).text).toBe('\uFFFD中|END')
+
+    const after = createScriptedLiveOutputReader(
+      Buffer.concat([Buffer.from('START|', 'utf8'), char.subarray(0, 1)]),
+    )
+    const afterOutput = new ManagedOutput('proc_live_literal_after', { stdout: after }, () => after.complete)
+    const pending = afterOutput.read()
+    expect(pending.text).toBe('START|')
+    after.append(Buffer.concat([char.subarray(1), literal, Buffer.from('|END', 'utf8')]))
+    after.end()
+    expect(afterOutput.read(pending.cursor).text).toBe('中\uFFFD|END')
+  })
+
+  it('reassembles a live split after multiple bounded pages and reaches EOF', () => {
+    const head = `START|${'A'.repeat(20_000)}`
+    const char = Buffer.from('中', 'utf8')
+    const reader = createScriptedLiveOutputReader(Buffer.concat([Buffer.from(head, 'utf8'), char.subarray(0, 1)]))
+    const output = new ManagedOutput('proc_live_pages', { stdout: reader }, () => reader.complete)
+    const before = drain(output)
+    expect(before.text).toBe(head)
+    expect(before.pages).toBeGreaterThan(1)
+    expect(before.text).not.toContain('\uFFFD')
+    reader.append(Buffer.concat([char.subarray(1), Buffer.from('|END', 'utf8')]))
+    reader.end()
+    const after = drain(output, before.cursor)
+    expect(before.text + after.text).toBe(`${head}中|END`)
+    expect(after.endedEmpty).toBe(true)
+  })
+
+  it('reassembles a live split on stderr without breaking the stream marker', () => {
+    const char = Buffer.from('中', 'utf8')
+    const stdout = createScriptedOutputReader('OUT')
+    const stderr = createScriptedLiveOutputReader(Buffer.concat([Buffer.from('ERR|', 'utf8'), char.subarray(0, 1)]))
+    const output = new ManagedOutput('proc_live_stderr', { stdout, stderr }, () => stderr.complete)
+    const first = output.read()
+    expect(first.text).toBe('OUT[stderr]\nERR|')
+    stderr.append(Buffer.concat([char.subarray(1), Buffer.from('|END', 'utf8')]))
+    stderr.end()
+    const rest = drain(output, first.cursor)
+    expect(first.text + rest.text).toBe('OUT[stderr]\nERR|中|END')
+    expect((first.text + rest.text).match(/\[stderr\]/g)).toHaveLength(1)
+  })
+
   it('rejects a foreign, malformed or path-shaped cursor instead of reading anything', () => {
     const first = new ManagedOutput('proc_a', { stdout: createScriptedOutputReader('hello') })
     const page = first.read()
@@ -222,6 +342,23 @@ ${stderr}`)
     expect(() => output.read(undefined, Number.NaN)).toThrow(NexusError)
   })
 })
+
+/** Drain every currently available page, treating empty as no-more-now, not EOF. */
+function drain(
+  output: ManagedOutput,
+  cursor?: string,
+): { text: string; cursor: string; pages: number; endedEmpty: boolean } {
+  let text = ''
+  let next = cursor
+  let pages = 0
+  for (; pages < 8; pages += 1) {
+    const page = output.read(next)
+    next = page.cursor
+    text += page.text
+    if (page.text.length === 0) return { text, cursor: next, pages: pages + 1, endedEmpty: true }
+  }
+  return { text, cursor: next ?? '', pages, endedEmpty: false }
+}
 
 /** Continue reading from a known cursor until empty. */
 function readAllFrom(output: ManagedOutput, cursor: string): string {
