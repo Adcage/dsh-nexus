@@ -44,7 +44,14 @@ import {
   type FsWriteIntent,
   type FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
-import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
+import {
+  SandboxProvider,
+  type ConfinedArgv,
+  type RunnerFailureRule,
+  type SandboxEnforcement,
+  type SandboxExecutionPolicy,
+  type SandboxPolicy,
+} from '@deepseek-ai/dsh-sandbox'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import SandboxedFileSystem from '@deepseek-ai/dsh-fs-sandbox'
 import { LlmAdapter, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
@@ -890,18 +897,131 @@ export async function mountWebDouble(ctx: Context, options: WebDoubleOptions = {
   return { runtime, searches, fetches }
 }
 
+/** One recorded `ctx.sandbox.confine` call. */
+export interface RecordedConfineCall {
+  /** The full argv the executor asked to confine. */
+  readonly argv: readonly string[]
+  /** The per-call policy the executor resolved. */
+  readonly policy: SandboxExecutionPolicy
+}
+
+/** How the recording sandbox provider wraps and classifies executions. */
+export interface RecordingSandboxOptions {
+  /** Enforcement completeness reported for every wrap; defaults to `partial`. */
+  readonly enforcement?: SandboxEnforcement
+  /** Prefix prepended to the caller argv; defaults to `nexus-sandbox --`. */
+  readonly wrapper?: readonly string[]
+  /** Denial dialect reported; defaults to `permission denied`. */
+  readonly denialSignatures?: readonly string[]
+  /** Runner-failure evidence rules; defaults to a `sandbox runner failed` signature. */
+  readonly runnerFailureRules?: readonly RunnerFailureRule[]
+  /** Fail every confine call with this error instead of wrapping. */
+  readonly failWith?: Error
+}
+
+/**
+ * Controlled `ctx.sandbox` provider that records the exact per-call policy.
+ *
+ * It implements the shipped `SandboxProvider` contract, so the executor's real
+ * policy resolution and full-argv confinement path are exercised; only the
+ * host-side runner is replaced.
+ */
+export class RecordingSandboxProvider extends SandboxProvider {
+  /** Every confinement request, in call order. */
+  readonly calls: RecordedConfineCall[] = []
+
+  /**
+   * @param ctx - context the service registers into as `ctx.sandbox`.
+   * @param options - enforcement, wrapper and classification facts.
+   */
+  constructor(ctx: Context, private readonly options: RecordingSandboxOptions = {}) {
+    super(ctx)
+  }
+
+  /**
+   * @param argv - the full argv the executor is about to spawn.
+   * @param policy - the resolved per-call policy.
+   * @param _signal - cancellation of confinement preparation.
+   * @returns the wrapped argv and the backend's classification facts.
+   */
+  async confine(argv: readonly string[], policy: SandboxPolicy, _signal?: AbortSignal): Promise<ConfinedArgv> {
+    this.calls.push({ argv: [...argv], policy })
+    if (this.options.failWith !== undefined) throw this.options.failWith
+    return {
+      argv: [...(this.options.wrapper ?? ['nexus-sandbox', '--']), ...argv],
+      enforcement: this.options.enforcement ?? 'partial',
+      denialSignatures: this.options.denialSignatures ?? ['permission denied'],
+      runnerFailureRules: this.options.runnerFailureRules ?? [{ fatalSignatures: ['sandbox runner failed'] }],
+    }
+  }
+}
+
+/**
+ * Mount a recording sandbox provider on a fresh context.
+ * @param ctx - context to mount into (already providing `sandboxPolicy` if the test exercises confinement).
+ * @param options - recorded wrap and classification facts.
+ * @returns the provider and its call log.
+ */
+export async function mountRecordingSandbox(
+  ctx: Context,
+  options: RecordingSandboxOptions = {},
+): Promise<RecordingSandboxProvider> {
+  let mounted: RecordingSandboxProvider | undefined
+  await ctx.plugin((pluginCtx) => {
+    mounted = new RecordingSandboxProvider(pluginCtx, options)
+  })
+  if (mounted === undefined) throw new Error('the recording sandbox provider did not mount')
+  return mounted
+}
+
+/**
+ * In-memory output reader whose retained window can lose its head, mirroring a
+ * collect-mode provider. Offsets are UTF-8 byte positions.
+ * @param text - complete captured stream text.
+ * @param options - retained-window size and optional full-stream spill path.
+ * @returns a non-consuming reader with the shipped offset contract.
+ */
+export function createScriptedOutputReader(
+  text: string,
+  options: { readonly memoryBytes?: number; readonly spillPath?: string } = {},
+): SubprocessOutputReader {
+  const bytes = Buffer.from(text, 'utf8')
+  const memoryBytes = options.memoryBytes ?? bytes.length
+  return {
+    readFrom(fromByte) {
+      const windowStart = Math.max(0, bytes.length - memoryBytes)
+      const start = Math.max(fromByte, windowStart)
+      return {
+        text: bytes.subarray(start).toString('utf8'),
+        nextOffset: bytes.length,
+        lossy: fromByte < windowStart,
+        ...(options.spillPath === undefined ? {} : { spillPath: options.spillPath }),
+      }
+    },
+  }
+}
+
 /** What a scripted process or terminal does. */
 export interface ScriptedProcessScript {
   /** Text captured on stdout. */
   readonly stdout?: string
   /** Text captured on stderr. */
   readonly stderr?: string
-  /** Exit code; `null` means it died from a signal. Defaults to 0. */
+  /** Exit code; `null` means it died by signal. Defaults to 0. */
   readonly exitCode?: number | null
   /** Terminating signal reported by `done`. */
   readonly signal?: NodeJS.Signals | null
   /** Keep the process alive until `terminate()` is called. */
   readonly staysOpen?: boolean
+  /** Reject `done` instead of reporting an outcome, simulating a provider failure. */
+  readonly doneError?: Error
+  /** `waitForExit` can never prove the managed range empty. */
+  readonly cleanupUnconfirmed?: boolean
+  /**
+   * The parent exits normally but the managed range keeps a survivor until
+   * `terminate()`; this is the live-grandchild shape.
+   */
+  readonly survivingRange?: boolean
 }
 
 /** How the subprocess double answers a spawn request. */
@@ -1009,9 +1129,15 @@ class ScriptedProcess implements SubprocessHandle {
   readonly control: Duplex | undefined
   readonly collected: SubprocessCollectedOutputs
   readonly done: Promise<SubprocessOutcome>
+  /** How many times the provider's only termination verb was invoked. */
+  terminateCalls = 0
   private settle!: (outcome: SubprocessOutcome) => void
   private finished = false
+  private rangeEmpty: boolean
   private readonly staysOpen: boolean
+  private readonly cleanupUnconfirmed: boolean
+  private readonly survivingRange: boolean
+  private rangeWaiters: Array<() => void> = []
 
   /**
    * @param spec - the spawn request whose stdio disposition decides which members exist.
@@ -1021,6 +1147,9 @@ class ScriptedProcess implements SubprocessHandle {
     const stdoutText = script.stdout ?? ''
     const stderrText = script.stderr ?? ''
     this.staysOpen = script.staysOpen === true
+    this.cleanupUnconfirmed = script.cleanupUnconfirmed === true
+    this.survivingRange = script.survivingRange === true
+    this.rangeEmpty = !this.survivingRange
     this.stdin = spec.stdio.stdin === 'pipe' ? new PassThrough() : undefined
     this.stdout = spec.stdio.stdout === 'pipe' ? Readable.from([stdoutText]) : undefined
     this.stderr = spec.stdio.stderr === 'pipe' ? Readable.from([stderrText]) : undefined
@@ -1029,18 +1158,32 @@ class ScriptedProcess implements SubprocessHandle {
       ...(typeof spec.stdio.stdout === 'object' ? { stdout: createCollectReader(stdoutText) } : {}),
       ...(typeof spec.stdio.stderr === 'object' ? { stderr: createCollectReader(stderrText) } : {}),
     }
-    this.done = new Promise<SubprocessOutcome>((resolve) => {
-      this.settle = resolve
-    })
-    if (!this.staysOpen) {
+    if (script.doneError !== undefined) {
       this.finished = true
-      this.settle({ exitCode: script.exitCode ?? 0, signal: script.signal ?? null })
+      const rejected = Promise.reject<SubprocessOutcome>(script.doneError)
+      // The consumer always attaches a handler in the same turn; this keeps a
+      // test that inspects the double from producing an unhandled rejection.
+      rejected.catch(() => undefined)
+      this.done = rejected
+    } else {
+      this.done = new Promise<SubprocessOutcome>((resolve) => {
+        this.settle = resolve
+      })
+      if (!this.staysOpen) {
+        this.finished = true
+        this.settle({ exitCode: script.exitCode === undefined ? 0 : script.exitCode, signal: script.signal ?? null })
+      }
     }
     spec.signal?.addEventListener('abort', () => this.terminate(), { once: true })
   }
 
-  /** Finish the scripted process with a signal, as the provider's teardown does. */
+  /** End the parent process and, when it owns one, the managed range. */
   terminate(): void {
+    this.terminateCalls += 1
+    if (this.survivingRange) {
+      this.rangeEmpty = true
+      for (const wake of this.rangeWaiters.splice(0)) wake()
+    }
     if (this.finished) return
     this.finished = true
     this.settle({ exitCode: null, signal: 'SIGTERM' })
@@ -1048,19 +1191,29 @@ class ScriptedProcess implements SubprocessHandle {
 
   /**
    * @param signal - optional bound on the wait.
-   * @returns whether the scripted process finished before the bound aborted.
+   * @returns whether the managed range is empty before the bound aborted.
    */
   async waitForExit(signal?: AbortSignal): Promise<boolean> {
-    if (signal === undefined) {
-      await this.done
-      return true
+    if (this.cleanupUnconfirmed) return false
+    if (signal?.aborted === true) return false
+    if (this.survivingRange && !this.rangeEmpty) {
+      await waitForSignal(this.rangeWaiters, signal)
+      return this.rangeEmpty
     }
-    if (signal.aborted) return false
-    return Promise.race([
-      this.done.then(() => true),
-      new Promise<boolean>((resolve) => signal.addEventListener('abort', () => resolve(false), { once: true })),
-    ])
+    await this.done.then(
+      () => undefined,
+      () => undefined,
+    )
+    return true
   }
+}
+
+/** Wait until a double's range clears or the caller's bound aborts. */
+function waitForSignal(waiters: Array<() => void>, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    waiters.push(resolve)
+    signal?.addEventListener('abort', () => resolve(), { once: true })
+  })
 }
 
 /** One scripted terminal session. */
@@ -1083,7 +1236,7 @@ class ScriptedTerminal implements SubprocessTerminalHandle {
     this.output.end(script.stdout ?? '')
     if (script.staysOpen !== true) {
       this.finished = true
-      this.settle({ exitCode: script.exitCode ?? 0, signal: script.signal ?? null })
+      this.settle({ exitCode: script.exitCode === undefined ? 0 : script.exitCode, signal: script.signal ?? null })
     }
   }
 

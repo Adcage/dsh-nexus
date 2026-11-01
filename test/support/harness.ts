@@ -31,7 +31,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
-import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   mountAgentLoopTestDependencies,
   mountAgentLoopTestHarness,
@@ -135,6 +135,15 @@ export interface ToolHarness {
    */
   call(name: string, args?: Record<string, unknown>): Promise<ToolExecutionResult>
   /**
+   * Run one real registry call only to capture its ToolRunContext.
+   *
+   * Some host seams (`ctx.shellEnv.collect`) require the original execution
+   * rather than a fabricated token. The returned context is the registry's
+   * own object, attributed to this harness's Agent.
+   * @returns the captured run context.
+   */
+  captureExecution(): Promise<ToolRunContext>
+  /**
    * Unload everything the harness mounted and assert no registration survived.
    * @returns after the context is empty.
    */
@@ -224,6 +233,39 @@ export async function createToolHarness(options: ToolHarnessOptions = {}): Promi
         agent: owner.agent,
         signal: owner.signal,
       })
+    },
+    async captureExecution() {
+      let captured: ToolRunContext | undefined
+      const unregister = ctx.tools.register(
+        defineTool({
+          name: 'harness_capture_execution',
+          description: 'Captures the registry run context for a host-seam test.',
+          parameters: {},
+          output: {
+            schema: { type: 'json' },
+            render: () => [{ type: 'text', text: 'captured' }],
+          },
+          async execute(_args, exec) {
+            captured = exec
+            return {}
+          },
+        }),
+      )
+      try {
+        callCount += 1
+        const result = await ctx.tools.execute({
+          callId: ToolCallId(`harness-capture-${callCount}`),
+          name: 'harness_capture_execution',
+          arguments: {},
+          agent: owner.agent,
+          signal: owner.signal,
+        })
+        if (result.isError) throw new Error(`capture execution failed: ${JSON.stringify(result.error)}`)
+      } finally {
+        unregister()
+      }
+      if (captured === undefined) throw new Error('the harness did not capture a run context')
+      return captured
     },
     async dispose() {
       if (disposed) return

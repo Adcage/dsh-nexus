@@ -51,6 +51,62 @@ export interface PromptSnapshot {
 /** Shell dialect Nexus can start; both are supported, `bash` is the default. */
 export type ShellEngine = 'bash' | 'pwsh'
 
+/** Lifecycle state of one managed process, as the owner can prove it. */
+export type ProcessStatus =
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'exited'
+  | 'failed'
+  | 'timed_out'
+  | 'cancelled'
+
+/** Why a managed process was asked to stop; the first request wins. */
+export type ProcessStopCause = 'user' | 'timeout' | 'cancel' | 'dispose'
+
+/**
+ * One managed process as the host and console may describe it.
+ *
+ * `cleanupConfirmed` is the provider's proof that the whole managed range is
+ * empty. A settled parent command is not that proof, so a process with a
+ * surviving descendant stays `stopping` with `cleanupConfirmed: false`.
+ */
+export interface ProcessView {
+  /** Host-assigned opaque resource id; unique for this plugin instance. */
+  readonly resourceId: string
+  /** Resource family; process ranges and terminals are never interchangeable. */
+  readonly kind: 'process'
+  /** Lifecycle state proven by the provider so far. */
+  readonly status: ProcessStatus
+  /** Native exit code; null while running or after a signal death. */
+  readonly exitCode: number | null
+  /** Native terminating signal name; null on a normal exit or while running. */
+  readonly signal: string | null
+  /** First stop cause requested, or null when no stop was requested. */
+  readonly stopRequested: ProcessStopCause | null
+  /** The provider proved the managed range empty after the parent outcome. */
+  readonly cleanupConfirmed: boolean
+}
+
+/**
+ * One bounded read of a process's combined stdout/stderr.
+ *
+ * `cursor` is opaque host state (never a file path): passing it back continues
+ * exactly after the returned bytes. `lossy` stays true once any requested byte
+ * was no longer recoverable from the in-memory tail; `spillAvailable` records
+ * that the provider advertised a complete-stream spill file.
+ */
+export interface OutputPage {
+  /** Text returned by this read; at most the page byte cap of UTF-8 bytes. */
+  readonly text: string
+  /** Opaque continuation cursor, valid only for the process that produced it. */
+  readonly cursor: string
+  /** Some requested bytes were dropped from memory and are not in `text`. */
+  readonly lossy: boolean
+  /** A complete-stream spill file exists for the output lost from memory. */
+  readonly spillAvailable: boolean
+}
+
 /** File-tool limits a user may tune in the console. */
 export interface FileSettings {
   /** Lines returned by a `read` that names no `limit`. */
