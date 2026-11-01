@@ -36,6 +36,12 @@ export interface PromptLibrary {
  * The complete prompt text one session was assembled with. `modules` keeps the
  * actual bodies, not references into a library that may change later, so a
  * request in flight and a reopened session both see the same text.
+ *
+ * `text` is that session's Nexus persona contribution — the base prompt plus the
+ * selected bodies — which the preset contributes as the scoped system-prompt
+ * persona section. It is NOT the whole system request: the harness identity,
+ * first-party tool guidance, runtime context, the persona suffix and any
+ * third-party sections are added by native assembly around it.
  */
 export interface PromptSnapshot {
   /** Durable session this snapshot belongs to. */
@@ -44,7 +50,7 @@ export interface PromptSnapshot {
   readonly selection: readonly string[]
   /** The module bodies as they were selected. */
   readonly modules: readonly PromptModule[]
-  /** The exact system-prompt text handed to the model. */
+  /** The Nexus persona text (base prompt plus selected bodies) this session runs with. */
   readonly text: string
 }
 

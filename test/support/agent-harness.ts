@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { Config as SystemPromptConfig } from '@deepseek-ai/dsh-system-prompt'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -85,6 +86,12 @@ export interface SubagentHarnessOptions {
    * make a child produce a specific text or a tool call.
    */
   readonly answer?: (request: GenerateOptions, index: number) => string | AsyncIterable<StreamChunk>
+  /**
+   * Configuration for the mounted system-prompt registry. A prompt case sets a
+   * deployment persona here so it can prove a scoped section shadows exactly
+   * that named contribution.
+   */
+  readonly systemPrompt?: SystemPromptConfig
 }
 
 /** One mounted native child composition. */
@@ -164,7 +171,10 @@ export async function mountSubagentHarness(options: SubagentHarnessOptions = {})
   const workspace = join(root, 'workspace')
   await mkdir(workspace, { recursive: true })
   const ctx = new Context()
-  await mountAgentLoopTestDependencies(ctx)
+  await mountAgentLoopTestDependencies(
+    ctx,
+    options.systemPrompt === undefined ? {} : { systemPrompt: options.systemPrompt },
+  )
   const policyMounted = options.policy !== false
   if (policyMounted) {
     await ctx.plugin(SandboxPolicyService, { mode: options.mode ?? 'workspace-write', workspaceRoot: workspace })
