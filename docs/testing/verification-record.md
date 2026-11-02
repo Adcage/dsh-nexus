@@ -2,7 +2,50 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 当前：0.1.8 工具调用显示修复二（设置读取落定信号／警告去重）
+## 0. 最新：AC-17 真实安装验收现场证据（2026-11-03，未接受）
+
+状态：**EVIDENCE_RECORDED_PENDING_REVIEW / NOT ACCEPTED**。本节只记录 2026-11-02T18:4xZ～19:0xZ（本地 2026-11-03 凌晨）在操作者真实安装的 DSH 上做的两次 AC-17 现场取证：第一次跑出一个「写子 Agent 起不了 `shell`」的阻塞，独立诊断判定为**环境前提**问题；第二次换到调用者自有目录后把同一类操作跑通。两次都**没有**改动产品源码、设置、账号或模型，也**没有**做接受、推送或合并。本节只增补证据，不改变下文 0.1.8 等历史结论，也不构成本轮 AC-17／Task 14 验收。
+
+### 0.1 第一次运行：功能面跑通，子 Agent 的 shell 被 ACL 挡住
+
+父会话 `session-6b377f34-0b63-41a0-a1b7-f7d42f7c485a`，子 Agent `ca479e6c-faf0-4a65-9cb7-b498ea4ef980`（label `spec-edge-case-review`），工作区 `E:/Programme/Project/dsh-nexus/tmp/acceptance-ac17/workspace`，`agentPreset=nexus`，提供方 `deepseek-personal`／模型 `deepseek-flash`（取自实际请求头与未改动的 `modelSelection`）。一个父回合、18 步、28 次工具调用、0 个工具错误结果。
+
+- 真实能力：`read` 读工作区六个文件；`reference.png` 返回真实 `image/png`（64×32、113 字节），模型正确描述「左蓝右橙」，与该图独立像素一致——是真实图片附件观察，不只是文件名。
+- 编辑与测试：父 Agent 用 `write`／`edit` 实改 `invoice.mjs` 与测试，整合子 Agent 的 `child-review.md` 建议后 `node --test` 报 **20 通过／0 失败**；独立直跑同一测试 20/20，另加 500 条确定性用例；样本 `{lineCount:3, itemCount:5, totalCents:1110}`。
+- 后台任务：`run background: true` 起 `nexus-shell-5283a4bf58224741`，一次有界 `wait(timeoutMs=15000)` 得到 exited/0/`cleanupConfirmed=true`，随后 `read` 看到完成行、`close` 释放；`heartbeat.json` 落盘为 `{"done":true}`，没有忙轮询。
+- 联网：`web fetch https://example.com` 保存成功；`find(text="<title>")` 在转换文本上返回 0 命中（不是传输错误），模型改用 `web read` 记录到实际 `Example Domain` 标题，并明确没有声称解析了字面 HTML `<title>`。
+- 子 Agent 与阻塞：`agent start`（access=write、context=spawn、同 cwd）只起一个；但子 Agent 的第一条 `shell`（`ls -la`，child 调用 seq 22／结果 seq 25）在产出目录列表前就失败：`Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\Programme\Project\dsh-nexus\tmp\acceptance-ac17\workspace)`。该子 Agent 的 `read`／`write` 仍成功，父 Agent 读取并整合了它的 `child-review.md`，也在最终说明里如实披露了这条失败。父 Agent 自己的 `shell` 是 `danger-full-access`，所以它的成功**不能**用来清掉这条沙箱门禁。
+
+### 0.2 缺陷诊断：路径级 ACL 前提，不修产品
+
+独立诊断（`.superpowers/sdd/2026-11-01-dsh-nexus-implementation/task-14-ac17-defect-triage.json`）用**已安装**的 `LocalSandboxProvider`、不带 Nexus／模型／会话直接复现：**owner: environment**。结论是路径级缺少 **WRITE_OWNER**——原生执行要合并 DACL 并打 Low 完整性标签（`SetNamedSecurityInfoW(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, …)`），改标签额外需要 WRITE_OWNER；该 E: 目录虽由当前用户拥有、也有 Modify，`WRITE_DAC` 因属主身份可用，但非提权令牌拿不到 WRITE_OWNER（`SeTakeOwnership`／`SeRestore` 均未启用）。同一 provider 在调用者自有的 TEMP 与 Documents 目录上、无会话与合成会话两条路径全部成功（含真实受限 Node 进程 exit 0）。所以这是**失败即关闭**的前提不满足，不是 Nexus 委派缺陷，也不据此改产品；最小正确响应是「换/准备一个调用者自有且具备 WRITE_DAC／WRITE_OWNER 的工作区，保留受限」，不提权、不关沙箱、不把子 Agent 降级成 `danger-full-access`。
+
+**Windows `workspace-write` 前提（本节新增的运维事实）**：工作区目录必须由调用者（当前登录用户）拥有，并具备 `WRITE_DAC` 与 `WRITE_OWNER`；实测 `C:/Users/<用户>/Documents/…` 下的自有目录满足，`E:/…/tmp/acceptance-ac17/workspace` 不满足。父 Agent 即使自己切到 `workspace-write` 也会撞同一处，因为授权是按工作区施加的，与父/子身份无关。
+
+### 0.3 第二次运行：换到调用者自有工作区后同类操作跑通
+
+父会话 `session-46ef7d2c-8171-4070-8635-55475ef785be`，子 Agent `388156d3-83cc-41ef-863b-7e2c761c6650`（label `ac17-rerun-worker`，continuable），工作区 `C:/Users/l1577/Documents/dsh-nexus-acceptance/workspace`。父 1 回合、子 2 回合，父 21 次／子 15 次工具调用，36 条结果全部 `isError=false`。
+
+- 子 Agent 的第一条 `shell`（child 调用 seq 22／结果 seq 25）显式 `engine: "pwsh"`，**exit 0**，`workspace-write`／`enforcement=partial`／`denied=false`／`cleanupConfirmed=true`，实际输出 `AC17_CHILD_SHELL_OK` 与该 Documents 路径；上次的 `Win32 5 grantWrite` 没有重现。
+- 子 Agent 随后列目录、读两个 fixture、写 `child-summary.mjs`、真实 `node ./child-summary.mjs`（exit 0）、写并读回 `child-result.json`，结果 `{recordCount:3, itemCount:7, totalCents:1625}`（含零数量行）。
+- 持久终端：`nexus-term-1ce23f3af5a5-1` 走完 open → send（`waitReason=stdin_read`、`truncated=false`）→ status → read → close；真实输出含 `AC17_TERMINAL_OK` 与同一 cwd，`terminal-proof.txt` 落盘为精确标记。close 返回“closed and is no longer owned”。
+- 同一子 Agent 第二回合：`agent message` 投递到同一 id，`wait` 报 turn 2 completed，子 Agent 产出 `child-followup.md` 并被父 Agent 读回；没有起第二个子 Agent。
+- 父 Agent 自己的 pwsh 探针 seq 16/19 exit 0，但它继承的策略是 `danger-full-access`，所以只证明「该路径上能跑」，**不**等于父级 `workspace-write` 受限验证。
+- 独立磁盘核对 **11/11** 通过：输入字节未变、独立算术 3/7/1625、`child-result.json` 与独立算术一致、独立真实脚本 exit 0 且 stdout 解析为期望值、stderr 为空、终端标记精确、follow-up 结论正确、父汇总绑定真实 id 并声明不接受、工作区正好是 2 个输入 + 5 个请求产物（7 个文件均记了字节数与 SHA-256）。本轮缺陷清单为零。
+
+### 0.4 已验证 / 仍未验证 / 只算观察
+
+- 已验证（有真实会话、真实工具结果与磁盘核对）：图像附件观察、多次读取与编辑、命令与测试（20 条 node 测试 + 独立 500 例）、后台任务与心跳、`web fetch`／`find`／`read`、单个子 Agent 的派生与父任务整合、调用者自有路径上 **受限写子 Agent 的 shell**（显式 pwsh）、同一子 Agent 第二回合、持久 pwsh 终端生命周期。
+- 仍未验证：完整的负向／边界覆盖；`read-only` 与越出工作区的**强制执行**；取消／超时／进程树清理；压缩与长上下文；web **搜索**（本轮只有 fetch）；多 URL 与分页；子 Agent 的 stop／interrupt／fanout；本轮 GUI 各页面与主题；受限 Git Bash（AC-07 仍环境阻塞，可用配置是**显式 pwsh**）。父级 `workspace-write` 受限、任意 E: 路径同样未验证。
+- 只算观察（作 caveat 记录，**不**判定为正确性缺陷，也未诊断或修复）：持久终端输出有重复的提示符／命令回显与 `Set-Location "$HOME\.dsh\profiles\web"` 片段；终端元数据 `pid=0`；已确认 close 的快照里仍带过期的 `sessionStatus=running`。另外，父 Agent 把自身探针与终端操作提前到子 Agent 之前，与任务里给的顺序不同，但每项行为都真实发生了。
+
+### 0.5 证据位置与边界
+
+权威回执：`.superpowers/sdd/2026-11-01-dsh-nexus-implementation/task-14-ac17-receipt.json`（第一次）、`task-14-ac17-rerun.json`（第二次，最新事实以此为准）、`task-14-ac17-defect-triage.json`（诊断）。现场证据与截图在仓库根 `tmp/acceptance-ac17/`（已被 `.gitignore` 忽略，未提交）：`session-events.json`、`child-events.json`、`disk-verification.json`、`independent-tests.txt`、`page-errors.jsonl`、`01-…05-*.png` 与 `rerun/03-…12-*.png`。截图都是**完成后的会话转录**，不是发送前的现场基线；控制台两轮分别记录 128 与 122 条，都是与本插件无关的本地 helper CORS 失败（第一轮另有 5 个由取证脚本自身触发的静态资源 404），两轮均无未捕获页面异常。
+
+两轮都没有产品源码／设置／账号／模型改动，没有手工改权限，操作者的 DSH 与浏览器、验收用 Chrome 都保持运行（只停了自己的观察脚本）。本节是**文档提交**：`docs/` 不在打包产物内，所以既不重打包、也不重装，README／`package.json`／源码／测试／版本号一律未动。AC-17、AC-07、AC-11、终端与 Task 14 仍待独立评审，本节不构成任何接受。
+
+## 历史：0.1.8 工具调用显示修复二（设置读取落定信号／警告去重）
 
 状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只关两份复查（`task-14-tool-display-spec-rereview-r1.md`、`task-14-tool-display-quality-rereview-r1.md`）对 0.1.7 修复本身点到的两处「波及面」风险，外加文档；没有新增页面、端点、依赖，卡片标记、工具名、已记录事实、折叠结构、工具 schema 与字典键一律未改。日常 `web` Profile 已用官方管理器装到 0.1.8，但**没有**重启、刷新或重载用户的应用／浏览器／会话，实际渲染仍是待用户重载，本节不是最终验收。
 

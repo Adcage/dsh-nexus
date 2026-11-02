@@ -78,6 +78,7 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 - [ ] 父进程退出但孙进程仍存活时，不报告 "已清理"。
 - [ ] 只读模式下写文件、向工作区外写入都被拒绝（AC-07 需要真实权限链）。
 - [ ] 持久终端打开在真实权限链下能成功（本项是 Task 13 修复的 `sandboxPolicy` 冷路径缺陷的真实验收）。
+- [ ] 在 `read-only`／`workspace-write` 下执行 `shell` 时显式传 `engine: "pwsh"` 且确实用它执行（不依赖静默换引擎）；受限 Git Bash 在本机无法启动属已知环境限制（§4.1），不要为了让它通过而关掉受限或提权。
 
 ### 4.1 受限权限与 Git Bash（本机环境阻塞）
 
@@ -106,6 +107,7 @@ DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令；MSYS2 运行�
 ## 7. 内部子 Agent（AC-11、AC-12）
 
 - [ ] `agent start` 的 `spawn` 与 `fork` 子 Agent 都能被原生查看、介入、停止。
+- [ ] 写子 Agent 在自己的授权工作区里能真实启动第一条 `shell`（Windows 受限运行用显式 `engine: "pwsh"`），并把它自己的读写、命令和测试产物真正留在该工作区，父 Agent 读得到并整合；失败时要看到明确错误，而不是命令还没跑就报 ACL 设置失败。工作区必须是调用者自有、具备 `WRITE_DAC`／`WRITE_OWNER` 的目录，否则原生受限执行会在启动前报 `SetNamedSecurityInfoW … grantWrite(…)`（详见 `docs/testing/verification-record.md` §0）。
 - [ ] 子 Agent 的完成通知回到父会话；父 Agent 能取消订阅或不再收到残留通知。
 - [ ] 写子 Agent 与父 Agent 同工作区时，不会出现两个写者同时进入同一棵树。
 - [ ] 停止一个仍持有未确认清理范围的写子 Agent 时，写权限不被错误释放；重启也不会自动解锁。
