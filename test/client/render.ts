@@ -24,10 +24,10 @@ export async function input(node: HTMLElement, label: string, value: string) {
   expect(found, `label ${label}`).toBeDefined()
   await change(found!.querySelector('input,textarea,select')!, value)
 }
-export async function mountConsole(store: ConsoleStore) {
+export async function mountConsole(store: ConsoleStore, surface?: 'main' | 'settings') {
   const node = document.createElement('div')
   document.body.append(node)
   const root = createRoot(node)
-  await act(async () => root.render(createElement(NexusConsole, { store, t: (key) => en[key] })))
+  await act(async () => root.render(createElement(NexusConsole, { store, surface, t: (key) => en[key] })))
   return { node, click, change, dispose: () => { act(() => root.unmount()); node.remove(); store.dispose() } }
 }

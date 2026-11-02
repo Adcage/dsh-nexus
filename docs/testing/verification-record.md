@@ -1,6 +1,25 @@
-# 验证记录（Task 14 最终验收）
+# 验证记录（Task 14 分层证据，UI 修复待独立评审）
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
+
+## 0. 当前 UI 修复：0.1.4，仅隔离安装
+
+状态：**IMPLEMENTED_PENDING_REVIEW**。用户批准 A（局部原生化，同时修正两个入口布局）。日常 Profile 本轮未安装、未重启，仍以其原有 0.1.3 证据为准；本节不是最终验收。
+
+- 产物：`dist/dsh-nexus-0.1.4.tgz`，457,443 字节、15 个成员，SHA-256 `02e6e51dd5285125031be24a7f296869b6cb74d7f481fc1ab37c587958c1605e`。官方 `dev-profile.mjs init --profile nexus-ui-fix-014 --tarball dist/dsh-nexus-0.1.4.tgz` 创建新项目隔离 Profile，15/15 已安装文件与包内字节相同。旧 `nexus-dev` 和旧产物保留；`init` 遇到已有 Profile 会跳过，不能把它当作更新命令。
+- 改动仅限 Console 的静态座位属性、头部标记、局部样式和测试／版本／本文档。主入口仍拥有页面留白及滚动；设置入口复用宿主留白、背景及滚动。同一 store、五页、默认／草稿／预览／应用及警告说明未合并。宿主、preset、config 的可执行 bundle 与 0.1.3 逐字节相同。
+- TDD：改源码前保留客户端 5 个预期断言失败（缺座位标识），以及实际已安装 0.1.3 的 Chrome DOM 布局失败；不是导入失败、jsdom 布局或 CSS 文本替身。原有保存／预览／应用测试在 RED 时已经通过，如实作为已有覆盖。
+- 最终门禁仅跑一次 `pnpm pack:plugin`（含 typecheck → build → 默认测试 → 包检查）：**42 文件 / 586 测试，exit 0**；`pnpm verify:runtime` exit 0。此前聚焦客户端验证为 7 文件 / 48 测试通过。集成 **16**、Windows **13** 仍是下文 651604b 的历史证据，UI-only 本轮没有重跑。
+- 真实 DSH `0.2.1-rc.2` + Chrome `156.0.8078.74`，自有 CDP 19515 / app 19514；1000×994、DPR 1、scale 1。双入口 × 五页 × light/dark 共 **20** 张普通中文截图；另有 600×994 英文长标签／长模块名相同 **20** 格压力矩阵。原 RED 原样变 GREEN：正文 **14/22**、标题 **16/24**、普通刷新按钮 **34px**，设置入口自身 padding **0**、overflow **visible**；40 格均无 Nexus 横向溢出。主入口保留 frame-clearance。
+- 实际键盘 Tab / Enter 在两个入口均可切页并显示 2px 焦点环；33 项浏览器交互断言覆盖共享草稿、refresh busy/status、保存设置、显式丢弃草稿、只预览不保存、只保存不应用、显式目标应用及应用后编辑隔离。只写新隔离 Profile 的测试库／设置及一个空白 Nexus fixture 会话，未发消息。窄屏 20 页、232 次启用控件观察均可滚动到可见位置且可键盘聚焦；保存／应用动作未丢失。
+- 防旧包：实际 `style[data-dsh-nexus]` 唯一且 SHA-256 与源码一致；实际加载的组合资源包含最终可执行 client 全文（宿主只移除 sourceMappingURL 尾注），并核对已安装包字节。早期探针误用不带 revision 的资源路径产生 3 个 404，日志保留；最终压力／交互记录无 console/exception/log 错误。没有把这些探针失败说成产品缺陷，也没有删除首次失败记录。
+- 所有自有 app/browser PID 树均在 finally 清理，记录 PID 已消失，19514/19515 已关闭；原 3080/62699（PID 28296）、18787（PID 61612）仍监听。未读私人 DOM／日常配置、未登录或请求模型。原生启动可能请求本地模型元数据，本轮不是完整网络审计。
+
+完整证据在根 `tmp/task14-ui-fix/`：`client-red.log`、`browser-red.log`、`client-green.log`、`pack.log`、`verify-runtime.log`、`artifact.json`、`after/{matrix,stress-matrix,interactions,reachability,provenance}.json`；每条最终命令和首次失败日志保留真实 exit 页脚。截图名与每格 DOM 指标在两个 matrix JSON 中逐一对应。同视口 BEFORE 在 `tmp/task14-ui-diag/` 和本轮 `before/`。权威 UI 修复回执为 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/task-14-ui-fix-receipt.json`。
+
+**未验证项不变：** 日常第三方皮肤、用户实际 DPI／zoom／插件组合及真实账号／模型、图像、web、子 Agent 代表性任务、AC-17；AC-07 仍有受限 Git Bash 环境阻塞。先独立 SPEC、再 fresh QUALITY review；本轮未作交付、接受、推送或合并。
+
+## 历史基线：0.1.3（以下 §1–9 保留其原始来源）
 
 - 仓库：`E:/Programme/Project/dsh-nexus`，分支 `dev/nexus-core`
 - 包版本：`dsh-nexus` 0.1.3；目标运行时 DSH `0.2.1-rc.2`
@@ -139,7 +158,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 | AC-12 | 集成：通信状态、通知回收、写协调 | 已验证（测试层） |
 | AC-13 | 集成：系统提示词层与其他贡献进入真实请求；§6.2：真实会话的提示词快照返回 Nexus persona 原文 | 已验证（测试层 + 真实会话快照）。一次真实模型请求里系统层的实际顺序与 token：**未验证**（需要用户账号；本次刻意不发送消息） |
 | AC-14 | 集成：默认隔离、下一请求生效、会话恢复原文 | 已验证（测试层） |
-| AC-15 | 客户端 jest-dom/标记渲染测试覆盖五个子页与无版本/对比/更新 UI；**真实页面与双主题：未验证**，需要用户目视 | 部分验证 |
+| AC-15 | 0.1.3 的客户端标记／行为测试；0.1.4 新增真实隔离双入口、五页、双主题及英文窄屏证据，见 §0；**日常第三方皮肤组合仍未验证** | 隔离 GUI 已验证，日常环境仍待用户核验 |
 | AC-16 | 集成：具体第三方插件（工具、系统提示词段、压缩适配）通过；真实第三方安装到日常 Profile 的兼容性：**未验证** | 部分验证 |
 | AC-17 | 本任务未在 GUI 中执行完整「读含图资料→多处编辑→测试→后台/交互→联网→内部委派→父任务整合」代表性任务；相应能力由测试层逐项覆盖 | **未验证** |
 | AC-18 | 代码与组合检查：无新增装配平台、无多预设管理、无配置版本/对比/更新入口 | 已验证（静态与测试层） |
@@ -147,7 +166,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 ## 8. 需要用户目视或使用真实账号的项目
 
 1. 在运行中的 DSH 里新建一个 Nexus 会话，确认六个 Nexus 工具（`read`、`write`、`edit`、`shell`、`web`、`agent`）出现在请求里并能调用一次 `shell`（AC-02/AC-13）。生成域激活与 persona 快照已由 §6.2 无模型证明；工具清单只能从一次真实请求或 GUI 看到。
-2. 五个子页与浅色/深色主题（AC-15）。
+2. 日常第三方皮肤／插件组合下五个子页与浅色/深色主题（AC-15）；隔离原生环境已有 §0 的实际 Chrome 证据，不能替代日常环境。
 3. 真实模型的图片送入与联网搜索/抓取（AC-03/AC-08/AC-09）。
 4. 真实第三方插件在本 Profile 中的兼容结论（AC-16）。
 5. 代表性开发任务（AC-17）。

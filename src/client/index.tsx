@@ -47,9 +47,10 @@ export function apply(ctx: Context): void {
     const t = ctx.locale.bind(NS)
     // These factories close over owned values only: no foreign snapshots or
     // native session objects are read during the renderer's inject phase.
-    const consoleFace = () => ({ store })
+    const mainFace = () => ({ store, surface: 'main' as const })
+    const settingsFace = () => ({ store, surface: 'settings' as const })
     ctx.effect(() => ctx.slots.inject('main', () => safeRegistration(() =>
-      ctx.slots.register({ name: 'main', key: NS, locale: NS, inject: consoleFace }, NexusConsole),
+      ctx.slots.register({ name: 'main', key: NS, locale: NS, inject: mainFace }, NexusConsole),
     )), 'dsh-nexus: main console')
     ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => safeRegistration(() =>
       ctx.slots.register({ name: 'sidebar.panellist', id: NS, order: 50, label: () => t('panel') }, ConsoleIcon),
@@ -58,7 +59,7 @@ export function apply(ctx: Context): void {
       let remove = noop
       const register = () => {
         remove()
-        remove = safeRegistration(() => ctx.slots.register({ name: 'settings.section', id: NS, order: 50, label: t('panel'), locale: NS, inject: consoleFace }, NexusConsole))
+        remove = safeRegistration(() => ctx.slots.register({ name: 'settings.section', id: NS, order: 50, label: t('panel'), locale: NS, inject: settingsFace }, NexusConsole))
       }
       register()
       let unsubscribe = noop

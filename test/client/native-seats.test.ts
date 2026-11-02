@@ -67,6 +67,12 @@ describe('additive native console seats', () => {
     expect(settingsAfter[0]).not.toBe(settingsBefore[0])
     const main = slots.entries('main')[0]!
     expect(() => main.inject?.()).not.toThrow()
+    const mainProps = main.inject?.() as { store: unknown; surface: string }
+    const settingsProps = settingsAfter[0]!.inject?.() as { store: unknown; surface: string }
+    expect(mainProps.surface).toBe('main')
+    expect(settingsProps.surface).toBe('settings')
+    expect(settingsProps.store).toBe(mainProps.store)
+    expect((settingsBefore[0]!.inject?.() as { store: unknown }).store).toBe(mainProps.store)
     expect(document.head.querySelectorAll('style[data-dsh-nexus]')).toHaveLength(1)
     owner()
     expect(slots.entries('main')).toHaveLength(0)

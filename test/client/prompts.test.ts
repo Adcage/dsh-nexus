@@ -20,11 +20,12 @@ function modules(count: number) {
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
 describe('Prompts component event wiring', () => {
-  it('edits, selects, orders and previews literal draft text without persisting; save and apply stay separate', async () => {
+  it.each(['main', 'settings'] as const)('%s edits, selects, orders and previews literal draft text without persisting; save and apply stay separate', async (surface) => {
     const f = clientFixture()
     const store = createConsoleStore(createNexusApi(f.fetch))
     await store.refresh()
-    const view = await mountConsole(store); cleanups.push(view.dispose)
+    const view = await mountConsole(store, surface); cleanups.push(view.dispose)
+    expect(view.node.querySelector('.dsh-nexus-console')?.getAttribute('data-dsh-nexus-surface')).toBe(surface)
     expect(view.node.textContent).toContain(en.prompts)
     expect(view.node.querySelector('[data-base]')?.textContent).toBe(f.basePrompt)
     expect(button(view.node, en.apply).disabled).toBe(true)

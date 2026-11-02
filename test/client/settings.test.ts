@@ -9,11 +9,11 @@ import { mountConsole, button, input } from './render.ts'
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
 describe('five-page shared settings draft', () => {
-  it('wires only actual supported fields and saves one full draft across all pages', async () => {
+  it.each(['main', 'settings'] as const)('%s wires only actual supported fields and saves one full draft across all pages', async (surface) => {
     const f = clientFixture()
     const store = createConsoleStore(createNexusApi(f.fetch))
     await store.refresh()
-    const view = await mountConsole(store); cleanups.push(view.dispose)
+    const view = await mountConsole(store, surface); cleanups.push(view.dispose)
     await button(view.node, en.tools).clickAsync()
     await input(view.node, en.defaultLines, '500')
     await input(view.node, en.maxOutputBytes, '16000')
