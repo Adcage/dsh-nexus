@@ -11,9 +11,10 @@ import en from '../locale/en.json' with { type: 'json' }
 import zh from '../locale/zh.json' with { type: 'json' }
 import css from './styles.css?raw'
 import { createNexusApi } from './api.ts'
-import { createConsoleStore } from './store.ts'
+import { createConsoleStore, type ConsoleStore } from './store.ts'
+import type { ToolDisplayMode } from '../protocol.ts'
 import { NexusConsole } from './console.tsx'
-import { registerNexusToolViews } from './tool-views.tsx'
+import { registerNexusToolViews, TOOL_VIEW_PRIORITY, TOOL_VIEW_SLOT } from './tool-views.tsx'
 
 export const NS = 'dshNexus'
 export const inject = ['slots', 'locale']
@@ -26,6 +27,18 @@ function safeRegistration(register: () => () => void): () => void {
     console.warn('[dsh-nexus] a native console seat is unavailable')
     return noop
   }
+}
+/**
+ * The display mode the live console asks for right now.
+ *
+ * Draft first: the console control previews its own presentation immediately,
+ * while saving remains the explicit action that makes it the stored default.
+ * Saved settings answer on a fresh load before the read completes, and a missing
+ * value means the documented default.
+ */
+function requestedToolDisplay(store: ConsoleStore): ToolDisplayMode {
+  const snapshot = store.getSnapshot()
+  return snapshot.settingsDraft?.toolDisplay ?? snapshot.settingsSaved?.value.toolDisplay ?? 'nexus'
 }
 function ConsoleIcon({ size }: SidebarPanelIconOwnerProps) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
@@ -69,13 +82,27 @@ export function apply(ctx: Context): void {
     ctx.effect(() => {
       // The Tool owner declares `tool.call.toolview`. When that package is not
       // composed every call keeps its generic card, so a missing declaration
-      // must not disturb the console seats registered above.
-      try {
-        return ctx.slots.inject('tool.call.toolview', () => registerNexusToolViews(ctx))
-      } catch {
-        console.warn('[dsh-nexus] the native tool card slot is unavailable')
-        return noop
+      // must not disturb the console seats registered above. The mode is read
+      // from the live store on every publish: a switch disposes the old cells
+      // and registers once at the new rank, and an unchanged mode does nothing.
+      let dispose = noop
+      let active: ToolDisplayMode | undefined
+      const reconcile = () => {
+        const mode = requestedToolDisplay(store)
+        if (mode === active) return
+        active = mode
+        dispose()
+        dispose = noop
+        if (mode === 'native') return
+        try {
+          dispose = ctx.slots.inject(TOOL_VIEW_SLOT, () => registerNexusToolViews(ctx, TOOL_VIEW_PRIORITY[mode]))
+        } catch {
+          console.warn('[dsh-nexus] the native tool card slot is unavailable')
+        }
       }
+      reconcile()
+      const unsubscribe = store.subscribe(reconcile)
+      return () => { unsubscribe(); dispose() }
     }, 'dsh-nexus: tool result views')
     void store.refresh()
   } catch {

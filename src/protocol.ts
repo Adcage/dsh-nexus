@@ -106,6 +106,27 @@ export interface ConsoleCapabilities {
 /** Shell dialect Nexus can start; both are supported, `bash` is the default. */
 export type ShellEngine = 'bash' | 'pwsh'
 
+/**
+ * How Nexus presents its own tool calls in the conversation.
+ *
+ * The three modes are one saved preference over the shipped
+ * `tool.call.toolview` keyed slot:
+ *
+ * - `nexus` (default) registers the Nexus cards at the slot's default rank, so
+ *   they win their three keys.
+ * - `auto` registers them at a higher (losing) rank, so any other plugin's
+ *   default-rank view for the same tool name wins and the Nexus card renders
+ *   only where nobody else claims that key.
+ * - `native` registers nothing and leaves the host's own fallback in place.
+ *
+ * `auto` is deliberately not called "host": the host fallback and another
+ * plugin's view are different presentations, and only the latter is meant here.
+ */
+export type ToolDisplayMode = 'nexus' | 'auto' | 'native'
+
+/** Every accepted display mode, in display order; the stored field accepts only these. */
+export const TOOL_DISPLAY_MODES = ['nexus', 'auto', 'native'] as const
+
 /** Lifecycle state of one managed process, as the owner can prove it. */
 export type ProcessStatus =
   | 'starting'
@@ -231,6 +252,15 @@ export interface RuntimeSettings {
   readonly terminal: TerminalSettings
   readonly agents: AgentSettings
   readonly web: WebSettings
+  /**
+   * Which component presents Nexus's own `shell`/`web`/`agent` calls.
+   *
+   * A missing or unrecognised stored value reads as `nexus`, so a record
+   * written before this field existed still opens. The other two modes are a
+   * deliberate way to let the composed runtime or a third-party view own those
+   * cells; see {@link ToolDisplayMode}.
+   */
+  readonly toolDisplay: ToolDisplayMode
 }
 
 /**

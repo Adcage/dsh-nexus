@@ -107,6 +107,7 @@ describe('runtime defaults', () => {
       terminal: { engine: 'bash' },
       agents: { concurrency: 4, maxDepth: 2 },
       web: { maxResults: 5, maxCharsPerPage: 12_000 },
+      toolDisplay: 'nexus',
     })
   })
 
@@ -140,6 +141,17 @@ describe('runtime defaults', () => {
   it('accepts both defaults through the schemas the store validates on reopen', () => {
     expect(runtimeSettingsSchema.parse(DEFAULT_SETTINGS)).toEqual(DEFAULT_SETTINGS)
     expect(promptLibrarySchema.parse(DEFAULT_LIBRARY)).toEqual({ modules: [], defaultSelection: [] })
+  })
+
+  it('normalizes a missing or unknown stored tool display to nexus at the load boundary', () => {
+    const { toolDisplay: _omitted, ...legacy } = DEFAULT_SETTINGS
+    // A record written before this field existed must still open as the default
+    // mode instead of failing the whole domain load.
+    expect(runtimeSettingsSchema.parse(legacy)).toEqual({ ...legacy, toolDisplay: 'nexus' })
+    expect(runtimeSettingsSchema.parse({ ...legacy, toolDisplay: 'bogus' })).toEqual({ ...legacy, toolDisplay: 'nexus' })
+    for (const mode of ['nexus', 'auto', 'native'] as const) {
+      expect(runtimeSettingsSchema.parse({ ...legacy, toolDisplay: mode }).toolDisplay).toBe(mode)
+    }
   })
 })
 

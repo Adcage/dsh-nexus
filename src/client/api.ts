@@ -1,6 +1,6 @@
 /** Browser-only transport. Relative URLs, memory-only authorization, no mutation retries. */
 import { z } from 'zod'
-import { NEXUS_API_PREFIX, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings } from '../protocol.ts'
+import { NEXUS_API_PREFIX, TOOL_DISPLAY_MODES, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings } from '../protocol.ts'
 
 export type PublicCapabilities = Omit<ConsoleCapabilities, 'csrfToken'>
 const strings = z.array(z.string())
@@ -14,6 +14,10 @@ const settings = z.object({
   terminal: z.object({ engine: z.enum(['bash', 'pwsh']), bashPath: z.string().optional(), pwshPath: z.string().optional() }),
   agents: z.object({ concurrency: z.number().int(), maxDepth: z.number().int(), role: z.object({ name: z.string().optional(), instructions: z.string().optional(), model: z.string().optional() }).optional() }),
   web: z.object({ maxResults: z.number().int(), maxCharsPerPage: z.number().int() }),
+  // The shape check normalises exactly like the host schema, so an older host
+  // response without the field still loads and never reaches registration as an
+  // unknown mode.
+  toolDisplay: z.enum(TOOL_DISPLAY_MODES).catch('nexus'),
 })
 const backend = z.object({ service: z.enum(['present', 'absent', 'unknown']), backends: z.union([
   z.object({ state: z.enum(['registered', 'absent']), names: strings }), z.object({ state: z.literal('unknown'), names: z.null() }),

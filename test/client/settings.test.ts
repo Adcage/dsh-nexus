@@ -33,7 +33,7 @@ describe('five-page shared settings draft', () => {
     await input(view.node, en.roleInstructions, 'Review literal text')
     await input(view.node, en.roleModel, '')
     await button(view.node, en.saveSettings).clickAsync()
-    expect(f.settings.value).toEqual({ files: { defaultLines: 500, maxOutputBytes: 16000 }, web: { maxResults: 7, maxCharsPerPage: 15000 }, terminal: { engine: 'pwsh', bashPath: 'C:/Program Files/Git/bin/bash.exe', pwshPath: 'C:/Program Files/PowerShell/7/pwsh.exe' }, agents: { concurrency: 6, maxDepth: 3, role: { name: 'Reviewer', instructions: 'Review literal text' } } })
+    expect(f.settings.value).toEqual({ files: { defaultLines: 500, maxOutputBytes: 16000 }, web: { maxResults: 7, maxCharsPerPage: 15000 }, terminal: { engine: 'pwsh', bashPath: 'C:/Program Files/Git/bin/bash.exe', pwshPath: 'C:/Program Files/PowerShell/7/pwsh.exe' }, agents: { concurrency: 6, maxDepth: 3, role: { name: 'Reviewer', instructions: 'Review literal text' } }, toolDisplay: 'nexus' })
     await button(view.node, en.integrations).clickAsync()
     expect(view.node.textContent).toContain(en.unknown)
     expect(view.node.textContent).toContain(en.registrationHelp)

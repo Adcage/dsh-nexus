@@ -393,6 +393,7 @@ describe('openNexusStore', () => {
         terminal: { engine: 'bash' },
         agents: { concurrency: 1, maxDepth: 0 },
         web: { maxResults: 1, maxCharsPerPage: 1 },
+        toolDisplay: 'native',
       }
       const smallestSaved = await store.saveSettings(smallest, accepted.hash)
       const largest: RuntimeSettings = {
@@ -400,6 +401,7 @@ describe('openNexusStore', () => {
         terminal: { engine: 'pwsh' },
         agents: { concurrency: 16, maxDepth: 8 },
         web: { maxResults: 10, maxCharsPerPage: 24_000 },
+        toolDisplay: 'auto',
       }
       const largestSaved = await store.saveSettings(largest, smallestSaved.hash)
       expect((await store.readSettings()).value).toEqual(largest)

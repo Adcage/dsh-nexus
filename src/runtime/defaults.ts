@@ -120,6 +120,7 @@ export const DEFAULT_SETTINGS: RuntimeSettings = Object.freeze({
     maxResults: WEB_DEFAULT_RESULTS,
     maxCharsPerPage: WEB_DEFAULT_CHARS_PER_PAGE,
   }),
+  toolDisplay: 'nexus' as const,
 })
 
 /** Prompt library served and stored before the user adds a module: nothing selected. */

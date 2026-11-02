@@ -42,11 +42,26 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { LocaleNamespaceMap } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ToolDisplayMode } from '../protocol.ts'
 import type { ConsoleText } from './console.tsx'
 import { NEXUS_TOOL_NAMES, NEXUS_TOOL_STAGE, NEXUS_TOOL_TITLE, readNexusToolCard } from './tool-models.ts'
 
 /** Slot the shipped Tool package dispatches each atomic call through. */
 export const TOOL_VIEW_SLOT = 'tool.call.toolview'
+
+/**
+ * Cell rank each mode registers at.
+ *
+ * The slot sorts one cell's entries by ascending `priority` and renders the
+ * lowest; the default is 0 and a second entry at an occupied rank throws. So
+ * `nexus` keeps rank 0 (ours wins) and `auto` deliberately sits at 10: another
+ * plugin's ordinary rank-0 view wins, and ours still renders if nobody claims
+ * the key. `native` never reaches this map because it registers nothing.
+ */
+export const TOOL_VIEW_PRIORITY: Readonly<Record<Exclude<ToolDisplayMode, 'native'>, number>> = Object.freeze({
+  nexus: 0,
+  auto: 10,
+})
 
 /**
  * Dictionary namespace of the console dictionary (`NS` in `./index.tsx`). It is
@@ -153,13 +168,14 @@ export function NexusToolCard({ toolName, phase, block, inspect, t }: NexusToolV
  * @param ctx - client context; the caller must already hold the `slots` and
  *   `locale` services and must call this inside the `tool.call.toolview`
  *   declaration, as `apply` does.
+ * @param priority - cell rank to register at; see {@link TOOL_VIEW_PRIORITY}.
  * @returns disposer that unregisters every card this call registered.
  */
-export function registerNexusToolViews(ctx: Context): () => void {
+export function registerNexusToolViews(ctx: Context, priority: number): () => void {
   const disposers: (() => void)[] = []
   for (const key of NEXUS_TOOL_NAMES) {
     try {
-      disposers.push(ctx.slots.register({ name: TOOL_VIEW_SLOT, key, locale: NEXUS_LOCALE }, NexusToolCard))
+      disposers.push(ctx.slots.register({ name: TOOL_VIEW_SLOT, key, priority, locale: NEXUS_LOCALE }, NexusToolCard))
     } catch {
       // The generic card already renders this name; a refused cell must not
       // take the other two keys, the console seats or the boot down.

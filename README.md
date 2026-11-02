@@ -28,6 +28,14 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 2. Nexus 预设提供 `read`、`write`、`edit`、`shell`、`web`、`agent` 六个工具，并保留原生技能、结构化提问、待办与压缩机制。
 3. 设置里的 `dsh-nexus` 卡片进入控制台：提示词、工具、终端、内部 Agent、集成五个子页。
 
+控制台的「工具 → 工具调用显示」决定 Nexus 自己的 `shell`／`web`／`agent` 调用如何出现，默认是 Nexus 卡片：
+
+- **Nexus 卡片**（默认）：在宿主的 `tool.call.toolview` 槽位按默认优先级注册三张卡片，因此这三类调用显示 Nexus 卡片。
+- **让位给其它插件**：以较低优先级注册；其它插件针对同名工具的默认优先级视图优先，只有没人占用该单元格时才回落到 Nexus 卡片。
+- **宿主默认**：完全不注册 Nexus 视图。宿主会把这三个名字当作未知工具，并用第一个字符串参数当摘要，所以 `shell` 调用大致显示为“工具调用 · run”，而不是命令本身——这是宿主的兜底显示，不是更好看的 Nexus 样式。
+
+该选择只影响显示，随其它设置一起保存，切换后无需刷新页面；卡片本身的内容、折叠的事实与输出、以及“只按记录显示”的措辞都没有变。
+
 `shell` 工具的引擎设置默认 `bash`（Windows 上是 Git Bash），可显式选择 `pwsh`（要求 PowerShell 7）：
 
 ```jsonc

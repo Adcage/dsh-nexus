@@ -20,6 +20,7 @@ import type {
   WebDocument,
   WriteScopeRecord,
 } from '../protocol.ts'
+import { TOOL_DISPLAY_MODES } from '../protocol.ts'
 import {
   AGENT_MAX_CONCURRENCY,
   AGENT_MAX_DEPTH,
@@ -109,6 +110,11 @@ export const runtimeSettingsSchema: z.ZodType<RuntimeSettings> = z.object({
     maxResults: z.number().int().positive().max(WEB_MAX_RESULTS),
     maxCharsPerPage: z.number().int().positive().max(WEB_MAX_CHARS_PER_PAGE),
   }),
+  // `catch` is the load-boundary normalisation: a record written before this
+  // field existed, or a hand-edited unknown string, opens as the default mode
+  // instead of failing the whole domain open. A save is normalised the same
+  // way, so an unknown mode can never be stored as-is.
+  toolDisplay: z.enum(TOOL_DISPLAY_MODES).catch('nexus'),
 })
 
 /** A saved web result as stored. */

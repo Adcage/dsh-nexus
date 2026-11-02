@@ -2,7 +2,19 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 当前：0.1.5 真实 Shell 发现修复与工具卡片折叠
+## 0. 当前：0.1.6 工具调用显示模式（nexus／auto／native）
+
+状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只加一个显示模式开关：`RuntimeSettings.toolDisplay`（默认 `nexus`）决定 Nexus 是否、以及以什么优先级占用宿主 `tool.call.toolview` 的三个单元格。0.1.5 的卡片标记、事实、输出、折叠与诚实措辞**完全没改**；本波没有把卡片改成宿主行样式，也没有新增页面、端点或依赖。日常 `web` Profile 安装到 0.1.6 后仍**没有**重启、刷新或重载用户的应用／浏览器／会话，实际渲染状态仍是待用户重载；本节不是最终验收。
+
+- 设置：`toolDisplay` 只接受 `nexus`／`auto`／`native`。存储读取用 `z.enum(...).catch('nexus')` 归一化，所以 0.1.5 写下的、没有该字段的设置记录照常打开为 `nexus`，手改出的未知字符串也只会被当作 `nexus`，不会进入注册路径。GET／PUT 仍走既有 `{value,hash}` 与 409 冲突语义，没有新端点。
+- 客户端注册：`src/client/index.tsx` 用与 locale 相同的 effect/disposer 模式，在 console store 每次发布时读取**当前草稿**的模式：`nexus` 以优先级 0 注册三张卡，`auto` 以优先级 10 注册（第三方默认 0 会赢），`native` 完全不注册；模式不变时不重复注册，切换时先 dispose 再注册一次，不留重复单元格。注册还是原来的 `safeRegistration` 与「槽位缺失就保留宿主兜底」行为。
+- 控制台：工具页新增「工具调用显示」下拉，只改共享草稿、由既有「保存全部设置」落盘（不静默保存），并按当前模式显示一行说明；`native` 的说明明确写出已验证的宿主兜底行为：宿主把这三个名字当作未知工具、用第一个字符串参数当摘要，所以 `shell` 调用大致显示为“工具调用 · run”，而不是命令本身，且这不是更好看的 Nexus 样式。中英文字典都包含这些键。
+- TDD（先失败）：改源码前，客户端新用例 7/7 失败（默认优先级读成 `undefined`、字段与字典键不存在、控制缺失），日志 `tmp/task14-tool-display/red-client.log`；默认/归一化用例 2 条失败，日志 `red-defaults.log`。第一次全量默认套件的唯一失败是 **`lib/` 还是旧的 0.1.5 构建**（preset 测试加载构建后的宿主入口，读到没有 `toolDisplay` 的旧记录），`pnpm build` 后即变绿；日志 `full-suite-precheck.log`、`lifecycle-single-after-build.log` 保留，未把它当成产品缺陷。
+- 最终门禁只跑一次：`pnpm pack:plugin`（typecheck → build → 默认套件 → 包检查）**43 文件 / 601 测试，exit 0**，产物 `dist/dsh-nexus-0.1.6.tgz` = **462,544 字节、15 个成员、SHA-256 `943906330c6c942ce1e3afcf5f00ecd21fd0e7862673e53e0244482bf611cd02`**（`tmp/task14-tool-display/pack.log`）。`pnpm verify:runtime` exit 0（`dsh-nexus 0.1.6 targets dsh 0.2.1-rc.2`，`verify-runtime.log`）。集成 16／Windows 13 仍是 651604b 的历史证据，本波按范围没有重跑。
+- 隔离 Profile 的真实浏览器检查（`nexus-tool-display`，项目内 `.dev-home`，只装 0.1.6 与一个**测试专用**探针插件）：探针把当前 SlotRegistry 的 `tool.call.toolview` 台账（每个 key 的优先级、注册者、胜出者）暴露给页面；证据只读这个真实台账，不伪造会话、不伪造工具调用。结果：`nexus` = `shell`／`web`／`agent` 三条均为优先级 0、注册者 `NexusToolCard` 且胜出；`native` = 三条全无；`auto` = 三条均为优先级 10；`auto` 下测试探针以优先级 0 占用 `shell` 后，`shell` 的胜出者是 `ThirdPartyProbeView`，`web`／`agent` 仍由 Nexus 的 10 胜出。控制台座位 1 个、五个子页、下拉三个模式与中文说明都在；用页面里的既有保存按钮把模式从 `native` 保存后再读回 `{value.toolDisplay}` 为 `native`，再切回并保存为 `nexus`。证据：`tmp/task14-tool-display/ledger-*.json`、`console-health.json`、`mode-*.png`、`browser-ledger/`。
+- **没有证明的事**：本轮没有用真实会话／模型产生一次工具调用，所以没有卡片像素级新证据；卡片渲染代码与 0.1.5 已评审的标记完全相同，台账只证明“哪个视图会赢”，不冒充卡片外观验证。日常第三方皮肤、真实 DPI／zoom、账号／模型、图像／web／子 Agent／AC-17 仍未验证；AC-07 受限 Git Bash 环境阻塞不变。日常 Profile 的 0.1.6 安装与逐字节核验见下方安装段；本轮未作交付、接受、推送或合并。
+
+## 历史：0.1.5 真实 Shell 发现修复与工具卡片折叠
 
 状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RETRY**。用户报告日常会话里的 `shell` 卡片直接给出 `NexusError: SHELL_UNAVAILABLE`，并指出卡片把内部事实和原始记录整片铺开。本波按两份只读诊断修真实缺陷（A）并压缩 `shell`／`web`／`agent` 卡片（B）。日常 `web` Profile 已用官方管理器从 0.1.4 更新到 0.1.5，但**没有**重启应用、刷新页面或重载会话，实际渲染状态仍是待用户重试；本节不是最终验收。
 
