@@ -87,6 +87,18 @@ describe('native console HTTP routes', () => {
     expect(h.fixture.listWrites()).toHaveLength(writes)
   })
 
+  it('rejects deeply nested invalid values as a client error without recursing through opaque envelope fields', async () => {
+    const { h, runtime, origin, token } = await open()
+    const auth = await token()
+    const before = await runtime.store.readLibrary()
+    const writes = h.fixture.listWrites().length
+    const nested = '['.repeat(12000) + '0' + ']'.repeat(12000)
+    const body = Buffer.from(`{\"value\":{\"bogus\":${nested}},\"expectedHash\":\"${before.hash}\"}`)
+    expect((await raw(origin, 'library', 'PUT', body, { ...auth, 'content-type': 'application/json' })).status).toBe(400)
+    expect(await runtime.store.readLibrary()).toEqual(before)
+    expect(h.fixture.listWrites()).toHaveLength(writes)
+  })
+
   it('previews literal drafts without persisting or inventing an applied session', async () => {
     const { h, runtime, send, token } = await open()
     const auth = await token()

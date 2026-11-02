@@ -29,6 +29,9 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 /** Reuse the stored settings schema's rules, but refuse fields it would strip.
  * This keeps recovery reads unchanged and avoids a second settings validator. */
 function rejectUnknownFields(input: unknown, parsed: unknown): void {
+  // Opaque envelope members are validated by their own schema next. If parsing
+  // retained the exact reference, it stripped nothing: do not walk arbitrary depth.
+  if (input === parsed) return
   if (input === null || typeof input !== 'object' || parsed === null || typeof parsed !== 'object') return
   const allowed = parsed as Record<string, unknown>
   for (const [key, value] of Object.entries(input)) {
