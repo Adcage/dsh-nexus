@@ -3,8 +3,10 @@
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
 - 仓库：`E:/Programme/Project/dsh-nexus`，分支 `dev/nexus-core`
-- 包版本：`dsh-nexus` 0.1.1；目标运行时 DSH `0.2.1-rc.2`
-- 安装产物：`dist/dsh-nexus-0.1.1.tgz`（455,568 字节，15 个成员，SHA-256 `46779344b6fda34703ebcd5798d2b84a482dd5f2b7e2d9759f54bb5750220b29`）；0.1.0 的旧产物保留在 `dist/` 仅作历史，不再安装
+- 包版本：`dsh-nexus` 0.1.3；目标运行时 DSH `0.2.1-rc.2`
+- 当前安装产物：`dist/dsh-nexus-0.1.3.tgz`（456,776 字节，15 个成员，SHA-256 `c36afce3cec2d6f366ed7251e91ed0edc7df392a0a99170f0fdd38d6d393f3ce`）。0.1.0／0.1.1／0.1.2 的旧产物与它们当时的探测记录一并保留在 `dist/` 与 §6，仅作历史，不再安装
+- 0.1.3 是**只改注释/文档/版本号**的发布：`src/shell/process.ts` 的 JSDoc 把进程退出状态写成了 `0xC0000022`（错），本波改为 `3221225794`（`0xC0000142`）；这一句会随构建进入 `lib/preset/index.js`，所以必须重打包并用官方管理器更新安装。运行期逻辑、测试与配置未改，因此本波**没有**重跑集成/Windows 套件（那些证据属于 651604b，见 §3／§4）
+- 0.1.3 安装后**没有**再做真实应用启动或会话探测：激活相关代码未变，保留的 §6.2 探测仍属于 0.1.0／0.1.1
 - 执行环境：Windows `win32`，Node v24.22.0，pnpm 10.18.1，Git for Windows 2.48.1（bash 5.2.37 x86_64-pc-msys），PowerShell 7
 
 本文不含凭据、令牌、私有对话内容或环境快照。
@@ -83,7 +85,8 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 | --- | --- | --- |
 | 官方安装命令（0.1.0） | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.0.tgz` | 成功；`dependencies` 增加 `"dsh-nexus": "file:…/0.1.0.tgz"`，`dsh.profile.bundles` 追加 `dsh-nexus` |
 | 官方安装命令（0.1.1 重装） | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.1.tgz` | 成功；spec 更新为 `file:…/0.1.1.tgz`，`node_modules/dsh-nexus` 版本 0.1.1，`bundles` 23 条（用户原有 22 + `dsh-nexus`），只有一条 `dsh-nexus` |
-| 安装告警 | 两次安装输出 | pnpm peer 警告：`dsh-nexus` 的 `@deepseek-ai/*` peer 在 profile 目录里「missing peer」——运行时由 DSH 安装目录提供，不是失败；未手改 Profile 文件 |
+| 官方安装命令（0.1.3 更新） | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.3.tgz` | exit 0；spec 更新为 `file:…/0.1.3.tgz`，`node_modules/dsh-nexus` 版本 0.1.3，`bundles` 23 条且 `dsh-nexus` 只有一条，21/21 声明依赖均在位；15/15 tarball 成员与已安装文件逐字节相同；安装后的 `lib/preset/index.js` 已带修正后的注释（进程退出写成 3221225794 / 0xC0000142，并说明 0xC0000022 只属 stderr 里的 API 错误），旧错误句子不再出现。本次 pnpm 报 `Packages: +5`（没有 `-2`）；身份同样不从日志推断。**本次没有启动应用、没有创建会话、没有模型请求** |
+| 安装告警 | 各次安装输出 | pnpm peer 警告：`dsh-nexus` 的 `@deepseek-ai/*` peer 在 profile 目录里「missing peer」——运行时由 DSH 安装目录提供，不是失败；未手改 Profile 文件 |
 | 组合行 | `dsh --profile web --dump-config` | `- id: dsh-nexus` / `name: dsh-nexus`，单条 |
 | 真实启动 | `dsh --profile web --no-open --port 19500` | 监听 127.0.0.1:19500；0.1.0 验证 PID 29060、0.1.1 验证 PID 73368，两次都由我停止 |
 | 页面与 client bundle | `GET /` 后取该组合包 | 200；页面 preload 含 `dsh-nexus/client.js`；组合包 200 / 212,750 字节，首行 `window.__ModuleLoader__.load({ id: "dsh-nexus"` |
@@ -152,7 +155,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 
 ## 9. 附录：证据位置、口径与后续修正
 
-- **日志位置**：本波（fix2）的完整日志在 SDD 目录 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/tmp/task14fix2-*.log`（含真实 exit 状态，用 `cmd > log 2>&1; echo rc=$?` 采集，不经管道）。fix1 的 pack/install/list/boot 日志与历史证据在**仓库根** `tmp/`（本波开始被 `.gitignore` 忽略，既有文件保留未删）。最初的日志里多数只有 Vitest 摘要、没有保留退出码（当时用了管道），已由控制器补充的 `task14-controller-gates.log` 佐证，但**没有**完整日志可引用。
+- **日志位置与退出状态是两个工件**：fix2 的完整 stdout/stderr 日志在 SDD 目录 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/tmp/task14fix2-*.log`；这些文件里**没有** `rc=`/`exit=` 页脚——每条命令的退出状态是在 worker 的原生工具输出里单独打印的，控制器独立读取了那些行（pack/integration/windows/verify `exit=0`，install `exit=0`），记录在 `task-14-fix2-controller-evidence.md`。fix3 的新日志（`task14fix3-pack.log`、`task14fix3-verify.log`、`task14fix3-install.log`）带显式的 `* exit=0` 页脚。fix1 的 pack/install/list/boot 日志与更早的历史证据在**仓库根** `tmp/`（自 fix2 起被 `.gitignore` 忽略，既有文件保留未删）。最初的日志里多数只有 Vitest 摘要、没有退出状态，已由控制器补充的 `task14-controller-gates.log` 佐证，但**没有**完整日志可引用；不重跑已完成的工作来补历史。
 - **`/tmp/` 忽略规则是本次新增的**：本波之前仓库并未忽略根 `tmp/`，相关文档里「已被 git 忽略」的说法当时并不成立；本波加上了 `/tmp/`，并且没有删除任何既有文件。
 - **状态码口径修正**：进程退出状态是 `3221225794`（`0xC0000142`），stderr 里的 Win32 API 错误才是 `0xC0000022`（`3221225506`）。此前文档把它们写成同一个值，本波已在前台拒绝消息、README、manual-acceptance 与本文 §4.1 更正；数值守卫（`3221225794`）与 stderr 正则未改。
 - **C1 的边界**：§6.2 的无模型探针只证明「生成域激活 + 活会话 + persona 快照 + 原生 `agentPreset` 投影」。它**没有**证明六个工具的真实 schema、请求内系统层顺序、GUI/主题、图片/联网或第三方安装，也没有证明 AC-17。

@@ -609,17 +609,18 @@ function readStderrTail(handle: SubprocessHandle): string {
  *
  * The harness confines `win32` commands through the `windows-acl` runner, whose
  * restricted token denies the MSYS2 runtime the shared-memory object it creates
- * at startup. Bash then exits with `0xC0000022` before parsing the command, so
- * the model would otherwise see an opaque failed command it has no way to
- * interpret — and retrying cannot help. The refusal fires only on all four
- * facts together: a Windows bash start, a confinement the provider actually
- * enforced, that exact process status (`0xC0000142`), and the MSYS2 signature
- * (which carries the API error `0xC0000022`) in captured stderr. The two codes
- * are separate facts and the diagnostic labels each one correctly. A plain
- * denial, an unconfined run, a pwsh start and a non-Windows host are never
- * classified here, and no engine fallback is ever applied. Only the foreground
- * `run` path reaches this refusal; a background run's completion report carries
- * the raw status and stderr.
+ * at startup. Bash then exits with `3221225794` (`0xC0000142`, DLL init failed)
+ * before parsing the command — the denial itself is the stderr's API error
+ * `0xC0000022` — so the model would otherwise see an opaque failed command it
+ * has no way to interpret — and retrying cannot help. The refusal fires only on
+ * all four facts together: a Windows bash start, a confinement the provider
+ * actually enforced, that exact process status (`0xC0000142`), and the MSYS2
+ * signature (which carries the API error `0xC0000022`) in captured stderr. The
+ * two codes are separate facts and the diagnostic labels each one correctly. A
+ * plain denial, an unconfined run, a pwsh start and a non-Windows host are
+ * never classified here, and no engine fallback is ever applied. Only the
+ * foreground `run` path reaches this refusal; a background run's completion
+ * report carries the raw status and stderr.
  * @param managed - settled managed process of the start being reported.
  * @param engine - engine that start selected.
  * @param platform - host platform whose confinement dialect applies.
