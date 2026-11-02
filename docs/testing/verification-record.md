@@ -45,6 +45,15 @@
 
 两轮都没有产品源码／设置／账号／模型改动，没有手工改权限，操作者的 DSH 与浏览器、验收用 Chrome 都保持运行（只停了自己的观察脚本）。本节是**文档提交**：`docs/` 不在打包产物内，所以既不重打包、也不重装，README／`package.json`／源码／测试／版本号一律未动。AC-17、AC-07、AC-11、终端与 Task 14 仍待独立评审，本节不构成任何接受。
 
+### 0.6 终端 caveat 判定与一条隐私发现（2026-11-03，均未修复）
+
+本节补记同一轮 AC-17 现场取证的只读判定（回执 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/task-14-terminal-caveat-triage.json`）：没有改源码、测试或构建，也没有重跑活会话。三条终端 caveat 都不是 dsh-nexus 的产品缺陷；另有一条隐私问题按 `open known issue` 单列。本节不构成 AC-17／Task 14 的接受。
+
+- `stale-but-honest` —— 已确认的 close 之后，终端快照仍显示最后一次观测到的 `sessionStatus="running"`。这正是本仓自己的「最后一次观测」契约：`src/shell/terminals.ts` 里 `TerminalView.sessionStatus` 的注释写明「关闭的终端保留其最终观测」，close 结果上的 `terminal` 也写明 `closed` 才是清理权威；原生契约没有第三种「已关闭」状态，且成功 close 会删除该会话，不存在更新的观测可以替代。卡片渲染器本来就不为 `stop`／`close` 阶段渲染 status 事实，所以这里没有缺陷，按现状保留。
+- `native-expected` —— 终端元数据 `pid="0"`：该值逐字转发自原生快照（`pid` 按契约本就可选），成因是上游在 ConPTY 连接建立前抓取 node-pty 的 pid 且此后再不回读。可选的「非正数视为缺失」纯展示归一化只作为候选记录，**未实施**。
+- `native-expected` —— 重复的提示符／命令回显与 `Set-Location "$HOME\.dsh\profiles\web"` 片段：由上游 `dsh-terminal-bash` 的初始化串回显与 sanitizer、以及 pwsh 控制台的重绘方式产生；那个片段来自操作者已有的历史条目，本次运行没有执行它。修法只在上游一侧，**已记录、未实施**。
+- `open known issue` —— 持久 pwsh 终端里被输入的文本会追加进操作者的 `%APPDATA%\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`（PSReadLine 默认 `SaveIncrementally`，`-NoProfile` 并不关闭历史保存）。这一轮验收运行在该文件末尾留下两条可识别内容：DSH 的终端初始化串与本次的测试命令。需要说清三点：本次文档提交没有触碰该文件（没有删除、编辑或截断，判定阶段也只做了固定字符串计数与行号核对）；追加进去的是我们自己的测试命令，不是操作者数据；产品侧缓解（例如为私有 shell 关闭 PSReadLine 的历史持久化）属于上游改动，只是**待决策的候选，未实施**。
+
 ## 历史：0.1.8 工具调用显示修复二（设置读取落定信号／警告去重）
 
 状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只关两份复查（`task-14-tool-display-spec-rereview-r1.md`、`task-14-tool-display-quality-rereview-r1.md`）对 0.1.7 修复本身点到的两处「波及面」风险，外加文档；没有新增页面、端点、依赖，卡片标记、工具名、已记录事实、折叠结构、工具 schema 与字典键一律未改。日常 `web` Profile 已用官方管理器装到 0.1.8，但**没有**重启、刷新或重载用户的应用／浏览器／会话，实际渲染仍是待用户重载，本节不是最终验收。
