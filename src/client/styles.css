@@ -32,14 +32,14 @@
   padding: 8px 12px;
 }
 .dsh-nexus-console button { cursor: pointer; margin: 4px 8px 4px 0; }
-.dsh-nexus-console button[aria-pressed='true'] { background: var(--dsw-alias-bg-layer-2); font-weight: 600; }
+.dsh-nexus-console button[aria-pressed='true'] { background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); font-weight: 600; }
 .dsh-nexus-console button:disabled { cursor: not-allowed; opacity: .5; }
 .dsh-nexus-console :is(button,input,textarea,select):focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
 .dsh-nexus-console label { display: flex; flex-direction: column; gap: 6px; margin-block: 12px; }
 .dsh-nexus-console label.dsh-nexus-check { flex-direction: row; align-items: center; }
 .dsh-nexus-console textarea { min-height: 120px; resize: vertical; white-space: pre-wrap; }
 .dsh-nexus-console fieldset { margin-block: 16px; padding: 16px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; min-width: 0; }
-.dsh-nexus-console pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; font-family: var(--dsh-font-family-code, monospace); }
+.dsh-nexus-console pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; font-family: var(--dsh-font-family-code, monospace); }
 .dsh-nexus-console .dsh-nexus-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 0 20px; }
 .dsh-nexus-console .dsh-nexus-actions { margin-block: 16px; }
 .dsh-nexus-console .dsh-nexus-error { color: var(--dsw-alias-state-error-primary); }

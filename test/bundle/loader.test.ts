@@ -103,6 +103,20 @@ describe('built client bundle', () => {
     expect(host.slotRegistrations).toEqual([])
   })
 
+  it('re-registers the settings cell once when the locale changes', () => {
+    const host = createClientHost()
+    host.mount()
+    const before = host.slotRegistrations.filter((row) => row.name === 'settings.section')
+    expect(before).toHaveLength(1)
+    host.changeLocale()
+    const after = host.slotRegistrations.filter((row) => row.name === 'settings.section')
+    expect(after).toHaveLength(1)
+    expect(after[0]!.cell).toBe(NS)
+    expect(after[0]).not.toBe(before[0])
+    host.unload()
+    expect(host.slotRegistrations).toEqual([])
+  })
+
   it('does not bundle a second copy of React', () => {
     const source = readFileSync(bundlePath, 'utf8')
     // A bundled React brings its own copy of this internal marker; two Reacts in

@@ -18,6 +18,7 @@
   "base": "Base prompt (read-only, literal text)",
   "modules": "Prompt modules",
   "addModule": "Add module",
+  "untitledModule": "Untitled module",
   "moduleName": "Module name",
   "moduleBody": "Literal module body",
   "includeModule": "Include in ordered selection",

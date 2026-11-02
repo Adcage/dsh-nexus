@@ -76,6 +76,8 @@ export interface ClientHost {
   readonly slotRegistrations: readonly SlotRegistration[]
   /** How many registration disposers have run in total. */
   readonly disposeCount: number
+  /** Fire every current locale subscriber once, as the locale service does after a switch. */
+  changeLocale(): void
   /**
    * Execute the bundle and materialize its exports.
    * @returns the captured loader id and the module exports.
@@ -105,6 +107,7 @@ export interface FakeClientContext {
       dictionaries: { en: Record<string, string>; zh: Record<string, string> },
     ): () => void
     bind(namespace: string): (key: string) => string
+    subscribe(listener: () => void): () => void
   }
   /** Slot service face the bundle uses. */
   readonly slots: {
@@ -132,6 +135,7 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
   const loadedClientIds: string[] = []
   const locales = new Map<string, { en: Record<string, string>; zh: Record<string, string> }>()
   const registrations: SlotRegistration[] = []
+  const localeListeners: Array<() => void> = []
   const disposers: Array<() => void> = []
   let disposeCount = 0
   let module: LoadedClientModule | undefined = options.module
@@ -145,6 +149,9 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
     get disposeCount() {
       return disposeCount
     },
+    changeLocale() {
+      for (const listener of [...localeListeners]) listener()
+    },
     load() {
       const loaded = options.module ?? executeBundle(bundlePath)
       module = loaded
@@ -157,6 +164,7 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
         declaredSlots,
         locales,
         registrations,
+        localeListeners,
         registerDisposer: (dispose) => disposers.push(dispose),
         countDisposal: () => {
           disposeCount += 1
@@ -218,6 +226,7 @@ function createClientContext(state: {
   declaredSlots: Set<string>
   locales: Map<string, { en: Record<string, string>; zh: Record<string, string> }>
   registrations: SlotRegistration[]
+  localeListeners: Array<() => void>
   registerDisposer: (dispose: () => void) => void
   countDisposal: () => void
 }): FakeClientContext {
@@ -238,6 +247,13 @@ function createClientContext(state: {
       },
       bind(namespace) {
         return (key: string) => state.locales.get(namespace)?.en[key] ?? key
+      },
+      subscribe(listener) {
+        state.localeListeners.push(listener)
+        return () => {
+          const index = state.localeListeners.indexOf(listener)
+          if (index !== -1) state.localeListeners.splice(index, 1)
+        }
       },
     },
     slots: {

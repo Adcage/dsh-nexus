@@ -1,9 +1,21 @@
 import type { ConsolePageProps } from '../console.tsx'
+import { PROMPT_MAX_MODULES } from '../../runtime/defaults.ts'
+
+let fallbackModuleIds = 0
+/** Session-unique module id; the timestamp-plus-counter fallback survives a non-secure origin without randomUUID. */
+function newModuleId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `m${Date.now().toString(36)}-${fallbackModuleIds++}`
+}
 
 export function PromptsPage({ store, state, t }: ConsolePageProps) {
   const library = state.libraryDraft
   if (library === undefined) return <p>{t('unavailable')}</p>
   const update = (id: string, patch: { name?: string; body?: string }) => store.editLibrary({ ...library, modules: library.modules.map((m) => m.id === id ? { ...m, ...patch } : m) })
+  const atModuleCap = library.modules.length >= PROMPT_MAX_MODULES
+  const addModule = () => {
+    if (atModuleCap) return
+    store.editLibrary({ ...library, modules: [...library.modules, { id: newModuleId(), name: '', body: '' }] })
+  }
   function move(index: number, offset: number) {
     const selection = [...state.selection]
     const destination = index + offset
@@ -15,13 +27,13 @@ export function PromptsPage({ store, state, t }: ConsolePageProps) {
     <h3>{t('base')}</h3><pre data-base>{state.capabilities?.basePrompt}</pre>
     <h3>{t('modules')}</h3>
     {library.modules.map((module) => <fieldset key={module.id}>
-      <legend>{module.name || module.id}</legend>
+      <legend>{module.name || t('untitledModule')}</legend>
       <label>{t('moduleName')}<input data-module-name value={module.name} onChange={(e) => update(module.id, { name: e.currentTarget.value })} /></label>
       <label>{t('moduleBody')}<textarea data-module-body value={module.body} onChange={(e) => update(module.id, { body: e.currentTarget.value })} /></label>
       <label className="dsh-nexus-check"><input data-module-select type="checkbox" checked={state.selection.includes(module.id)} onChange={(e) => store.setSelection(e.currentTarget.checked ? [...state.selection, module.id] : state.selection.filter((id) => id !== module.id))} />{t('includeModule')}</label>
       <button type="button" onClick={() => store.editLibrary({ modules: library.modules.filter((m) => m.id !== module.id), defaultSelection: library.defaultSelection.filter((id) => id !== module.id) })}>{t('deleteModule')}</button>
     </fieldset>)}
-    <button type="button" onClick={() => store.editLibrary({ ...library, modules: [...library.modules, { id: crypto.randomUUID(), name: '', body: '' }] })}>{t('addModule')}</button>
+    <button type="button" disabled={atModuleCap} onClick={addModule}>{t('addModule')}</button>
     <h3>{t('selection')}</h3>
     {state.selection.length === 0 ? <p>{t('emptySelection')}</p> : <ol>{state.selection.map((id, index) => <li key={id}>
       <span>{library.modules.find((m) => m.id === id)?.name || id}</span>

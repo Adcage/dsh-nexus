@@ -41,6 +41,26 @@ describe('five-page shared settings draft', () => {
     expect(view.node.querySelectorAll('a')).toHaveLength(0)
     expect(view.node.querySelectorAll('input')).toHaveLength(0)
   })
+  it('publishes only an integer inside the field bounds and never raises a notice for invalid typing', async () => {
+    const f = clientFixture()
+    const store = createConsoleStore(createNexusApi(f.fetch))
+    await store.refresh()
+    const view = await mountConsole(store); cleanups.push(view.dispose)
+    await button(view.node, en.tools).clickAsync()
+    const initialLines = store.getSnapshot().settingsDraft?.files.defaultLines
+    expect(initialLines).toBe(200)
+    const writes = f.requests.filter((request) => request.method === 'PUT').length
+    await input(view.node, en.defaultLines, '1.5')
+    expect(store.getSnapshot().settingsDraft?.files.defaultLines).toBe(initialLines)
+    expect(store.getSnapshot().notice).toBe('idle')
+    await input(view.node, en.defaultLines, '99999')
+    expect(store.getSnapshot().settingsDraft?.files.defaultLines).toBe(initialLines)
+    expect(store.getSnapshot().notice).toBe('idle')
+    expect(view.node.textContent).not.toContain(en.error)
+    expect(f.requests.filter((request) => request.method === 'PUT')).toHaveLength(writes)
+    await input(view.node, en.defaultLines, '500')
+    expect(store.getSnapshot().settingsDraft?.files.defaultLines).toBe(500)
+  })
   it.each([409, 500])('preserves edits after HTTP %i; only explicit reload discards them', async (status) => {
     const f = clientFixture()
     const store = createConsoleStore(createNexusApi(f.fetch))

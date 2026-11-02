@@ -18,6 +18,7 @@
   "base": "基础提示词（只读，保留原文）",
   "modules": "提示词模块",
   "addModule": "新增模块",
+  "untitledModule": "未命名模块",
   "moduleName": "模块名称",
   "moduleBody": "模块正文（字面文本）",
   "includeModule": "加入有序选择",

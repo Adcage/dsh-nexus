@@ -38,6 +38,8 @@ export function SettingsActions({ store, state, t }: ConsolePageProps) {
 }
 export function NumberField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
   return <label>{label}<input type="number" min={min} max={max} step={1} value={value} onChange={(e) => {
-    if (e.currentTarget.value !== '' && Number.isFinite(e.currentTarget.valueAsNumber)) onChange(e.currentTarget.valueAsNumber)
+    // Publish only a value the host will accept; the draft keeps its last valid number otherwise.
+    const next = e.currentTarget.valueAsNumber
+    if (Number.isInteger(next) && next >= min && next <= max) onChange(next)
   }} /></label>
 }
