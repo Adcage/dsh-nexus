@@ -1150,10 +1150,10 @@ function renderShellValue(value: ShellValue): string {
 }
 
 /** Replayable presentation metadata for host renderers. */
-function presentationFor(value: ShellValue): { readonly [key: string]: string } {
+function presentationFor(value: ShellValue): { readonly [key: string]: string | boolean } {
   const process = value.process
   const terminal = value.terminal
-  const meta: Record<string, string> = { action: value.action }
+  const meta: Record<string, string | boolean> = { action: value.action }
   if (value.family !== undefined) meta['family'] = value.family
   if (process !== undefined) {
     meta['resourceId'] = process.resourceId
@@ -1163,5 +1163,9 @@ function presentationFor(value: ShellValue): { readonly [key: string]: string } 
     meta['resourceId'] = terminal.resourceId
     meta['status'] = terminal.sessionStatus.kind
   }
+  // Durable timeout fact: a `wait` that ended without settlement keeps its own
+  // stage on replay instead of looking like a settled result. `run` and the
+  // other actions leave the field absent, and a settled wait records `false`.
+  if (value.timedOut !== undefined) meta['timedOut'] = value.timedOut
   return meta
 }

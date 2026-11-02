@@ -36,6 +36,7 @@ import {
   type TerminalSignalResult,
 } from '@deepseek-ai/dsh-terminal'
 import { BashTerminalBackend, type TerminalLocalConfig } from '@deepseek-ai/dsh-terminal-bash'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { AGENT_MAX_TERMINALS } from '../../src/runtime/defaults.ts'
 import { NexusError } from '../../src/runtime/errors.ts'
 import type { CallOwner } from '../../src/runtime/owner.ts'
@@ -327,6 +328,9 @@ async function openTerminalHarness(
         }),
   })
   mounted.push(harness)
+  // The native backend resolves the shared confinement policy on its own cold
+  // path, so the composition must carry the same service the backend declares.
+  await harness.ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: CWD })
   await harness.ctx.plugin(TerminalSessionService)
   const terminals = harness.ctx.terminals
   const backends = new Map<ShellEngine, ScriptedTerminalBackend>()

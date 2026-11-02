@@ -401,18 +401,37 @@ export function createNativeTerminalBackend(
 }
 
 /**
+ * Services the native terminal backend reaches on its own cold path.
+ *
+ * `@deepseek-ai/dsh-terminal-bash` declares exactly this list for its own row.
+ * A Cordis service proxy rebinds `this` to the CALLER's context, so the backend
+ * this module builds reads `sandboxPolicy`, `sessionProjections`, `subprocess`
+ * and `workingDirectory` through the registration context: those names must be
+ * declared here too, or the first open fails with `cannot get property …
+ * without inject` instead of creating a terminal.
+ */
+const TERMINAL_BACKEND_INJECT: readonly string[] = Object.freeze([
+  'terminals',
+  'sandboxPolicy',
+  'sessionProjections',
+  'subprocess',
+  'workingDirectory',
+])
+
+/**
  * Register the native bash/pwsh backends under the Nexus backend types.
  *
- * Registration is lazy in two ways: it waits for the terminal service to be
- * mounted, and it resolves no executable until a terminal of that dialect is
- * opened. The returned disposer removes exactly this contribution and is
- * idempotent; the native registry rejects a second registration of the same type.
+ * Registration is lazy in two ways: it waits for the terminal service and the
+ * backend's own callee services to be mounted, and it resolves no executable
+ * until a terminal of that dialect is opened. The returned disposer removes
+ * exactly this contribution and is idempotent; the native registry rejects a
+ * second registration of the same type.
  * @param ctx - registration scope.
  * @param config - current deployment and terminal settings, read on every open.
  * @returns disposer removing exactly this registration.
  */
 export function registerTerminalBackends(ctx: Context, config: () => ShellExecutionConfig): () => void {
-  const fiber = ctx.inject(['terminals'], (terminalCtx) => {
+  const fiber = ctx.inject([...TERMINAL_BACKEND_INJECT], (terminalCtx) => {
     const terminals = terminalCtx.get('terminals')
     if (terminals === undefined) return
     for (const engine of DIALECTS) {

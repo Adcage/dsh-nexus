@@ -13,9 +13,13 @@
  * needs. That is the cheapest way to prove the composition accepts the package.
  *
  * Usage:
+ *   node scripts/dev-profile.mjs init [--profile nexus-dev] [--cli <dsh>]
  *   node scripts/dev-profile.mjs boot [--port 19499] [--profile nexus-dev] [--cli <dsh>]
  *   node scripts/dev-profile.mjs dump       print the composed row
  *   node scripts/dev-profile.mjs remove --yes
+ *
+ * No subcommand means usage, never a boot: a server started by accident is a
+ * port and a profile the operator did not ask for.
  *
  * The CLI comes from `--cli`, then `$DSH_CLI`, then `dsh` on PATH. No absolute
  * deployment path is baked in, because the plugin must run against whatever
@@ -41,7 +45,7 @@ const DEFAULT_PROFILE = 'nexus-dev'
  * @returns the command and its flags.
  */
 function parseArgs(argv) {
-  const command = argv[0] !== undefined && !argv[0].startsWith('--') ? argv[0] : 'boot'
+  const command = argv[0] !== undefined && !argv[0].startsWith('--') ? argv[0] : 'usage'
   const rest = command === argv[0] ? argv.slice(1) : argv
   const flags = new Map()
   for (let index = 0; index < rest.length; index += 1) {
@@ -144,6 +148,15 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 switch (command) {
+  case 'init': {
+    if (existsSync(join(devHome, 'profiles', profile))) {
+      console.log(`dev-profile: profile "${profile}" already exists in ${devHome}`)
+      break
+    }
+    initialiseProfile(cli, profile)
+    console.log(`dev-profile: created profile "${profile}" in ${devHome}; no server was started`)
+    break
+  }
   case 'boot': {
     if (!existsSync(join(devHome, 'profiles', profile))) initialiseProfile(cli, profile)
     console.log(`dev-profile: booting profile "${profile}" on http://127.0.0.1:${port} (Ctrl-C to stop)`)
@@ -164,7 +177,15 @@ switch (command) {
     break
   }
   default: {
-    console.error('usage: node scripts/dev-profile.mjs [boot|dump|remove] [--port N] [--profile NAME] [--cli PATH]')
+    console.error(
+      [
+        'usage: node scripts/dev-profile.mjs <init|boot|dump|remove> [--port N] [--profile NAME] [--cli PATH]',
+        '  init   create the isolated profile only; no server is started',
+        '  boot   start the isolated profile on --port (default 19499)',
+        '  dump   print the composed dsh-nexus row',
+        '  remove delete the isolated home; requires --yes',
+      ].join('\n'),
+    )
     process.exit(2)
   }
 }

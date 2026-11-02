@@ -3,6 +3,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import TerminalSessionService from '@deepseek-ai/dsh-terminal'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SpawnProvider from '@deepseek-ai/dsh-subagent-spawn-in-process'
@@ -11,7 +12,7 @@ import { expect, it } from 'vitest'
 import { registerRoutes } from '../../src/http/routes.ts'
 import { openNexusRuntime, type NexusRuntime } from '../../src/runtime/service.ts'
 import { registerTerminalBackends } from '../../src/shell/terminals.ts'
-import { mountNexusStoreFixture } from '../support/fixtures.ts'
+import { mountNexusStoreFixture, mountSubprocessDouble } from '../support/fixtures.ts'
 import { consoleRequest } from './transport.ts'
 
 it('distinguishes absent services, empty public registries and unknown web backends, reflecting live registrations', async () => {
@@ -58,6 +59,10 @@ it('distinguishes absent services, empty public registries and unknown web backe
       internalAgent: { service: 'present', backends: { state: 'absent', names: [] }, readiness: 'unverified' },
     })
 
+    // Registration now waits for the services the native backend reaches on its
+    // own cold path, exactly as the backend's own row declares them.
+    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: process.cwd() })
+    await mountSubprocessDouble(ctx)
     removeTerminals = registerTerminalBackends(ctx, () => {
       configReads++
       throw new Error('registration inspection must not resolve a shell executable')

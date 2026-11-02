@@ -9,6 +9,8 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
-    exclude: ['test/integration/**', 'test/windows/**', 'node_modules/**'],
+    // The integration suite needs a built host row and a real harness; the
+    // Windows acceptance file needs real shells. Neither runs offline here.
+    exclude: ['test/integration/**', 'test/integration/windows.test.ts', 'test/windows/**', 'node_modules/**'],
   },
 })

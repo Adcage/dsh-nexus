@@ -83,6 +83,42 @@ check(
   runtimeVersion,
 )
 
+// The integration suite is a real command over real files, not a documentation
+// claim: it needs an own config, its own cases and the built host row it drives.
+const integrationScript = manifest.scripts?.['test:integration']
+check(
+  'scripts.test:integration runs the integration config',
+  typeof integrationScript === 'string' && integrationScript.includes('vitest.integration.config.ts'),
+  integrationScript,
+)
+check(
+  'vitest.integration.config.ts exists',
+  existsSync(`${packageRoot}vitest.integration.config.ts`),
+  'the integration suite has no configuration without it',
+)
+const integrationCases = [
+  'test/integration/preset.test.ts',
+  'test/integration/native.test.ts',
+  'test/integration/prompts.test.ts',
+  'test/integration/cleanup.test.ts',
+]
+for (const file of integrationCases) {
+  const present = existsSync(`${packageRoot}${file}`)
+  const text = present ? readFileSync(`${packageRoot}${file}`, 'utf8') : ''
+  // A file with no case would make the suite a config-only pass.
+  check(`integration case ${file} has at least one test`, present && /\bit\(/.test(text), present ? 'present' : 'missing')
+}
+const windowsCase = 'test/integration/windows.test.ts'
+for (const configFile of ['vitest.config.ts', 'vitest.integration.config.ts']) {
+  const path = `${packageRoot}${configFile}`
+  const text = existsSync(path) ? readFileSync(path, 'utf8') : ''
+  check(
+    `${configFile} excludes the Windows acceptance file`,
+    text.includes(windowsCase),
+    windowsCase,
+  )
+}
+
 if (failures.length > 0) {
   console.error(`\nverify-runtime: ${failures.length} check(s) failed`)
   process.exit(1)

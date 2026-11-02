@@ -88,7 +88,7 @@ import {
   type SubprocessDouble,
   type WebDouble,
 } from './fixtures.ts'
-import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import type { SubprocessSpawnSpec, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { Config as NexusConfigSchema } from '../../src/config.ts'
 import type { Config as NexusConfig } from '../../src/config.ts'
 import type { NexusRuntime } from '../../src/runtime/service.ts'
@@ -152,6 +152,27 @@ export interface PresetHarnessOptions {
    * fixture's clean, immediately finished process.
    */
   readonly subprocessScript?: (spec: SubprocessSpawnSpec) => ScriptedProcessScript
+  /**
+   * Script the terminal-spawn boundary, so a case can keep a persistent terminal
+   * session open instead of the fixture's immediately finished default.
+   */
+  readonly terminalScript?: (spec: SubprocessTerminalSpawnSpec) => ScriptedProcessScript
+  /**
+   * Script one model answer, so a case can drive a real multi-step turn (for
+   * example an assistant tool call followed by a second request carrying the
+   * tool result). Default: a text-only answer.
+   */
+  readonly answer?: (request: GenerateOptions, index: number) => string | AsyncIterable<StreamChunk>
+  /**
+   * Extra rows appended to the native `standard` preset composition. This is how
+   * a case installs a third-party contribution bound to the native preset id.
+   */
+  readonly standardPlugins?: PresetDefinition['plugins']
+  /**
+   * In-process plugins a `cordis:<name>` row name resolves to, so a test-only
+   * row can be composed without shipping a module for it.
+   */
+  readonly loaderBuiltins?: Readonly<Record<string, unknown>>
 }
 
 /** One mounted host composition plus the built Nexus row on top of it. */
@@ -342,9 +363,10 @@ async function writeSkillFixture(skillsHome: string): Promise<void> {
 /**
  * Register the definition a native preset would contribute, so the standard
  * composition can be compared before and after Nexus is installed.
+ * @param extra - additional rows bound to this native preset id.
  * @returns the definition.
  */
-export function standardDefinition(): PresetDefinition {
+export function standardDefinition(extra: PresetDefinition['plugins'] = []): PresetDefinition {
   return {
     id: 'standard',
     name: 'Standard',
@@ -355,6 +377,7 @@ export function standardDefinition(): PresetDefinition {
       { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
       { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+      ...extra,
     ],
   }
 }
@@ -404,7 +427,9 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       ...PRESET_ROUTE,
       stream: (request) => {
         requests.push({ options: request })
-        return scriptedAnswer(requests.length)
+        const answer = options.answer?.(request, requests.length)
+        if (answer === undefined) return scriptedAnswer(requests.length)
+        return typeof answer === 'string' ? scriptedTextAnswer(answer) : answer
       },
     })
     const loop = await mountAgentLoopTestHarness(ctx)
@@ -415,10 +440,10 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     // the executor's real policy resolution and argv path while replacing only
     // the host-side runner/process. Neither claims OS-sandbox or PTY proof.
     const sandbox = await mountRecordingSandbox(ctx)
-    const subprocess = await mountSubprocessDouble(
-      ctx,
-      options.subprocessScript === undefined ? {} : { script: options.subprocessScript },
-    )
+    const subprocess = await mountSubprocessDouble(ctx, {
+      ...(options.subprocessScript === undefined ? {} : { script: options.subprocessScript }),
+      ...(options.terminalScript === undefined ? {} : { terminalScript: options.terminalScript }),
+    })
     await ctx.plugin(applyShellEnv, {})
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(TerminalService)
@@ -463,7 +488,8 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     if (options.thirdPartyTools !== undefined && options.thirdPartyTools.length > 0) {
       await ctx.plugin(globalToolsPlugin('nexus-third-party-tools', options.thirdPartyTools))
     }
-    await ctx.agentPresets.register(standardDefinition())
+    for (const [name, plugin] of Object.entries(options.loaderBuiltins ?? {})) ctx.loader.builtins[name] = plugin
+    await ctx.agentPresets.register(standardDefinition(options.standardPlugins))
     const hostRow = await loadBuiltHostRow()
 
     let callCount = 0
@@ -598,9 +624,18 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
  * @returns the stream.
  */
 async function* scriptedAnswer(index: number): AsyncGenerator<StreamChunk> {
+  yield* scriptedTextAnswer(`answer-${index}`)
+}
+
+/**
+ * One text-only answer over a fixed text.
+ * @param text - the answer text.
+ * @returns the stream.
+ */
+async function* scriptedTextAnswer(text: string): AsyncGenerator<StreamChunk> {
   yield { type: 'block-start', index: 0, blockType: 'text' }
-  yield { type: 'text-delta', index: 0, text: `answer-${index}` }
-  yield { type: 'block-end', index: 0, block: { type: 'text', text: `answer-${index}` } }
+  yield { type: 'text-delta', index: 0, text }
+  yield { type: 'block-end', index: 0, block: { type: 'text', text } }
   yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
   yield { type: 'finish', reason: { kind: 'stop' } }
 }

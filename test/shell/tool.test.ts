@@ -45,6 +45,7 @@ import {
   type TerminalSignalResult,
 } from '@deepseek-ai/dsh-terminal'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { NexusError } from '../../src/runtime/errors.ts'
 import { AGENT_MAX_TERMINALS } from '../../src/runtime/defaults.ts'
 import type { ShellEngine } from '../../src/protocol.ts'
@@ -736,9 +737,13 @@ describe('shell run', () => {
     expect(status.job?.id).toBe(resourceId)
     expect(status.job?.status).toBe('running')
 
-    const timed = valueOf(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))
+    const timedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const timed = valueOf(timedResult)
     expect(timed.timedOut).toBe(true)
     expect(timed.process?.status).toBe('running')
+    // The durable presentation fact records the timeout, so a replayed card keeps
+    // the timeout stage instead of a settled one.
+    expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
     expect(resultText(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))).toContain(
       'not completion',
     )
@@ -964,13 +969,18 @@ describe('shell terminals', () => {
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
 
-    const timed = valueOf(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))
+    const timedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const timed = valueOf(timedResult)
     expect(timed).toMatchObject({ timedOut: true, waitReason: 'timeout' })
+    expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
     expect(resultText(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))).toContain('not an exit')
 
     session.statusValue = { kind: 'exited', exitCode: 0, signal: null }
-    const exited = valueOf(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))
+    const exitedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const exited = valueOf(exitedResult)
     expect(exited).toMatchObject({ timedOut: false, waitReason: 'session_exit' })
+    // A settled wait keeps a durable `false`, so the stage is not a timeout.
+    expect(exitedResult.meta).toMatchObject({ action: 'wait', timedOut: false })
     expect(exited.sessionStatus).toMatchObject({ kind: 'exited', exitCode: 0 })
     await shell.call({ action: 'close', resourceId })
   })
@@ -1146,6 +1156,10 @@ describe('shell policy facts and composition', () => {
       backends: [],
       subprocess: { script: () => ({ stdout: '5\n', exitCode: 0 }) },
     })
+    // The native backend declares the shared confinement policy on its own cold
+    // path, so the registration waits for that service exactly as the shipped
+    // `dsh-terminal-bash` row does.
+    await shell.harness.ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: CWD })
     const dispose = registerTerminalBackends(shell.harness.ctx, () => shell.config.value)
     try {
       await until(() => shell.harness.ctx.terminals.listBackends().includes('nexus-pwsh'))

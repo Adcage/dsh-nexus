@@ -39,6 +39,7 @@
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsdown",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "test": "vitest run",
+    "test:integration": "pnpm build && vitest run --config vitest.integration.config.ts",
     "check": "pnpm typecheck && pnpm build && pnpm test",
     "dev:profile": "node scripts/dev-profile.mjs",
     "pack:plugin": "node scripts/pack.mjs",
