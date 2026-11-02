@@ -2,7 +2,22 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 当前：0.1.6 工具调用显示模式（nexus／auto／native）
+## 0. 当前：0.1.7 工具调用显示修复（启动窗口／文案／重试）
+
+状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只修两份评审（`task-14-tool-display-spec-review.md` 的 1 个 P1 与 2 个 P2）指出的问题，没有新增功能、页面、端点或依赖，卡片标记、工具名、已记录事实与折叠结构一律未改。日常 `web` Profile 已用唯一官方命令装到 0.1.7，但**没有**重启、刷新或重载用户的应用／浏览器／会话；实际渲染仍是待用户重载，本节不是最终验收。
+
+- P1（启动窗口）：`src/client/index.tsx` 的模式读取现在返回 `undefined`，直到第一次设置读取落定：既没有草稿、也没有已保存值时**不注册任何单元格**；读取成功后按存储模式的等级注册（`nexus` 0、`auto` 10、`native` 不注册）；读取失败（store 发布 `error`）则退回 `nexus`，让用户照样看到卡片。这样存了 `auto`／`native` 的用户在读取期间不再占用等级 0，第三方视图插件以默认等级注册同名 key 时不会因「同 key 同优先级」抛错、丢掉自己的单元格。原有的「先 dispose 再注册一次、模式不变不重复注册、卸载清理」全部保留。
+- P2（重试）：`ctx.slots.inject` 抛错时不再把模式记为已应用，而是在 `catch` 里把 `active` 清回未知，后续发布可以重试；槽位缺失时的既有警告不变。
+- P2（文案）：英文 `toolDisplayNativeHelp` 不再引用中文宿主字面量“工具调用 · run”，改为与语言无关的描述（宿主把名字当未知工具、用第一个字符串参数当摘要，所以 `shell` 调用大致显示为 `Tool call · run`）；中英 `toolDisplayHelp` 各加一句：切换会立即在本页预览，但只有「保存全部设置」才让它成为已保存默认（中文原文含义不变）。中英字典键集合仍完全一致。
+- TDD（先失败）：新增 6 条客户端用例，其中 4 条在改源码前真实失败——`auto` 与 `native` 启动窗口（第三方已占 rank 0 时仍被 Nexus 占用）、首次读取失败仍应退回 `nexus`、`inject` 抛错后应能重试；日志 `tmp/task14-tool-display-fix/red-final-source.log`（同一用例集在 HEAD 源码上的运行，4 failed / 9 passed）与第一次编写时的 `red-client-1.log` 都保留。另外 2 条是评审点名的缺口护栏（nexus 模式下先占 rank 0 的第三方只让 `shell` 让位、其余两键仍在；卸载清空三个 key），它们在修复前已通过，如实标注为护栏而非新失败。
+- 回归适配（如实披露）：`test/client/tool-views.test.ts` 与 `test/bundle/loader.test.ts` 原先假设 `apply` 后卡片立即注册；P1 修复后注册要等第一次读取落定，所以这些渲染／计数用例改为等待该读取（无宿主时是失败退回路径）。第一次 `pnpm pack:plugin` 因此有 3 条 bundle 用例失败（日志 `pack-1-eprem.log`），另 1 条 `test/fs/edit.test.ts` 是既有的 Windows 文件写入抖动；适配后 bundle 套件 11/11 通过（`bundle-loader.log`）。
+- 最终门禁：`pnpm pack:plugin`（typecheck → build → 默认套件 → 包检查）**43 文件 / 607 测试，exit 0**，产物 `dist/dsh-nexus-0.1.7.tgz` = **463,144 字节、15 个成员、SHA-256 `e814dcfd832216aeffb464875a840cb6095df2fa0b15f5b08f223b7af65b6e10`**（`tmp/task14-tool-display-fix/pack.log`）。`pnpm verify:runtime` exit 0（`dsh-nexus 0.1.7 targets dsh 0.2.1-rc.2`，`verify-runtime.log`）。集成 16／Windows 13 仍是 651604b 的历史证据，本波按范围没有重跑。
+- 门禁重试（如实记录）：在本机并行负载下，完整套件曾连续三次各失败 1–2 条**与本改动无关**的 Windows 文件写入用例（`test/fs/edit`、`test/fs/write`、`test/web/results`；其中一次是 `node_modules/.cache` 的 `EPERM: rename`，与历史记录同一族抖动）。这些文件单独跑 19/19 通过，`--no-file-parallelism` 全量跑 **607/607 通过**（`fs-edit-single*.log`、`full-serial.log`），随后并行门禁一次通过。失败日志 `pack-2-fs-edit.log`、`pack-3-fs.log` 保留，没有把它们说成产品缺陷，也没有删掉首次失败。
+- 产物可重建（本波重点）：提交后从干净 HEAD 构建并打包；随后 `pnpm build` 再构建一次，包内 15 个成员中 14 个与工作树逐字节相同（唯一不同的是 `package.json`，由 pnpm pack 规范化字段顺序所致，属打包器行为），即 `lib/` 全部逐字节可重建（`members-after-pack.json`、`members-after-rebuild.json`）；再用同一个已提交源码执行一次 `pnpm pack` 到临时目录，两个 tarball 的 SHA-256 **完全相同**（`e814dcfd…`，`repack.log`）。所以 `dist/` 与 HEAD 对应，0.1.5 那种 sourcemap 行尾差异没有重演。
+- 日常安装：唯一命令 `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.7.tgz`，2026-11-02T16:07:53Z 开始、16:07:58Z 结束，**真实 exit 0**；完整 stdout/stderr 在 `tmp/task14-tool-display-fix/official-install-output.log`，exit 单独存 `official-install-exit.txt`。输出是既有的 peer 警告与 `Packages: +3 -3`、`Done in 3s`。安装前后：21 个声明依赖、23 条 bundle、`dsh-nexus` 只有一条；15/15 tarball 成员与 `node_modules/dsh-nexus` 下文件逐字节相同（含 packed `package.json` 与内嵌 CSS 的 `lib/client.js`）；除 Nexus spec 更新为 0.1.7 外，Profile manifest 无其它语义变化，其余 20 个声明包的安装版本与 manifest hash 均未变（`before/after-inventory.json`）。安装前后 127.0.0.1:3080（PID 23616）与 18787（PID 34640）监听完全不变，62699 前后都没有监听；未重启、未终止、未刷新用户的应用／浏览器／会话。状态因此是 `INSTALLED_PENDING_USER_RELOAD`：只证明安装落盘，不证明已打开的页面用了新 JavaScript。
+- **没有证明的事**：本轮没有重启应用，所以没有新的真实浏览器／像素证据；0.1.6 的隔离 Profile 台账（三个模式的 rank 与胜出者）仍是那三个模式在**稳态**下的证据，本波新增的是启动窗口时序，只在真实 SlotRegistry 的行为用例里证明（第三方先占 rank 0 时不抛错、不被抢、读完后落到存储等级）。日常第三方皮肤与真实插件组合下的启动竞态、真实模型产生的卡片外观、DPI／zoom、账号／模型、图像／web／子 Agent／AC-17 仍未验证；AC-07 受限 Git Bash 环境阻塞不变。本轮未作交付、接受、推送或合并。
+
+## 历史：0.1.6 工具调用显示模式（nexus／auto／native）
 
 状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只加一个显示模式开关：`RuntimeSettings.toolDisplay`（默认 `nexus`）决定 Nexus 是否、以及以什么优先级占用宿主 `tool.call.toolview` 的三个单元格。0.1.5 的卡片标记、事实、输出、折叠与诚实措辞**完全没改**；本波没有把卡片改成宿主行样式，也没有新增页面、端点或依赖。日常 `web` Profile 安装到 0.1.6 后仍**没有**重启、刷新或重载用户的应用／浏览器／会话，实际渲染状态仍是待用户重载；本节不是最终验收。
 
