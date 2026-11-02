@@ -27,25 +27,31 @@ pnpm verify:runtime     # 包身份与集成接线静态检查
 ## 1. 隔离实例与安装
 
 ```sh
-node scripts/dev-profile.mjs init            # 只在项目内 .dev-home 创建隔离 Profile，不启动服务
+pnpm pack:plugin                             # 先 check 再打包到 dist/，并检查 tarball 内容
+node scripts/dev-profile.mjs init            # 把 dist/ 里的 tarball 装进项目内 .dev-home，不启动服务
 node scripts/dev-profile.mjs dump            # 打印组合后的 dsh-nexus 行
 node scripts/dev-profile.mjs boot --port 19499
 ```
 
+`init` 装的是**打包后的 tarball**（默认 `dist/<name>-<version>.tgz`，可用 `--tarball <路径>` 覆盖），不是工作目录：只有 tarball 会作为真实目录进入 Profile 的 `node_modules`。没有 tarball 时 `init` 会明确报错并要求先 `pnpm pack:plugin`。
+
 `boot` 才启动服务；不传子命令只会打印用法，不会自动启动。`.dev-home/` 已被 `.gitignore` 忽略，删除前必须显式 `remove --yes`。
 
-正式 bundle 安装（仅在你明确授权的隔离 Profile 上执行）：
+正式 bundle 安装到日常 Profile（仅在明确授权时执行，使用官方插件管理命令；不要手改 Profile 文件，也不要在 Profile 目录里跑 pnpm）：
 
 ```sh
 pnpm pack:plugin
-# 用官方 plugin-manager / dsh plugin add 把 tarball 装进隔离 Profile，读取 application / warnings
+dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 ```
+
+安装会打印 pnpm 的 `dependencies` 与 peer 警告；`@deepseek-ai/*` 的 “missing peer” 是正常的（运行时由 DSH 安装目录提供）。装完必须**重启该 Profile 的宿主进程**并刷新页面；重复安装同一版本是无声空操作，需要时先 `remove` 或提升版本号。
 
 验收点：
 
 - [ ] `dump` 输出的 `dsh-nexus` 行只有一条，`id` 等于包名，config 与部署配置一致。
-- [ ] 安装结果里没有 "已安装但实际上未加载" 的行；重启只针对该隔离实例。
-- [ ] 真实日常 Profile **未被修改**；如未授权，此项记为「未验证」，不算通过。
+- [ ] `dsh --profile <profile> --dump-config` 同样只有一条 `dsh-nexus` 行，且 Profile 的 `dsh.profile.bundles` 里出现 `dsh-nexus`。
+- [ ] 安装结果里没有 “已安装但实际上未加载” 的行；重启只针对该实例。
+- [ ] 真实日常 Profile 的其它插件与会话**未被修改**；未授权时记为「未验证」，不算通过。
 
 ## 2. 预设与工具（AC-01、AC-02）
 
@@ -72,6 +78,16 @@ pnpm pack:plugin
 - [ ] 父进程退出但孙进程仍存活时，不报告 "已清理"。
 - [ ] 只读模式下写文件、向工作区外写入都被拒绝（AC-07 需要真实权限链）。
 - [ ] 持久终端打开在真实权限链下能成功（本项是 Task 13 修复的 `sandboxPolicy` 冷路径缺陷的真实验收）。
+
+### 4.1 受限权限与 Git Bash（本机环境阻塞）
+
+DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令；MSYS2 运行时在启动阶段申请 `\BaseNamedObjects` 共享内存对象会被该令牌拒绝，bash 在解析命令前就以 `0xC0000022` 退出。因此在 `read-only`／`workspace-write` 权限预设下：
+
+- Nexus 的 `shell` 工具会返回 `UNSUPPORTED_CAPABILITY`，消息说明是 MSYS2 运行时无法启动、保留原始退出码和有限的 stderr 片段，并提示显式改用 `engine: "pwsh"`；不会静默换引擎，也不会提高权限。
+- 需要受限执行时请显式传 `engine: "pwsh"`（PowerShell 7）。
+- `danger-full-access` 预设（默认）不受影响，Git Bash 正常。
+
+对应的最小复现、对照组与完整结论在 `docs/testing/verification-record.md` §4.1。**这一项不要求用户在 GUI 里验收，也不能当成已验证。**
 
 ## 5. 联网（AC-08、AC-09）
 
@@ -129,7 +145,7 @@ pnpm pack:plugin
 | 静态 | `pnpm verify:runtime` | 包身份、patch 行、client 注册、集成接线存在 | 任何运行时行为 |
 | 离线行为 | `pnpm test` | 工具、存储、提示词、控制台逻辑 | 真实 profile、真实进程、真实 UI |
 | 集成 | `pnpm test:integration` | 真实 Cordis 组合、原生注册表、受控模型请求组装、第三方 fixture、生命周期清理 | 真实账号、真实 GUI、真实 PTY、安装包 |
-| Windows 专项 | `pnpm test:windows`（后续任务） | 真实 Git Bash／pwsh、路径、树清理、权限链 | 其他平台 |
+| Windows 专项 | `pnpm test:windows` | 真实 Git Bash／PowerShell 7、中文与空格路径、后台任务、持久终端（真实 ConPTY）、取消／超时、真实进程树清理、不可用引擎与 PowerShell 5.1 拒绝 | 受限权限下的 Git Bash（环境阻塞，见 §4）、其他平台 |
 | 真实 GUI／账号 | 本文手工步骤 | 页面、主题、真实模型与联网 | 不能在自动化里冒充 |
 
 集成套件的明确限制：

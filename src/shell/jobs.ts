@@ -66,7 +66,7 @@ import {
   readMemoryWindow,
   type OutputCursorState,
 } from './output.ts'
-import { startProcess, type ManagedProcess, type ManagedSandboxFacts, type RunInput } from './process.ts'
+import { startProcess, refuseConfinedBashStartupFailure, type ManagedProcess, type ManagedSandboxFacts, type RunInput } from './process.ts'
 
 declare module '@deepseek-ai/dsh-jobs/view' {
   interface JobKindMap {
@@ -483,6 +483,7 @@ class Controller implements ProcessController {
     const state = this.stateFor(owner)
     validateRunRequest(request)
     const background = request.background === true
+    const engine = request.engine ?? this.config().terminal.engine ?? 'bash'
     const timeoutMs =
       request.timeoutMs === undefined || request.timeoutMs === null
         ? background
@@ -602,6 +603,10 @@ class Controller implements ProcessController {
         // listing. An unconfirmed one stays visible as a failed record: it is
         // still a live managed range the caller must be able to stop.
         if (entry.process.view().cleanupConfirmed) await this.removeNativeRecord(jobId, owner.sessionId)
+        // A confined Windows Git Bash that dies inside the MSYS2 runtime never
+        // ran the command; report that as a named capability refusal instead of
+        // an opaque non-zero exit the caller would keep retrying.
+        refuseConfinedBashStartupFailure(entry.process, engine)
       } else if (timeoutMs !== null) {
         entry.armGuard(timeoutMs + STOP_BOUND_MS)
       }

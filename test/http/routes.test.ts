@@ -126,7 +126,11 @@ describe('native console HTTP routes', () => {
     const capabilities = await response.json() as { backendRegistrations: unknown }
     expect(capabilities.backendRegistrations).toEqual({
       scope: 'effective-http-context',
-      terminal: { service: 'present', backends: { state: 'registered', names: ['nexus-bash', 'nexus-pwsh'] }, readiness: 'unverified' },
+      // The deployed shape has no host-level terminal service (each preset
+      // generation owns one), so the honest answer for the HTTP context is
+      // `absent`, with no readiness claimed. The `registered` branch is covered
+      // by test/http/capabilities.test.ts, which registers backends itself.
+      terminal: { service: 'absent', backends: { state: 'absent', names: [] }, readiness: 'unverified' },
       web: { service: 'present', backends: { state: 'unknown', names: null }, readiness: 'unverified' },
       internalAgent: { service: 'present', backends: { state: 'registered', names: ['spawn', 'fork'] }, readiness: 'unverified' },
     })

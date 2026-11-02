@@ -1119,6 +1119,26 @@ describe('shell policy facts and composition', () => {
     expect(value.process).toMatchObject({ status: 'exited', exitCode: 1 })
   })
 
+  it.runIf(process.platform === 'win32')(
+    'refuses a confined Git Bash start with a named capability error instead of an opaque exit code',
+    async () => {
+      const shell = await openShell({
+        sandbox: true,
+        script: () => ({
+          stderr:
+            '0 [main] bash (4548) C:\\Program Files\\Git\\bin\\bash.exe: *** fatal error - ' +
+            'NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-df7f0c9bbf0ef292): 0xC0000022\n',
+          exitCode: 3221225794,
+        }),
+      })
+      const result = await shell.call({ action: 'run', command: 'echo hi' })
+      expectCode(result, 'UNSUPPORTED_CAPABILITY')
+      const message = result.error?.message ?? ''
+      expect(message).toContain('3221225794')
+      expect(message).toContain('pwsh')
+    },
+  )
+
   it('fails clearly when a required native service is absent', async () => {
     const harness = await createToolHarness({ cwd: CWD })
     open.push(harness)

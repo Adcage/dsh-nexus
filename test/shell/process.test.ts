@@ -13,7 +13,12 @@ import { SandboxUnavailableError } from '@deepseek-ai/dsh-sandbox'
 import { ShellEnvRegistry } from '@deepseek-ai/dsh-shell-env'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import type { ShellExecutionConfig } from '../../src/shell/engines.ts'
-import { startProcess, type ManagedProcess, type RunInput } from '../../src/shell/process.ts'
+import {
+  refuseConfinedBashStartupFailure,
+  startProcess,
+  type ManagedProcess,
+  type RunInput,
+} from '../../src/shell/process.ts'
 import { NexusError } from '../../src/runtime/errors.ts'
 import {
   COMMAND_CLEANUP_GRACE_MS,
@@ -417,5 +422,92 @@ describe('startProcess', () => {
     expect(managed.cleanupError).toBeDefined()
     const afterStop = await managed.stop('dispose')
     expect(afterStop).toMatchObject({ status: 'stopping', cleanupConfirmed: false, stopRequested: 'dispose' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Confined Git Bash startup refusal (Windows permission chain)
+// ---------------------------------------------------------------------------
+
+/**
+ * The real fatal line Git Bash prints when the windows-acl token denies its
+ * shared-memory object. Captured from a confined run on this host.
+ */
+const MSYS_STARTUP_STDERR =
+  '      0 [main] bash (4548) E:\\Programme\\software\\Git\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-df7f0c9bbf0ef292): 0xC0000022\n'
+
+/** The Windows status code that fatal line exits with (0xC0000022 as unsigned). */
+const MSYS_STARTUP_STATUS = 3221225794
+
+describe('confined Git Bash startup refusal', () => {
+  it('refuses a confined Windows bash start that died on the MSYS2 shared-memory object', async () => {
+    const shell = await openShellHarness({
+      sandbox: true,
+      script: () => ({ stderr: MSYS_STARTUP_STDERR, exitCode: MSYS_STARTUP_STATUS }),
+    })
+    const managed = await start(shell.harness, { command: 'echo hi', cwd: CWD })
+    await managed.done
+
+    let refusal: unknown
+    try {
+      refuseConfinedBashStartupFailure(managed, 'bash', 'win32')
+    } catch (error) {
+      refusal = error
+    }
+    expect(refusal).toBeInstanceOf(NexusError)
+    expect(refusal).toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
+    const message = (refusal as Error).message
+    // Original facts survive in the diagnostic: status, signature and engine hint.
+    expect(message).toContain('3221225794')
+    expect(message).toContain('0xC0000022')
+    expect(message).toContain('NtCreateDirectoryObject')
+    expect(message).toContain('pwsh')
+  })
+
+  it('does not classify a plain non-zero exit under the same confinement', async () => {
+    const shell = await openShellHarness({
+      sandbox: true,
+      script: () => ({ stderr: 'permission denied', exitCode: 1 }),
+    })
+    const managed = await start(shell.harness, { command: 'touch /outside', cwd: CWD })
+    await managed.done
+    expect(() => refuseConfinedBashStartupFailure(managed, 'bash', 'win32')).not.toThrow()
+  })
+
+  it('does not classify an unconfined bash failure with the same signature', async () => {
+    const shell = await openShellHarness({
+      script: () => ({ stderr: MSYS_STARTUP_STDERR, exitCode: MSYS_STARTUP_STATUS }),
+    })
+    const managed = await start(shell.harness, { command: 'echo hi', cwd: CWD })
+    await managed.done
+    expect(managed.sandbox).toBeUndefined()
+    expect(() => refuseConfinedBashStartupFailure(managed, 'bash', 'win32')).not.toThrow()
+  })
+
+  it('does not classify a pwsh start under the same confinement', async () => {
+    const shell = await openShellHarness({
+      sandbox: true,
+      script: (spec) =>
+        spec.argv.at(-1) === '$PSVersionTable.PSVersion.Major'
+          ? { stdout: '7\n', exitCode: 0 }
+          : { stderr: MSYS_STARTUP_STDERR, exitCode: MSYS_STARTUP_STATUS },
+    })
+    const managed = await start(
+      shell.harness,
+      { command: 'Write-Output hi', cwd: CWD, engine: 'pwsh' },
+      PWSH_CONFIG,
+    )
+    await managed.done
+    expect(() => refuseConfinedBashStartupFailure(managed, 'pwsh', 'win32')).not.toThrow()
+  })
+
+  it('does not classify the same facts on a non-Windows host', async () => {
+    const shell = await openShellHarness({
+      sandbox: true,
+      script: () => ({ stderr: MSYS_STARTUP_STDERR, exitCode: MSYS_STARTUP_STATUS }),
+    })
+    const managed = await start(shell.harness, { command: 'echo hi', cwd: CWD })
+    await managed.done
+    expect(() => refuseConfinedBashStartupFailure(managed, 'bash', 'linux')).not.toThrow()
   })
 })

@@ -49,8 +49,10 @@ import { createFsTools } from '../fs/read.ts'
 import { registerPromptSections } from '../prompts/register.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { NexusAgentMembership, NexusCleanupReport, NexusRuntime } from '../runtime/service.ts'
+import { registerTerminalBackends } from '../shell/terminals.ts'
 import { createShellSurface, type ShellToolSurface } from '../shell/tool.ts'
 import { createWebTool } from '../web/tool.ts'
+import TerminalService from '@deepseek-ai/dsh-terminal'
 
 /** Loader row id of this sub-entry; distinct from the package name on purpose. */
 export const name = 'dsh-nexus-runtime'
@@ -63,6 +65,11 @@ export const name = 'dsh-nexus-runtime'
  * services read per call (`attachments`, `llm`, `sessionQuery`) are deliberately
  * absent: a text-only deployment is complete without them, and each call
  * reports the missing capability itself.
+ *
+ * `terminals` is deliberately NOT here: the deployed profile has no host-level
+ * terminal service (the native presets each own one inside their generation
+ * scope), and this row provides its own — a row that both required and provided
+ * the same service would wait on itself forever.
  */
 export const inject: readonly string[] = Object.freeze([
   'nexusRuntime',
@@ -77,7 +84,6 @@ export const inject: readonly string[] = Object.freeze([
   'shellEnv',
   'subprocess',
   'jobs',
-  'terminals',
   'web',
   'subagents',
 ])
@@ -156,7 +162,21 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
   // authoritative copy, so a divergence here can never change behaviour.
   void config
 
-  const shell: ShellToolSurface = createShellSurface(ctx, shellConfig)
+  // A preset generation gets the `terminals` service from its own scope, never
+  // from the host: `standard` mounts it inside an isolated group, so no
+  // host-level instance exists to inherit. `isolate` keeps this generation's
+  // instance separate from any outer one (a sibling preset's, or a harness's)
+  // and lets a second generation mount its own without a duplicate-service
+  // failure.
+  const terminalScope = ctx.isolate('terminals')
+  // The generation owns the terminal registry and its native backends: the
+  // deployed profile provides none, so a generation that did not mount them
+  // here would stay pending and serve no tools at all. Both are mounted before
+  // the shell surface so its controllers attach to this generation's instance.
+  terminalScope.plugin(TerminalService)
+  ctx.effect(() => registerTerminalBackends(terminalScope, shellConfig), 'dsh-nexus terminal backends')
+
+  const shell: ShellToolSurface = createShellSurface(terminalScope, shellConfig)
   const tools: readonly ToolDefinition[] = [
     ...createFsTools(ctx, settings),
     shell.tool,

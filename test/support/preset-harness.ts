@@ -53,7 +53,7 @@ import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { apply as applyShellEnv } from '@deepseek-ai/dsh-shell-env'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import TerminalService from '@deepseek-ai/dsh-terminal'
+import TerminalService, { type TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
@@ -195,6 +195,15 @@ export interface PresetHarness {
   readonly sandbox: RecordingSandboxProvider
   /** The scripted process-spawn boundary, with its recorded spawn requests. */
   readonly subprocess: SubprocessDouble
+  /**
+   * The terminal registry instance the native `standard` preset owns.
+   *
+   * The deployed `web` profile has NO host-level `terminals` service: `standard`
+   * mounts `@deepseek-ai/dsh-terminal` inside a group that isolates `terminals`.
+   * This harness reproduces that shape instead of mounting a host-level service,
+   * so a preset entry that needs one can never borrow the harness's instance.
+   */
+  readonly standardTerminals: TerminalSessionService
   /** Durable Nexus store mounted as `storageDomain`. */
   readonly fixture: NexusStoreFixture
   /** Every model request the scripted transport answered, in order. */
@@ -446,7 +455,15 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
     })
     await ctx.plugin(applyShellEnv, {})
     await ctx.plugin(LocalJobRegistry, {})
-    await ctx.plugin(TerminalService)
+    // The deployed profile carries `terminals` only inside a preset's isolated
+    // group. Mounting a host-level one here would let a preset entry activate
+    // against a service the real composition never provides — the fidelity gap
+    // that hid a generation-scope defect. The sibling scope below stands in for
+    // the `standard` preset's own isolated instance and nothing more.
+    const standardScope = ctx.isolate('terminals')
+    await standardScope.plugin(TerminalService)
+    const standardTerminals = standardScope.get('terminals')
+    if (standardTerminals === undefined) throw new Error('the standard-shape terminal scope did not mount')
     await ctx.plugin(SkillRegistry)
     await ctx.plugin(SkillFilesystem)
     await ctx.plugin(UserQuestions)
@@ -506,6 +523,7 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
       attachments,
       sandbox,
       subprocess,
+      standardTerminals,
       fixture,
       requests,
       get runtime() {

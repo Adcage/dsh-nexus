@@ -124,12 +124,27 @@ export interface ManagedProcess {
 /** UTF-8 pinning for PowerShell; the collector decodes output bytes as UTF-8. */
 const PWSH_ENCODING_PREAMBLE =
   '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
-
 /** Time budget of the PowerShell version probe; separate from command timeouts. */
 const PWSH_VERSION_PROBE_TIMEOUT_MS = 10_000
 
 /** The probe program: PowerShell prints its own major version. */
 const PWSH_VERSION_PROBE_COMMAND = '$PSVersionTable.PSVersion.Major'
+
+/**
+ * Windows status code an MSYS2 program exits with when a Win32 call was denied
+ * (`0xC0000022`, reported as an unsigned exit code).
+ */
+const WINDOWS_ACCESS_DENIED_STATUS = 3221225794
+
+/**
+ * The MSYS2 runtime's fatal startup line. Git Bash creates a shared-memory
+ * object under `\BaseNamedObjects` before the command is parsed, so a token
+ * that denies that creation kills the process before any shell builtin runs.
+ */
+const MSYS2_STARTUP_SIGNATURE = /NtCreateDirectoryObject\(\\BaseNamedObjects\\msys-[^)]*\): 0xC0000022/u
+
+/** Captured stderr characters kept in a startup-refusal diagnostic. */
+const STARTUP_STDERR_EXCERPT_CHARS = 400
 
 /**
  * Start one managed ordinary process.
@@ -573,6 +588,45 @@ function readStderrTail(handle: SubprocessHandle): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * Refuse a confined Windows Git Bash start that never reached the command.
+ *
+ * The harness confines `win32` commands through the `windows-acl` runner, whose
+ * restricted token denies the MSYS2 runtime the shared-memory object it creates
+ * at startup. Bash then exits with `0xC0000022` before parsing the command, so
+ * the model would otherwise see an opaque failed command it has no way to
+ * interpret — and retrying cannot help. The refusal fires only on all four
+ * facts together: a Windows bash start, a confinement the provider actually
+ * enforced, that exact status code, and the MSYS2 signature in captured stderr.
+ * A plain denial, an unconfined run, a pwsh start and a non-Windows host are
+ * never classified here, and no engine fallback is ever applied.
+ * @param managed - settled managed process of the start being reported.
+ * @param engine - engine that start selected.
+ * @param platform - host platform whose confinement dialect applies.
+ * @throws NexusError `UNSUPPORTED_CAPABILITY` naming the cause, the original status and a stderr excerpt.
+ */
+export function refuseConfinedBashStartupFailure(
+  managed: ManagedProcess,
+  engine: ShellEngine,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32' || engine !== 'bash') return
+  const sandbox = managed.sandbox
+  // `enforcement` exists only when a provider actually confined this run;
+  // `danger-full-access` and a composition without `ctx.sandbox` leave it absent.
+  if (sandbox === undefined || sandbox.enforcement === undefined) return
+  const exitCode = managed.view().exitCode
+  if (exitCode !== WINDOWS_ACCESS_DENIED_STATUS) return
+  const stderr = readStderrTail(managed.handle)
+  const signature = MSYS2_STARTUP_SIGNATURE.exec(stderr)
+  if (signature === null) return
+  const excerpt = stderr.trim().slice(0, STARTUP_STDERR_EXCERPT_CHARS)
+  throw new NexusError(
+    'UNSUPPORTED_CAPABILITY',
+    `Git Bash cannot start under this session's ${sandbox.mode} permission preset: the MSYS2 runtime was denied its shared-memory object and exited with status ${exitCode} (0xC0000022), so the command never ran. Choose engine "pwsh" explicitly for confined shell work on Windows; no engine fallback was applied. Captured stderr: "${excerpt}"`,
+  )
 }
 
 /** Render an unknown failure without letting its own stringification throw. */

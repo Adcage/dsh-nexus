@@ -12,8 +12,12 @@
  * installed, so the entry activates without the restart dance a running profile
  * needs. That is the cheapest way to prove the composition accepts the package.
  *
+ * It installs the PACKED TARBALL (`dist/<name>-<version>.tgz`, or `--tarball`),
+ * never the working directory: the tarball is the artifact a real installation
+ * consumes, so this profile proves that artifact instead of a linked tree.
+ *
  * Usage:
- *   node scripts/dev-profile.mjs init [--profile nexus-dev] [--cli <dsh>]
+ *   node scripts/dev-profile.mjs init [--profile nexus-dev] [--cli <dsh>] [--tarball <path>]
  *   node scripts/dev-profile.mjs boot [--port 19499] [--profile nexus-dev] [--cli <dsh>]
  *   node scripts/dev-profile.mjs dump       print the composed row
  *   node scripts/dev-profile.mjs remove --yes
@@ -30,7 +34,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url))
@@ -94,27 +98,61 @@ function runDsh(cli, args, options = {}) {
 }
 
 /**
- * Install this package into the isolated profile, which also creates the
- * profile from the shipped `web` template the first time.
+ * Resolve the packed tarball this script installs.
+ *
+ * The tarball is the artifact a real installation uses, so the isolated profile
+ * proves that artifact rather than a linked working directory. `--tarball`
+ * overrides the default location under `dist/`.
+ * @param configured - `--tarball` value, when supplied.
+ * @returns the absolute tarball path.
+ */
+function resolveTarball(configured) {
+  if (configured !== undefined) {
+    if (configured === true) {
+      console.error('dev-profile: --tarball needs a file path')
+      process.exit(2)
+    }
+    const resolved = isAbsolute(configured) ? configured : join(packageRoot, configured)
+    if (!existsSync(resolved)) {
+      console.error(`dev-profile: tarball ${resolved} does not exist`)
+      process.exit(2)
+    }
+    return resolved
+  }
+  const packaged = join(packageRoot, 'dist', `${manifest.name}-${manifest.version}.tgz`)
+  if (!existsSync(packaged)) {
+    console.error(
+      `dev-profile: no packed tarball at ${packaged}; run \`pnpm pack:plugin\` first, or pass --tarball <path>`,
+    )
+    process.exit(2)
+  }
+  return packaged
+}
+
+/**
+ * Install this package's packed tarball into the isolated profile, which also
+ * creates the profile from the shipped `web` template the first time.
  * @param cli - resolved CLI path or command name.
  * @param profile - profile name inside the isolated home.
  */
 function initialiseProfile(cli, profile) {
   const storeDir = join(devHome, '.pnpm-store')
+  const tarball = resolveTarball(tarballFlag)
   mkdirSync(devHome, { recursive: true })
   const created = runDsh(cli, ['--profile', profile, '--from-default-profile', 'web', '--dump-config'], { capture: true })
   if (created.status !== 0) {
     process.stderr.write(created.stderr ?? '')
     process.exit(created.status ?? 1)
   }
-  const added = runDsh(cli, ['plugin', '--profile', profile, 'add', packageRoot, `--config.store-dir=${storeDir}`], {
+  const added = runDsh(cli, ['plugin', '--profile', profile, 'add', tarball, `--config.store-dir=${storeDir}`], {
     capture: true,
   })
   if (added.status !== 0) {
     process.stderr.write(added.stderr ?? '')
-    console.error('dev-profile: the isolated profile could not install this package')
+    console.error('dev-profile: the isolated profile could not install the packed tarball')
     process.exit(added.status ?? 1)
   }
+  console.log(`dev-profile: installed ${tarball} into profile "${profile}"`)
 }
 
 /**
@@ -141,6 +179,7 @@ const { command, flags } = parseArgs(process.argv.slice(2))
 const cli = typeof flags.get('cli') === 'string' ? flags.get('cli') : (process.env.DSH_CLI ?? 'dsh')
 const profile = typeof flags.get('profile') === 'string' ? flags.get('profile') : DEFAULT_PROFILE
 const port = Number(flags.get('port') ?? DEFAULT_PORT)
+const tarballFlag = flags.get('tarball')
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`dev-profile: --port must be a TCP port, got ${String(flags.get('port'))}`)
@@ -179,8 +218,8 @@ switch (command) {
   default: {
     console.error(
       [
-        'usage: node scripts/dev-profile.mjs <init|boot|dump|remove> [--port N] [--profile NAME] [--cli PATH]',
-        '  init   create the isolated profile only; no server is started',
+        'usage: node scripts/dev-profile.mjs <init|boot|dump|remove> [--port N] [--profile NAME] [--cli PATH] [--tarball PATH]',
+        '  init   install the packed tarball into the isolated profile only; no server is started',
         '  boot   start the isolated profile on --port (default 19499)',
         '  dump   print the composed dsh-nexus row',
         '  remove delete the isolated home; requires --yes',

@@ -8,8 +8,6 @@
  * - it opens (or joins) the single {@link NexusRuntime} — one durable store, one
  *   committed settings record, one write coordinator, one prompt-session owner
  *   and one saved-result repository — and publishes it as `nexusRuntime`;
- * - it registers the isolated native terminal backends once, in the host realm
- *   where the terminal service lives, instead of once per preset generation;
  * - it detects which native mechanism the host realm already supplies and
  *   registers the fixed Nexus preset definition under the id `nexus`.
  *
@@ -26,7 +24,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config as NexusConfig } from './config.ts'
 import { createNexusPreset } from './preset/definition.ts'
 import { detectNativeComposition } from './preset/native.ts'
-import { registerTerminalBackends } from './shell/terminals.ts'
 import { NEXUS_RUNTIME_INJECT, openNexusRuntime } from './runtime/service.ts'
 import { registerRoutes } from './http/routes.ts'
 
@@ -61,12 +58,6 @@ export async function apply(ctx: Context, config: NexusConfig): Promise<void> {
   // Optional transport: a headless/CLI host still owns the same runtime/preset.
   // This narrower gate also declares the native registry needed on HTTP cold paths.
   ctx.inject(['webServer', 'agents'], (scope) => { registerRoutes(scope, runtime) })
-
-  // One registration per composed realm: the terminal service is a host
-  // service, so every Nexus generation consumes these same backends. Registering
-  // them per generation would be a native duplicate-backend failure.
-  const removeBackends = registerTerminalBackends(ctx, () => runtime.getShellConfig())
-  runtime.attach('terminal-backends', () => removeBackends())
 
   const native = detectNativeComposition(ctx)
   const definition = createNexusPreset(config, native)
