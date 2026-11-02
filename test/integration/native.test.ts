@@ -27,7 +27,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalDirectory } from '../../src/agent/coordination.ts'
 import { createNexusPreset, NEXUS_PRESET_ID } from '../../src/preset/definition.ts'
 import { openNexusRuntime, type NexusRuntime } from '../../src/runtime/service.ts'
-import { mountNexusStoreFixture } from '../support/fixtures.ts'
+import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
 import { mountPresetHarness, PRESET_ROUTE } from '../support/preset-harness.ts'
 
 /** The fixture skill the native provider discovers under the pinned agents home. */
@@ -290,34 +290,41 @@ describe('generation retirement', () => {
 
       // A restart over the same medium: the retired generation is gone, yet the
       // resolution refuses the tree. Absence is not a cleanup receipt.
+      //
+      // The restart sub-composition is guarded from the moment it is created: a
+      // mount or activation failure must not leak the context, the fixture store
+      // or the runtime it may already have opened.
       const restartedCtx = new Context()
-      const restartedFixture = await mountNexusStoreFixture({ ctx: restartedCtx, root: harness.fixture.root })
-      let restarted!: NexusRuntime
-      const row = restartedCtx.plugin({
-        name: 'nexus-restart-row',
-        inject: ['storageDomain'],
-        async apply(pluginCtx: Context): Promise<void> {
-          restarted = await openNexusRuntime(pluginCtx, {})
-        },
-      })
-      await row
+      let restartedFixture: NexusStoreFixture | undefined
+      let restarted: NexusRuntime | undefined
       try {
-        expect(restarted.coordinator.scopeOf(SessionId(childId))).toEqual({ root, state: 'unconfirmed' })
+        restartedFixture = await mountNexusStoreFixture({ ctx: restartedCtx, root: harness.fixture.root })
+        const row = restartedCtx.plugin({
+          name: 'nexus-restart-row',
+          inject: ['storageDomain'],
+          async apply(pluginCtx: Context): Promise<void> {
+            restarted = await openNexusRuntime(pluginCtx, {})
+          },
+        })
+        await row
+        const restartedRuntime = restarted
+        if (restartedRuntime === undefined) throw new Error('the restart row did not open the runtime')
+        expect(restartedRuntime.coordinator.scopeOf(SessionId(childId))).toEqual({ root, state: 'unconfirmed' })
         const rival = await harness.ctx.agents.create({
           sessionId: SessionId('post-retirement-writer'),
           meta: { cwd: harness.workspace },
           agentOptions: { ...PRESET_ROUTE },
         })
         try {
-          await expect(restarted.coordinator.acquire(rival.agent, SessionId('post-retirement-writer'), root)).rejects.toMatchObject(
+          await expect(restartedRuntime.coordinator.acquire(rival.agent, SessionId('post-retirement-writer'), root)).rejects.toMatchObject(
             { code: 'WRITE_SCOPE_BUSY' },
           )
         } finally {
           await rival.dispose()
         }
       } finally {
-        await restarted.dispose()
-        await restartedFixture.dispose()
+        await restarted?.dispose()
+        await restartedFixture?.dispose()
         await restartedCtx.fiber.dispose()
       }
       expect(harness.ctx.agentPresets.inspectCompositions().map((entry) => entry.id)).not.toContain(

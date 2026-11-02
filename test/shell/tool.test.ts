@@ -727,10 +727,14 @@ describe('shell run', () => {
 
   it('publishes a background run, keeps a wait timeout harmless, and separates stop from close', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
-    const started = valueOf(await shell.call({ action: 'run', command: 'long work', background: true }))
+    const startedResult = await shell.call({ action: 'run', command: 'long work', background: true })
+    const started = valueOf(startedResult)
     expect(started.background).toBe(true)
     expect(started.process?.status).toBe('running')
     const resourceId = started.process!.resourceId
+    // A timeout is a `wait` fact only: a non-wait action must not publish it.
+    expect(startedResult.meta).toMatchObject({ action: 'run' })
+    expect(startedResult.meta).not.toHaveProperty('timedOut')
 
     const status = valueOf(await shell.call({ action: 'status', resourceId }))
     expect(status).toMatchObject({ action: 'status', family: 'process', background: true })

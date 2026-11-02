@@ -22,6 +22,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { NEXUS_PRESET_ID, createNexusPreset } from '../../src/preset/definition.ts'
 import * as presetEntry from '../../src/preset/index.ts'
+import { WEB_SESSION_MAX_DOCUMENTS } from '../../src/runtime/defaults.ts'
 import type { NexusRuntime } from '../../src/runtime/service.ts'
 import { mountPresetHarness, PRESET_ROUTE, type PresetHarness } from '../support/preset-harness.ts'
 
@@ -115,12 +116,12 @@ describe('cross-generation web publication', () => {
           expect((await repository.read('publish-primary', firstId)).text).toContain('FIXTURE WEB BODY')
           expect((await repository.read('publish-secondary', secondId)).text).toContain('FIXTURE WEB BODY')
 
-          // Fill the primary owner to exactly the document cap.
+          // Fill the primary owner to exactly the documented document cap.
           let previous = firstId
           for (let index = 0; index < 31; index += 1) {
             previous = await fetchPage(harness, first, `https://fixture.test/primary-${index}`)
           }
-          expect((await runtime.store.listWeb('publish-primary')).length).toBe(32)
+          expect((await runtime.store.listWeb('publish-primary')).length).toBe(WEB_SESSION_MAX_DOCUMENTS)
 
           // Eight concurrent publications for the same owner: without one
           // serialized chain each could observe "a slot is free" and exceed the
@@ -133,7 +134,7 @@ describe('cross-generation web publication', () => {
           for (const result of concurrent) expect(result.isError, JSON.stringify(result)).toBe(false)
 
           const documents = await runtime.store.listWeb('publish-primary')
-          expect(documents.length).toBe(32)
+          expect(documents.length).toBe(WEB_SESSION_MAX_DOCUMENTS)
           // The oldest result is evicted; the retention rule stays enforced.
           await expect(runtime.webResults.read('publish-primary', firstId)).rejects.toMatchObject({
             code: 'RESOURCE_NOT_AVAILABLE',
@@ -286,8 +287,8 @@ describe('lifecycle and cleanup', () => {
       expect(harness.ctx.get('nexusRuntime')).toBeUndefined()
 
       // Dispose the whole composition, then check nothing survived it. The
-      // harness's own teardown asserts no tool/service registration survived;
-      // here the process-level facts are checked too.
+      // assertions below are the ones that check it — the harness teardown itself
+      // asserts nothing — and the process-level facts are checked here too.
       await harness.dispose()
       disposed = true
       expect(harness.ctx.get('tools')).toBeUndefined()
@@ -316,7 +317,10 @@ describe('lifecycle and cleanup', () => {
           activated = true
         },
       })
-      await new Promise((resolve) => setImmediate(resolve))
+      // A bounded multi-macrotask window (50 ms, far more than one turn): a single
+      // `setImmediate` would also pass if activation were merely slow, rather than
+      // impossible without the declared service.
+      await new Promise((resolve) => setTimeout(resolve, 50))
       expect(activated).toBe(false)
       expect(cold.tools.schemas()).toEqual([])
 

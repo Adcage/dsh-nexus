@@ -32,6 +32,34 @@ function readJson(path) {
 const failures = []
 
 /**
+ * Read the text of the `exclude` array a config declares for the test runner.
+ * Presence elsewhere in the file (for example in `include`) must not count.
+ * @param text - config contents.
+ * @returns the array text, or undefined when no such array is declared.
+ */
+function excludeArrayOf(text) {
+  const start = text.indexOf('exclude: [')
+  if (start === -1) return undefined
+  const end = text.indexOf(']', start)
+  return end === -1 ? undefined : text.slice(start, end + 1)
+}
+
+/**
+ * Describe whether a suite file carries cases that will really run: at least one
+ * plain `it(` and no focused or skipped case.
+ * @param text - suite file contents.
+ * @returns whether cases will run, and what was found.
+ */
+function caseShapeOf(text) {
+  const plain = /\bit\s*\(/.test(text)
+  const focused = /\.(only|skip)\s*\(/.test(text)
+  return {
+    ok: plain && !focused,
+    detail: `${plain ? 'plain it(' : 'no plain it('}; ${focused ? '.only/.skip present' : 'no .only/.skip'}`,
+  }
+}
+
+/**
  * Record a check and its outcome.
  * @param label - what is being checked.
  * @param passed - whether the check passed.
@@ -105,18 +133,25 @@ const integrationCases = [
 for (const file of integrationCases) {
   const present = existsSync(`${packageRoot}${file}`)
   const text = present ? readFileSync(`${packageRoot}${file}`, 'utf8') : ''
-  // A file with no case would make the suite a config-only pass.
-  check(`integration case ${file} has at least one test`, present && /\bit\(/.test(text), present ? 'present' : 'missing')
+  const shape = present ? caseShapeOf(text) : { ok: false, detail: 'missing' }
+  // A file with no runnable case would make the suite a config-only pass.
+  check(`integration case ${file} has a runnable test`, present && shape.ok, shape.detail)
 }
 const windowsCase = 'test/integration/windows.test.ts'
 for (const configFile of ['vitest.config.ts', 'vitest.integration.config.ts']) {
   const path = `${packageRoot}${configFile}`
   const text = existsSync(path) ? readFileSync(path, 'utf8') : ''
-  check(
-    `${configFile} excludes the Windows acceptance file`,
-    text.includes(windowsCase),
-    windowsCase,
-  )
+  const exclude = excludeArrayOf(text)
+  const excluded = exclude !== undefined && exclude.includes(windowsCase)
+  // The path must be excluded, not merely named: a config that listed it under
+  // `include` would still run it.
+  const detail =
+    exclude === undefined
+      ? 'no exclude array declared'
+      : excluded
+        ? windowsCase
+        : `${windowsCase} is not inside exclude`
+  check(`${configFile} excludes the Windows acceptance file`, excluded, detail)
 }
 
 if (failures.length > 0) {

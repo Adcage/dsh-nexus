@@ -605,9 +605,15 @@ export async function mountPresetHarness(options: PresetHarnessOptions = {}): Pr
         for (const handle of handles.splice(0).reverse()) await handle.dispose().catch(() => undefined)
         await nexusFiber?.dispose().catch(() => undefined)
         nexusFiber = undefined
-        await ctx.fiber.dispose()
-        restoreEnv()
-        await rm(root, { recursive: true, force: true })
+        try {
+          await ctx.fiber.dispose()
+        } finally {
+          // The env variables and the temp root are process/disk state shared by
+          // every later case in this fork: restore them even when one plugin's
+          // own dispose rejects, and let that original error surface.
+          restoreEnv()
+          await rm(root, { recursive: true, force: true })
+        }
       },
     }
   } catch (error) {
