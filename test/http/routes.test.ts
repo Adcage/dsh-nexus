@@ -116,6 +116,28 @@ describe('native console HTTP routes', () => {
     expect(await caps.json()).toMatchObject({ settingsLocation: { namespace: 'dsh-nexus', domain: 'dsh_nexus' }, verification: 'unverified', basePrompt: BASE_PROMPT })
   })
 
+  it('reports live native backend registrations without claiming readiness or starting backend work', async () => {
+    const { h, runtime, send } = await open()
+    const writes = h.fixture.listWrites().length
+    const response = await send('capabilities')
+    expect(response.status).toBe(200)
+    const capabilities = await response.json() as { backendRegistrations: unknown }
+    expect(capabilities.backendRegistrations).toEqual({
+      scope: 'effective-http-context',
+      terminal: { service: 'present', backends: { state: 'registered', names: ['nexus-bash', 'nexus-pwsh'] }, readiness: 'unverified' },
+      web: { service: 'present', backends: { state: 'unknown', names: null }, readiness: 'unverified' },
+      internalAgent: { service: 'present', backends: { state: 'registered', names: ['spawn', 'fork'] }, readiness: 'unverified' },
+    })
+    expect(h.ctx.nexusRuntime).toBe(runtime)
+    expect(h.ctx.agents.list()).toHaveLength(0)
+    expect(h.requests).toHaveLength(0)
+    expect(h.web.searches).toHaveLength(0)
+    expect(h.web.fetches).toHaveLength(0)
+    expect(h.subprocess.spawns).toHaveLength(0)
+    expect(h.subprocess.terminalSpawns).toHaveLength(0)
+    expect(h.fixture.listWrites()).toHaveLength(writes)
+  })
+
   it('commits durably, refuses stale windows and preserves committed state on medium failure', async () => {
     const { h, runtime, send, token } = await open()
     const auth = await token()

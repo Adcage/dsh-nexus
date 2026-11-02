@@ -70,11 +70,27 @@ export interface PromptApplyRequest { readonly selection: readonly string[]; rea
 export interface ConsoleSession { readonly id: string; readonly title: string }
 /** Every HTTP failure uses this shape; infrastructure details stay on the host. */
 export interface ConsoleError { readonly error: { readonly code: string; readonly message: string } }
+/** Public registration metadata only; unknown names are null, not an empty registry. */
+export interface ConsoleBackendRegistration {
+  readonly service: 'present' | 'absent' | 'unknown'
+  readonly backends:
+    | { readonly state: 'registered' | 'absent'; readonly names: readonly string[] }
+    | { readonly state: 'unknown'; readonly names: null }
+  readonly readiness: 'unverified'
+}
+
 /** Registration facts do not claim OS, account, GUI or provider verification. */
 export interface ConsoleCapabilities {
   readonly csrfToken: string
   readonly verification: 'unverified'
   readonly registered: { readonly consoleApi: true; readonly nexusRuntime: true }
+  readonly backendRegistrations: {
+    /** Facts are limited to the route's current effective service scope, never global absence. */
+    readonly scope: 'effective-http-context'
+    readonly terminal: ConsoleBackendRegistration
+    readonly web: ConsoleBackendRegistration
+    readonly internalAgent: ConsoleBackendRegistration
+  }
   readonly diagnostics: readonly string[]
   readonly settingsLocation: { readonly namespace: 'dsh-nexus'; readonly domain: 'dsh_nexus' }
   readonly basePrompt: string

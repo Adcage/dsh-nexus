@@ -14,6 +14,7 @@ import { NexusError } from '../runtime/errors.ts'
 import type { NexusRuntime } from '../runtime/service.ts'
 import { NEXUS_DOMAIN_NAME, runtimeSettingsSchema } from '../storage/domain.ts'
 import { guardConsoleRequest, guardConsoleWrite, HttpError, readConsoleJson } from './guards.ts'
+import { inspectBackendRegistrations } from './capabilities.ts'
 
 const saveShape = z.strictObject({ value: z.unknown(), expectedHash: z.string().min(1) })
 const previewShape = z.strictObject({ library: z.unknown(), selection: z.array(z.string()) })
@@ -155,6 +156,7 @@ export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void 
           } else result = runtime.prompts.peek(exact)
         } else {
           result = { csrfToken: token, verification: 'unverified', registered: { consoleApi: true, nexusRuntime: true },
+            backendRegistrations: inspectBackendRegistrations(ctx),
             diagnostics: ['Registration only; OS backends, providers, accounts and GUI have not been verified.'],
             settingsLocation: { namespace: 'dsh-nexus', domain: NEXUS_DOMAIN_NAME }, basePrompt: BASE_PROMPT } satisfies ConsoleCapabilities
         }
