@@ -2,7 +2,23 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 当前：0.1.7 工具调用显示修复（启动窗口／文案／重试）
+## 0. 当前：0.1.8 工具调用显示修复二（设置读取落定信号／警告去重）
+
+状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只关两份复查（`task-14-tool-display-spec-rereview-r1.md`、`task-14-tool-display-quality-rereview-r1.md`）对 0.1.7 修复本身点到的两处「波及面」风险，外加文档；没有新增页面、端点、依赖，卡片标记、工具名、已记录事实、折叠结构、工具 schema 与字典键一律未改。日常 `web` Profile 已用官方管理器装到 0.1.8，但**没有**重启、刷新或重载用户的应用／浏览器／会话，实际渲染仍是待用户重载，本节不是最终验收。
+
+- P2（全局提示被当成设置信号）：0.1.7 用 `snapshot.notice === 'error'` 判断「设置读取失败」；但 `notice` 是 store 级提示，任何请求失败都会发布它，包括 `readLibrary`。于是「库读取先失败、设置 GET 还在路上」时，客户端会退回 `nexus` 并占用 rank 0，正好把上一波关掉的启动窗口又打开（第三方以默认等级注册同名 key 时会因同 key 同优先级抛错）。现在 store 新增快照字段 `settingsSettled`：设置请求成功（`acceptSettings`）与失败（`readSettings` 的 `catch`）两处都置真；`src/client/index.tsx` 的退回条件改为它，不再看全局 `notice`。语义保持不变：模式未知（无草稿、无已保存值、设置读取也没落定）时不注册任何单元格；读取落定且失败才退回 `nexus`；读取成功按存储模式注册。
+- 同波加固（如实披露，是本波唯一超出「两处小修」的改动）：如果 refresh 第一段（capabilities／sessions）就失败，原来的代码根本不会去读设置，`settingsSettled` 会永远为假，于是「控制台 API 完全不可用」的组合里 Nexus 卡片会永久消失（0.1.7 靠全局 `error` 退回还能显示）。为不制造新的波及面，`refresh()` 现在把两处读取放在 roster 段之后单独执行：roster 失败只发布既有错误提示，两个读取照旧运行，所以设置读取一定会落定，退回语义在降级路径上同样可达。依赖「无宿主」的两套回归用例（`test/client/tool-views.test.ts` 16 条、`test/bundle/loader.test.ts` 17 条）改前改后都通过，未作改动。
+- P2（警告刷屏）：`ctx.slots.inject` 被拒绝时仍不把模式记为已应用（后续发布继续重试，0.1.7 的行为保留），但警告改成「每个请求模式只报一次」：记下 `warned`，模式没变就不再重复打印；请求的模式真正变化时（`mode !== requested`）清空闩锁，所以问题修好后再次被拒仍会重新告警。用例同时断言「每次发布仍在重试」（注入次数 +2）与「警告数仍为 1」，模式切换后警告数变 2。
+- TDD（先失败）：改源码前新增 2 条用例并真实失败——`expected [ 'shell', 'web', 'agent' ] to deeply equal [ 'shell' ]`（库读取失败、设置读取被挂起时 Nexus 抢占了 rank 0）与 `expected 2 to be 1`（读取落定时已经重复警告两次）。日志 `tmp/task14-tool-display-fix2/red-client-1.log`（2 failed / 13 passed）；改后 `green-client-1.log` 15/15。
+- 聚焦回归：`pnpm exec vitest run test/client` **8 文件 / 66 测试通过**（`focused-client-2.log`）；`pnpm build` 后 `pnpm exec vitest run test/bundle` **2 文件 / 17 测试通过**（`bundle-loader.log`）；`pnpm typecheck` exit 0。
+- 最终门禁只跑一次：`pnpm pack:plugin`（typecheck → build → 默认套件 → 包检查）**43 文件 / 609 测试，exit 0**，产物 `dist/dsh-nexus-0.1.8.tgz` = **464,117 字节、15 个成员、SHA-256 `f3513b5f652136543be5e1d43b5ffa0cdfd8c16743350023a5db63ef4a43e835`**（`tmp/task14-tool-display-fix2/pack.log`）。`pnpm verify:runtime` exit 0（`dsh-nexus 0.1.8 targets dsh 0.2.1-rc.2`，`verify-runtime.log`）。集成 16／Windows 13 仍是 651604b 的历史证据，本波按范围没有重跑。
+- 产物可重建：包由提交 `da9f687` 的树打出；15 个成员中 14 个与工作树逐字节相同（只有 `package.json` 因 pnpm pack 规范化字段顺序差 1 字节：6352 vs 6353，属打包器行为，与 0.1.6／0.1.7 同）；同一棵提交树再 `pnpm build` 一次，11 个 `lib/` 成员**全部逐字节相同**（`members-after-rebuild.json`）；再用 `pnpm pack` 打到临时目录，两个 tarball 的 SHA-256 **完全相同**（`f3513b5f…`，`repack.log`）。
+- 日常安装：唯一命令 `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.8.tgz`，2026-11-02T16:16:26Z 开始、16:16:32Z 结束，**真实 exit 0**；完整 stdout/stderr 在 `tmp/task14-tool-display-fix2/official-install-output.log`，exit 单独存 `official-install-exit.txt`。输出是既有的 peer 警告与 `Packages: +3 -2`、`Done in 2.5s`。安装前后：21 个声明依赖、23 条 bundle、`dsh-nexus` 只有一条；15/15 tarball 成员与 `node_modules/dsh-nexus` 下文件逐字节相同（含 packed `package.json` 与内嵌 CSS 的 `lib/client.js`）；除 Nexus spec 更新为 0.1.8 外，Profile manifest 无其它语义变化，其余 20 个声明包的安装版本与 manifest hash 均未变（`before-inventory.json`／`after-inventory.json`）。安装前后 127.0.0.1:3080（PID 23616）与 18787（PID 34640）监听完全不变，62699 前后都没有监听；未重启、未终止、未刷新用户的应用／浏览器／会话。状态因此是 `INSTALLED_PENDING_USER_RELOAD`：只证明安装落盘，不证明已打开的页面用了新 JavaScript。
+- 残余限制（本轮明确记录、不修）：设置 GET **永远不返回**时，客户端拿不到「设置读取落定」，于是不注册任何 Nexus 卡片，宿主自己的通用卡片继续渲染——这是「等模式」的固有代价。本波不加请求超时，因为 `src/client/api.ts` 的 `request()` 被每个调用共用，新增 abort 路径比本波大，应作为独立任务。0.1.7 已披露的另一条限制不变：设置读取**落定失败**时仍按 `nexus` 退回 rank 0（用户能看到 store 的既有错误提示），所以那种错误场景下原本的互撞风险仍然存在。
+- 英文说明仍是推断：`en.json` 的 `roughly “Tool call · run”` 来自「宿主把名字当未知工具、用第一个字符串参数当摘要」的既有事实，**没有**在英文宿主上截过真实渲染，所以保持 hedge 措辞，本波未改文案。
+- **没有证明的事**：本轮没有重启应用，所以没有新的真实浏览器／像素证据；启动窗口时序只在 jsdom 里对真实 `SlotRegistry` 证明，没有在真实页面启动、真实第三方皮肤组合下证明；0.1.6 的隔离 Profile 台账仍是三个模式**稳态**的浏览器证据。真实模型产生的卡片外观、DPI／zoom、账号／模型、图像／web／子 Agent／AC-17 仍未验证；AC-07 受限 Git Bash 环境阻塞不变。本轮未作交付、接受、推送或合并。
+
+## 历史：0.1.7 工具调用显示修复（启动窗口／文案／重试）
 
 状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RELOAD**。本波只修两份评审（`task-14-tool-display-spec-review.md` 的 1 个 P1 与 2 个 P2）指出的问题，没有新增功能、页面、端点或依赖，卡片标记、工具名、已记录事实与折叠结构一律未改。日常 `web` Profile 已用唯一官方命令装到 0.1.7，但**没有**重启、刷新或重载用户的应用／浏览器／会话；实际渲染仍是待用户重载，本节不是最终验收。
 
