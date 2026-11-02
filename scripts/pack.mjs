@@ -46,7 +46,9 @@ if (destination === undefined) {
 }
 
 mkdirSync(`${packageRoot}${destination}`, { recursive: true })
-runPnpm(['run', 'build'])
+// `check` is typecheck + build + the offline suite, in that order: a tarball is
+// only produced from a tree that passes the gates the docs promise.
+runPnpm(['run', 'check'])
 runPnpm(['pack', '--pack-destination', destination])
 
 const tarball = `${packageRoot}${destination}/${manifest.name}-${manifest.version}.tgz`

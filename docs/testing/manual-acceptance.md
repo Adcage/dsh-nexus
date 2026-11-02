@@ -2,7 +2,7 @@
 
 本文是 **真实运行验收** 的操作手册，和自动化证据分层，不能互相冒充。自动化能证明什么、不能证明什么，写在最后。示例命令都在仓库根目录执行，且只操作项目内目录或一个**独立的** DSH Profile；不要动日常使用的 Profile，也不要手工修改 Profile 文件。
 
-当前版本：`dsh-nexus` 0.1.0，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。
+当前版本：`dsh-nexus` 0.1.1，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。
 
 ## 0. 先决条件
 

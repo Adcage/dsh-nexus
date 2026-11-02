@@ -127,4 +127,52 @@ describe('Nexus terminal capability in the deployed profile shape', () => {
       await harness.dispose()
     }
   }, 120_000)
+
+  it('retires a generation that still owns an open terminal and never revives its resource id', async () => {
+    const harness = await mountPresetHarness({
+      terminalScript: () => ({ stdout: 'nexus-prompt$ ', staysOpen: true }),
+    })
+    try {
+      await harness.startNexus()
+      const first = await harness.createAgent('terminal-scope-retire', NEXUS_PRESET_ID)
+      await harness.runTurn(first, 'retire')
+      const opened = valueOf<ShellValue>(await harness.call('shell', { action: 'open', engine: 'bash' }, first))
+      const retiredId = opened.terminal?.resourceId
+      expect(retiredId).toMatch(/^nexus-term-/u)
+      const spawnsBefore = harness.subprocess.terminalSpawns.length
+
+      // The generation is retired while the terminal is still OPEN: no explicit
+      // close precedes it, so the generation's own disposal must own the cleanup.
+      await harness.disposeAgent(first)
+      expect(harness.standardTerminals.listBackends()).toEqual([])
+      expect(harness.ctx.get('terminals')).toBeUndefined()
+
+      // A fresh generation starts with its own registry: it did not inherit the
+      // retired instance (no second terminal source appeared).
+      const second = await harness.createAgent('terminal-scope-retire-2', NEXUS_PRESET_ID)
+      await harness.runTurn(second, 'next')
+      expect(harness.subprocess.terminalSpawns.length).toBe(spawnsBefore)
+      expect(harness.standardTerminals.listBackends()).toEqual([])
+
+      // The retired resource id is not reusable by another generation.
+      const stale = await harness.call('shell', { action: 'status', resourceId: retiredId }, second)
+      expect(stale.isError).toBe(true)
+      expect(stale.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      const listed = valueOf<ShellValue>(await harness.call('shell', { action: 'list' }, second))
+      expect(listed.terminals).toEqual([])
+
+      // The same holds across a host-row restart, so a reload cannot resurrect it.
+      await harness.stopNexus()
+      await harness.startNexus()
+      const third = await harness.createAgent('terminal-scope-retire-3', NEXUS_PRESET_ID)
+      await harness.runTurn(third, 'after restart')
+      const stillStale = await harness.call('shell', { action: 'status', resourceId: retiredId }, third)
+      expect(stillStale.isError).toBe(true)
+      expect(stillStale.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      expect(harness.ctx.get('terminals')).toBeUndefined()
+      expect(harness.standardTerminals.listBackends()).toEqual([])
+    } finally {
+      await harness.dispose()
+    }
+  }, 120_000)
 })

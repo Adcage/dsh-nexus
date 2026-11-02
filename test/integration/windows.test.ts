@@ -519,7 +519,9 @@ describe('real Windows shell acceptance', () => {
           'terminal send (read back)',
         ),
       )
-      expect(echoed.text ?? '').toBeDefined()
+      // The send settles with the shell's own echo of the command; the marker
+      // value below is what proves the terminal kept its state across sends.
+      expect(echoed.text ?? '').toContain('NEXUS_MARK')
       const page = valueOf<TerminalValue>(await withBound(shell.call({ action: 'read', resourceId }), 20_000, 'terminal read'))
       expect(page.text ?? '').toContain('mark=kept')
     } finally {

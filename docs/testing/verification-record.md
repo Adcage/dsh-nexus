@@ -3,8 +3,8 @@
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
 - 仓库：`E:/Programme/Project/dsh-nexus`，分支 `dev/nexus-core`
-- 包版本：`dsh-nexus` 0.1.0；目标运行时 DSH `0.2.1-rc.2`
-- 安装产物：`dist/dsh-nexus-0.1.0.tgz`（454,903 字节，SHA-256 `442120381680598b2deabd46f66e9c3b6ea6210ac44f57e86341895ba4a5f66b`）
+- 包版本：`dsh-nexus` 0.1.1；目标运行时 DSH `0.2.1-rc.2`
+- 安装产物：`dist/dsh-nexus-0.1.1.tgz`（455,568 字节，15 个成员，SHA-256 `46779344b6fda34703ebcd5798d2b84a482dd5f2b7e2d9759f54bb5750220b29`）；0.1.0 的旧产物保留在 `dist/` 仅作历史，不再安装
 - 执行环境：Windows `win32`，Node v24.22.0，pnpm 10.18.1，Git for Windows 2.48.1（bash 5.2.37 x86_64-pc-msys），PowerShell 7
 
 本文不含凭据、令牌、私有对话内容或环境快照。
@@ -16,7 +16,7 @@
 | 包身份／patch 行／client 注册／脚本接线 | `pnpm verify:runtime` | 通过；`manifest, patch row and client bundle agree` |
 | 宿主 + 浏览器类型检查 | `pnpm typecheck`（`pnpm check` 第一步） | 通过 |
 | 三入口构建 | `pnpm build`（9 个产物，含 `lib/index.js`、`lib/client.js`、`lib/preset/index.js`） | 通过 |
-| 打包内容检查 | `pnpm pack:plugin` | 通过；14 个成员，`package.json`、`cordis.patch.yml`、`README.md`、`lib/index.js`、`lib/client.js`、`lib/preset/index.js` 均在包内，无未声明根目录；`LICENSE` 在 `files` 中声明但仓库里不存在（见残留风险） |
+| 打包内容检查 | `pnpm pack:plugin`（现在先跑 `pnpm run check`，再打包并校验成员） | 通过；15 个成员，`package.json`、`cordis.patch.yml`、`README.md`、`LICENSE`、`lib/index.js`、`lib/client.js`、`lib/preset/index.js` 均在包内，无未声明根目录，也没有「声明了但仓库里没有」的条目 |
 
 ## 2. 离线行为
 
@@ -25,6 +25,9 @@
 | 默认离线套件 | `pnpm test`（`pnpm check` 内） | 40 个文件 / 575 个测试通过 |
 | 新增：受限 Git Bash 拒绝分类（5 个回归） | `npx vitest run test/shell/process.test.ts` | 27 个测试通过（含 5 个新增：命中特征、普通非零退出不命中、未受限不命中、pwsh 不命中、非 Windows 不命中） |
 | 新增：工具管线上的受限 Git Bash 拒绝 | `npx vitest run test/shell/tool.test.ts` | 28 个测试通过（`UNSUPPORTED_CAPABILITY`，消息含原始状态码与 `pwsh` 提示） |
+| 新增：生成域退役时仍有打开的终端 | `npx vitest run --config vitest.integration.config.ts test/integration/terminal-scope.test.ts` | 4 个测试通过（含退役场景：无显式 close 时退役生成域，旧 `resourceId` 在新生成域与宿主行重启后都不可用，兄弟实例无后端、无宿主级 `terminals`） |
+
+> 证据保留说明：受限 Git Bash 拒绝的**首次失败日志没有保留**（最早的 `task14-check-*.log` 已经是全绿的 27/28）。可核查的最早证据是绿跑，加上结构事实——`refuseConfinedBashStartupFailure` 在 BASE `2dff7df` 中并不存在，因此该回归在 BASE 上必然失败。此后按「保留首次失败」执行。
 
 ## 3. 集成（真实 Cordis 组合、受控模型边界）
 
@@ -75,23 +78,49 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 
 | 项 | 操作 | 结果 |
 | --- | --- | --- |
-| 官方安装命令 | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.0.tgz` | 成功；profile `dependencies` 增加 `"dsh-nexus": "file:…/dist/dsh-nexus-0.1.0.tgz"`，`dsh.profile.bundles` 追加 `dsh-nexus` |
-| 安装告警 | 同上输出 | pnpm peer 警告：`dsh-nexus` 的 `@deepseek-ai/*` peer 在 profile 目录里「missing peer」（运行时由 DSH 安装目录提供，非失败）；未修改任何 Profile 文件 |
-| 组合行 | `dsh --profile web --dump-config` | `- id: dsh-nexus` / `name: dsh-nexus`，单条（第 1398 行附近） |
-| 真实启动 | `dsh --profile web --no-open --port 19500` | 监听 127.0.0.1:19500（PID 29060，已停止） |
-| 页面与 client bundle | `GET /` 后取该组合包 | 200；页面 preload 含 `dsh-nexus/client.js`；组合包 200 / 212,750 字节，`id: "dsh-nexus"` |
-| 带护栏 API | `GET /api/dsh-nexus/capabilities|library|sessions` | 200；`registered.nexusRuntime=true`（宿主行在真实 Profile 中已激活）；`library` 空库；`sessions` `[]` |
-| 启动日志 | 该次 boot 输出 | 没有 dsh-nexus 相关错误；日志里的 `usage-billing` 警告来自用户已装第三方插件对历史会话的读取，与本插件无关 |
+| 官方安装命令（0.1.0） | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.0.tgz` | 成功；`dependencies` 增加 `"dsh-nexus": "file:…/0.1.0.tgz"`，`dsh.profile.bundles` 追加 `dsh-nexus` |
+| 官方安装命令（0.1.1 重装） | `dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.1.tgz` | 成功；spec 更新为 `file:…/0.1.1.tgz`，`node_modules/dsh-nexus` 版本 0.1.1，`bundles` 23 条（用户原有 22 + `dsh-nexus`），只有一条 `dsh-nexus` |
+| 安装告警 | 两次安装输出 | pnpm peer 警告：`dsh-nexus` 的 `@deepseek-ai/*` peer 在 profile 目录里「missing peer」——运行时由 DSH 安装目录提供，不是失败；未手改 Profile 文件 |
+| 组合行 | `dsh --profile web --dump-config` | `- id: dsh-nexus` / `name: dsh-nexus`，单条 |
+| 真实启动 | `dsh --profile web --no-open --port 19500` | 监听 127.0.0.1:19500；0.1.0 验证 PID 29060、0.1.1 验证 PID 73368，两次都由我停止 |
+| 页面与 client bundle | `GET /` 后取该组合包 | 200；页面 preload 含 `dsh-nexus/client.js`；组合包 200 / 212,750 字节，首行 `window.__ModuleLoader__.load({ id: "dsh-nexus"` |
+| 带护栏 API | `GET /api/dsh-nexus/capabilities|library|sessions` | 200；`registered.nexusRuntime=true`；`library` 空库；`sessions` 在创建会话前 `[]`、创建后列出该会话；跨站 `Origin` 404/403 被拒 |
+| 启动日志 | 两次 boot 输出 | 没有 dsh-nexus 相关错误；日志里的 `usage-billing` 警告来自用户已装第三方插件读取历史会话，与本插件无关 |
 | 其他会话 | boot 前后 | 启动前无 DSH 进程；只启动并停止了本次 PID，未中断其他会话 |
 
-**未做**：profile 内的 `pnpm` 调用、手改 `package.json`／`cordis.patch.yml`、账号切换、凭据复制、发布／推送／合并、修改用户已有的 `pet`／`dsh-proxy-router` 漂移。
+### 6.1 安装的依赖变化（披露）
+
+安装 0.1.0 时 pnpm 报告 `Packages: +5 -2`，重装 0.1.1 时报告 `Packages: +1 -2`。逐项核对如下：
+
+- `+5` = `dsh-nexus` 本身加它的四个运行期依赖 `turndown`、`@joplin/turndown-plugin-gfm`、`@mixmark-io/domino`、`zod`（重装时这四项已在，只有 `+1` 个新 tarball）。
+- `-2` = pnpm 从 profile 的 `node_modules` 中清掉两个**不在清单里**的残留包（pnpm 的 extraneous 修剪），不是用户声明的插件。
+- 核对：`dsh plugin --profile web list` 显示 21 条声明依赖全部在位；逐条检查 `node_modules/<name>/package.json` 也是 21/21 存在、0 缺失。没有用户插件被移除。
+
+### 6.2 真实 Nexus 会话（无模型、无账号）
+
+在不发送任何消息、因此不产生模型请求的前提下，用应用自己的 session-controller 接口创建 Nexus 会话并读回（脚本 `tmp/task14fix1-nexus-session.mjs`，本地产物，未提交；0.1.0 与 0.1.1 各跑一次，结果一致）：
+
+| 步骤 | 调用 | 观察 |
+| --- | --- | --- |
+| 1 | `GET /?token=…`（启动令牌换 Cookie） | 303，取得浏览器 Cookie |
+| 2 | `POST /api/session/create`，payload `{args:{request:{cwd:"…/tmp/task14fix1-workspace", agentPreset:"nexus"}}}` | `{"sessionId":"session-…","agentPreset":"nexus"}`——应用自己确认该会话按 `nexus` 预设创建 |
+| 3 | `GET /api/dsh-nexus/sessions` | 200，列出该会话 id——产品自身的 `runtime.isNexusAgent` 为真，说明 **Nexus 预设行已激活并登记了这个 Agent** |
+| 4 | `GET /api/dsh-nexus/sessions/<id>/prompt` | 200，返回该会话的提示词快照，正文即 Nexus persona 原文（`你是一名运行在 DeepSeek Harness（DSH）…`） |
+| 5 | `POST /api/pluginInventory/list` | `dsh-nexus` 宿主行 `fiberPhase: "active"`；`nexus` 预设组合里 `dsh-nexus/preset` 以及 `agent-instructions`、`skill-filesystem`、`tool-skill`、`tool-ask-user`、`tool-todo`、三个压缩模块全部 `fiberPhase: "active"` |
+| 6 | `POST /api/session/list` | 该会话 `blank: true`、`running: false`，`cwd` 是本次临时工作区 |
+| 7 | `POST /api/session/projections` | 原生投影 `agentPreset: "nexus"`、`permissions.currentValue: "danger-full-access"`（未改动用户权限预设） |
+| 8 | `POST /api/session/cancel` | `{"accepted":true}`；随后停掉应用，并删除本次探针创建的空白会话目录（`~/.dsh/sessions/--E-Programme-Project-dsh-nexus-tmp-task14fix1-workspace--/`，只含这两次探针的会话） |
+
+这一步证明了「组合行存在」之外的关键事实：**安装后的真实 Profile 里，Nexus 预设生成域确实激活、登记了会话、并提供了 persona 提示词**。
+
+同一模型无关探针**不能**证明六件工具名与「请求中实际出现的系统层」：那两者只在一次真实请求（模型调用，使用用户账号）或 GUI 中可见，见 §8。
 
 ## 7. 逐 AC 结论
 
 | AC | 证据 | 结论 |
 | --- | --- | --- |
 | AC-01 | tarball 成员检查；隔离与真实 Profile 的 `dsh-nexus` 组合行；预设只新增 `nexus`（集成测试断言 `standard` 未改） | 已验证（安装与组合） |
-| AC-02 | 集成：真实定义、同 scope 六工具、第三方同名工具并存可调用 | 已验证（测试层）。运行中的真实 Nexus 会话内的工具清单：**未验证**，需要用户在 GUI 里新建 Nexus 会话（本机无浏览器自动化，且模型调用需要用户账号） |
+| AC-02 | 集成：真实定义、同 scope 六工具、第三方同名工具并存可调用；§6.2：安装后的真实 Profile 里用 `session/create` 建 Nexus 会话，`/api/dsh-nexus/sessions`、`/prompt`、`pluginInventory` 都证明预设行与生成域已激活 | 已验证到「生成域激活 + persona 快照」；**六个工具名的运行时清单未验证**：无只读接口可枚举某个生成域的工具 schema，观察它们需要一次真实模型请求或 GUI 目视，列入 §8 用户步骤 |
 | AC-03 | 离线行为测试（分页、图片附件、目标模型能力检查） | 已验证（测试层）。真实模型送图的实机效果：**未验证**（需要用户账号与实际模型） |
 | AC-04 | 离线行为测试（观察守卫、多处编辑、字节/原子失败） | 已验证（测试层） |
 | AC-05 | 离线 + Windows 真实 ConPTY（持久状态）与普通命令（独立状态）对照 | 已验证（含真实 ConPTY） |
@@ -102,7 +131,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 | AC-10 | 集成：技能目录/正文、`ask_user_question`、`todo_write` 真实往返 | 已验证（测试层） |
 | AC-11 | 集成：任务内子 Agent 启动/查看/介入；Windows 套件证明真实进程树；真实 GUI 中的子 Agent 面板：**未验证** | 部分验证 |
 | AC-12 | 集成：通信状态、通知回收、写协调 | 已验证（测试层） |
-| AC-13 | 集成：系统提示词层与其他贡献进入真实请求 | 已验证（测试层）。真实模型请求中的实际系统层：**未验证**（无账号调用） |
+| AC-13 | 集成：系统提示词层与其他贡献进入真实请求；§6.2：真实会话的提示词快照返回 Nexus persona 原文 | 已验证（测试层 + 真实会话快照）。一次真实模型请求里系统层的实际顺序与 token：**未验证**（需要用户账号；本次刻意不发送消息） |
 | AC-14 | 集成：默认隔离、下一请求生效、会话恢复原文 | 已验证（测试层） |
 | AC-15 | 客户端 jest-dom/标记渲染测试覆盖五个子页与无版本/对比/更新 UI；**真实页面与双主题：未验证**，需要用户目视 | 部分验证 |
 | AC-16 | 集成：具体第三方插件（工具、系统提示词段、压缩适配）通过；真实第三方安装到日常 Profile 的兼容性：**未验证** | 部分验证 |
@@ -111,7 +140,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 
 ## 8. 需要用户目视或使用真实账号的项目
 
-1. 在运行中的 DSH 里新建一个 Nexus 会话，确认六个 Nexus 工具与 persona 生效（AC-02/AC-13）。
+1. 在运行中的 DSH 里新建一个 Nexus 会话，确认六个 Nexus 工具（`read`、`write`、`edit`、`shell`、`web`、`agent`）出现在请求里并能调用一次 `shell`（AC-02/AC-13）。生成域激活与 persona 快照已由 §6.2 无模型证明；工具清单只能从一次真实请求或 GUI 看到。
 2. 五个子页与浅色/深色主题（AC-15）。
 3. 真实模型的图片送入与联网搜索/抓取（AC-03/AC-08/AC-09）。
 4. 真实第三方插件在本 Profile 中的兼容结论（AC-16）。
