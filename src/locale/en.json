@@ -88,6 +88,7 @@
   "toolStageEmpty": "No recorded output — not proof of completion",
   "toolArgs": "Recorded arguments",
   "toolOutput": "Recorded output",
+  "toolDetails": "Recorded facts and output",
   "toolOutputTruncated": "This preview is cut; the recorded call in the session log still holds the rest.",
   "toolNonTextBlocks": "Recorded non-text blocks not shown here:",
   "toolFailure": "Recorded error",

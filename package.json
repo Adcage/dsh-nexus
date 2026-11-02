@@ -1,6 +1,6 @@
 {
   "name": "dsh-nexus",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Nexus preset, core tools, system-prompt modules and console for the DeepSeek Harness",
   "keywords": [
     "deepseek-harness",

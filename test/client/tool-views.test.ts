@@ -131,6 +131,23 @@ function recorded(tool: string, phase: string, block: Record<string, unknown>) {
   return { callId: 'call-1', toolName: tool, phase, block, t: (key: keyof typeof en) => en[key] }
 }
 
+/**
+ * The text a reader sees before opening any disclosure: everything outside a
+ * closed `<details>` subtree. `textContent` alone cannot tell a folded fact from
+ * a visible one.
+ */
+function visibleText(node: Node): string {
+  let text = ''
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) text += child.textContent ?? ''
+    else if (child instanceof Element) {
+      if (child.tagName === 'DETAILS' && !(child as HTMLDetailsElement).open) continue
+      text += visibleText(child)
+    }
+  }
+  return text
+}
+
 function resultBlock(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     kind: 'tool-result',
@@ -263,6 +280,95 @@ describe('Nexus tool views', () => {
     expect(failure!.querySelector('code')).toBeNull()
     expect(failure!.textContent).toBe(en.toolFailure)
     withoutDetails.unmount()
+  })
+
+  it('shows only the title, stage, argument summary and failure line until the card disclosure opens', async () => {
+    const client = await mountClient()
+    client.declare()
+    const shell = viewOf(client.slots, 'shell')
+    const card = await render(shell, recorded('shell', 'result', resultBlock({
+      isError: true,
+      error: { name: 'NexusError', code: 'SHELL_UNAVAILABLE', reason: 'no Git Bash executable was found' },
+      meta: { action: 'run', status: 'exited', resourceId: 'proc-7' },
+    })))
+    const visible = visibleText(card.node)
+    expect(visible).toContain(en.toolTitleShell)
+    expect(visible).toContain(en.toolStageFailed)
+    expect(visible).toContain('echo hi')
+    expect(visible).toContain(en.toolFailure)
+    expect(visible).toContain('SHELL_UNAVAILABLE')
+    expect(visible).toContain('no Git Bash executable was found')
+    // Every recorded fact, the recorded output and the replay note stay on the
+    // card, but folded into the one disclosure instead of the default view.
+    expect(visible).not.toContain('exited')
+    expect(visible).not.toContain('proc-7')
+    expect(visible).not.toContain('<output>hi</output>')
+    expect(visible).not.toContain(en.toolReplayNote)
+    const disclosures = card.node.querySelectorAll('details')
+    expect(disclosures).toHaveLength(1)
+    const disclosure = disclosures[0] as HTMLDetailsElement
+    expect(disclosure.open).toBe(false)
+    expect(disclosure.querySelector('summary')?.textContent).toBe(en.toolDetails)
+    expect(disclosure.textContent).toContain(en.toolFactStatus)
+    expect(disclosure.textContent).toContain('exited')
+    expect(disclosure.textContent).toContain('proc-7')
+    expect(disclosure.textContent).toContain('<output>hi</output>')
+    expect(disclosure.textContent).toContain(en.toolReplayNote)
+    // The disclosure is the native one: opening it with the summary shows the
+    // folded record, so a keyboard user reaches the same facts.
+    const summary = disclosure.querySelector('summary')!
+    expect(summary.tabIndex).toBe(0)
+    await act(async () => summary.click())
+    expect(disclosure.open).toBe(true)
+    expect(visibleText(card.node)).toContain('proc-7')
+    card.unmount()
+  })
+
+  it('folds the non-text block count and the cut-preview note into the same disclosure', async () => {
+    const client = await mountClient()
+    client.declare()
+    const shell = viewOf(client.slots, 'shell')
+    const card = await render(shell, recorded('shell', 'result', resultBlock({
+      content: [{ type: 'image', source: { type: 'base64', data: 'AAAA' } }, { type: 'text', text: 'z'.repeat(40_000) }],
+      meta: { action: 'run', status: 'exited', resourceId: 'proc-7' },
+    })))
+    const visible = visibleText(card.node)
+    expect(visible).toContain(en.toolStageRecorded)
+    expect(visible).not.toContain(en.toolNonTextBlocks)
+    expect(visible).not.toContain(en.toolOutputTruncated)
+    const disclosure = card.node.querySelector('details')!
+    expect(disclosure.textContent).toContain(`${en.toolNonTextBlocks} 1`)
+    expect(disclosure.textContent).toContain(en.toolOutputTruncated)
+    expect(disclosure.querySelector('pre')?.textContent).toHaveLength(4_000)
+    card.unmount()
+  })
+
+  it('compacts the web and agent cards without dropping a recorded fact', async () => {
+    const client = await mountClient()
+    client.declare()
+    const web = await render(viewOf(client.slots, 'web'), recorded('web', 'result', resultBlock({
+      name: 'web',
+      call: { name: 'web', argsRaw: JSON.stringify({ action: 'search', queries: ['dsh tools'] }) },
+      meta: { action: 'search', kind: 'search', resultId: 'web-3', itemCount: 3, savedCount: 2 },
+    })))
+    const webVisible = visibleText(web.node)
+    expect(webVisible).toContain('dsh tools')
+    expect(webVisible).toContain(en.toolStageRecorded)
+    expect(webVisible).not.toContain('web-3')
+    expect(web.node.querySelectorAll('details')).toHaveLength(1)
+    expect(web.node.querySelector('details')!.textContent).toContain('web-3')
+    web.unmount()
+    const agent = await render(viewOf(client.slots, 'agent'), recorded('agent', 'result', resultBlock({
+      name: 'agent',
+      call: { name: 'agent', argsRaw: JSON.stringify({ action: 'start', task: 'audit the shell tool' }) },
+      meta: { action: 'start', childId: 'session-child-1', label: 'audit', live: true, activity: 'running' },
+    })))
+    const agentVisible = visibleText(agent.node)
+    expect(agentVisible).toContain('audit the shell tool')
+    expect(agentVisible).not.toContain('session-child-1')
+    expect(agent.node.querySelectorAll('details')).toHaveLength(1)
+    expect(agent.node.querySelector('details')!.textContent).toContain('session-child-1')
+    agent.unmount()
   })
 
   it('renders web and agent facts from the recorded meta of their owning tools', async () => {

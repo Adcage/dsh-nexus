@@ -15,6 +15,13 @@
  * replayed transcript cannot show today's file, session, child or process
  * state. See `./tool-models.ts` for the total readers.
  *
+ * Density: a settled card is read while scrolling a conversation, so the default
+ * view carries only what names the call — title, stage, argument summary and,
+ * when the call failed, the recorded failure line. Every other recorded fact,
+ * the recorded output, the non-text block count and the replay note stay on the
+ * same card inside one collapsed `<details>`: folded, never dropped, and opened
+ * by the browser's own disclosure rather than a click handler.
+ *
  * Known limits, stated rather than invented:
  *
  * - `read`/`write`/`edit` stay on the owner's generic card. Their shipped card
@@ -103,6 +110,13 @@ export function NexusToolCard({ toolName, phase, block, inspect, t }: NexusToolV
   const failureIdentity = model.failure === undefined
     ? ''
     : [model.failure.name, model.failure.code].filter((part) => part !== '').join(': ')
+  // The folded record exists only when there is something to fold: a live call
+  // with no recorded fact yet shows no disclosure at all.
+  const folded = model.facts.length > 0
+    || model.otherBlocks > 0
+    || model.output !== ''
+    || model.outputTruncated
+    || settled
   return <article className="dsh-nexus-tool" data-dsh-nexus-tool={model.tool ?? toolName} data-dsh-nexus-stage={model.stage}>
     <header className="dsh-nexus-tool-head">
       <strong className="dsh-nexus-tool-title">{model.tool === undefined ? toolName : t(NEXUS_TOOL_TITLE[model.tool])}</strong>
@@ -110,19 +124,22 @@ export function NexusToolCard({ toolName, phase, block, inspect, t }: NexusToolV
       {openTrajectory !== undefined && <button type="button" className="dsh-nexus-tool-inspect" onClick={() => openTrajectory()}>{t('toolInspect')}</button>}
     </header>
     {model.summary !== undefined && <p className="dsh-nexus-tool-summary"><span>{t('toolArgs')}</span> <code>{model.summary}</code></p>}
-    {model.facts.length > 0 && <dl className="dsh-nexus-tool-facts">{model.facts.map((fact) =>
-      <div key={fact.label}><dt>{t(fact.label)}</dt><dd>{fact.value}</dd></div>)}</dl>}
-    {model.otherBlocks > 0 && <p className="dsh-nexus-tool-note"><span>{t('toolNonTextBlocks')}</span> <span>{model.otherBlocks}</span></p>}
     {model.failure !== undefined && <p className="dsh-nexus-tool-failure">
       <span>{t('toolFailure')}</span>{failureIdentity !== '' && <>{' '}<code>{failureIdentity}</code></>}
       {model.failure.reason !== undefined && <span className="dsh-nexus-tool-reason">{model.failure.reason}</span>}
     </p>}
-    {model.output !== '' && <details className="dsh-nexus-tool-output">
-      <summary>{t('toolOutput')}</summary>
-      <pre>{model.output}</pre>
+    {folded && <details className="dsh-nexus-tool-details">
+      <summary>{t('toolDetails')}</summary>
+      {model.facts.length > 0 && <dl className="dsh-nexus-tool-facts">{model.facts.map((fact) =>
+        <div key={fact.label}><dt>{t(fact.label)}</dt><dd>{fact.value}</dd></div>)}</dl>}
+      {model.otherBlocks > 0 && <p className="dsh-nexus-tool-note"><span>{t('toolNonTextBlocks')}</span> <span>{model.otherBlocks}</span></p>}
+      {model.output !== '' && <>
+        <p className="dsh-nexus-tool-note">{t('toolOutput')}</p>
+        <pre>{model.output}</pre>
+      </>}
+      {model.outputTruncated && <p className="dsh-nexus-tool-note">{t('toolOutputTruncated')}</p>}
+      {settled && <p className="dsh-nexus-tool-note">{t('toolReplayNote')}</p>}
     </details>}
-    {model.outputTruncated && <p className="dsh-nexus-tool-note">{t('toolOutputTruncated')}</p>}
-    {settled && <p className="dsh-nexus-tool-note">{t('toolReplayNote')}</p>}
   </article>
 }
 

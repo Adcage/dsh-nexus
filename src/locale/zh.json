@@ -88,6 +88,7 @@
   "toolStageEmpty": "未记录输出，不能视为完成",
   "toolArgs": "已记录参数",
   "toolOutput": "已记录输出",
+  "toolDetails": "已记录的事实与输出",
   "toolOutputTruncated": "此处只是截断预览；完整内容仍在会话日志的该次调用记录里。",
   "toolNonTextBlocks": "此处未显示的非文本记录块：",
   "toolFailure": "已记录错误",

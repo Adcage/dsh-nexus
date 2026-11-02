@@ -2,7 +2,21 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 当前 UI 修复：0.1.4，仅隔离安装
+## 0. 当前：0.1.5 真实 Shell 发现修复与工具卡片折叠
+
+状态：**IMPLEMENTED_PENDING_REVIEW / INSTALLED_PENDING_USER_RETRY**。用户报告日常会话里的 `shell` 卡片直接给出 `NexusError: SHELL_UNAVAILABLE`，并指出卡片把内部事实和原始记录整片铺开。本波按两份只读诊断修真实缺陷（A）并压缩 `shell`／`web`／`agent` 卡片（B）。日常 `web` Profile 已用官方管理器从 0.1.4 更新到 0.1.5，但**没有**重启应用、刷新页面或重载会话，实际渲染状态仍是待用户重试；本节不是最终验收。
+
+- 真实缺陷（A）：本机 Git 装在 `E:\Programme\software\Git`，Windows 用户＋机器 `PATH` 只有 `…\Git\cmd`；`cmd\bash.exe` 不存在，`bin\bash.exe`（46,992 字节）与 `usr\bin\bash.exe` 存在；`ProgramFiles\Git` 不存在、`GIT_INSTALL_ROOT` 未设置。原 `findBash` 只探测 `<PATH 项>\bash.exe`，所以真实安装不可发现，用户会话才得到 `SHELL_UNAVAILABLE`。现在只要 PATH 项是 `<gitRoot>\cmd`、`<gitRoot>\mingw64\bin`、`<gitRoot>\mingw64\usr\bin` 或安装根本身，就**按路径文本结构**推导同一安装的 `bin\bash.exe` 与 `usr\bin\bash.exe`；不扫盘、不读注册表、不加依赖。优先级（显式配置 → 标准安装根 → `GIT_INSTALL_ROOT` → Git 形 PATH 项 → 其它非 WSL 项）、WSL／System32／WindowsApps 拒绝、绝对路径且存在校验、绝不回退 pwsh 全部保留；同一 PATH 项里直接存在的 `bash.exe` 仍排在推导结果之前。
+- 卡片（B）：默认只显示标题、阶段标签、参数摘要，以及失败时的已记录错误行；已记录事实列表、已记录输出、非文本块计数、截断说明和复读声明全部移入每张卡片**唯一**的折叠 `<details>`，一条不删，wire token 原样保留，不把记录说成成功或退出；`<summary>` 是原生披露控件、可键盘聚焦，沿用既有 focus-visible 描边，没有用点击处理器替代原生展开。
+- TDD：改源码前先保留真实失败。A：真实临时 Git 树（`root\cmd` 内有 `git.exe`、`root\bin\bash.exe` 存在，PATH 只有 `root\cmd`）上 2 条断言失败并报 `SHELL_UNAVAILABLE`，日志 `tmp/task14-shell-card-fix/engines-red.log`。B：3 条断言失败，因为折叠内容当时仍出现在默认可见文本里（`exited`、`proc-7`、`web-3`），日志 `tmp/task14-shell-card-fix/cards-red.log`。同轮加入的「同一 PATH 项的直接 `bash.exe` 优先」与「WSL 仍被拒绝」是保护既有行为的护栏，RED 时即通过，如实标注、不算新失败。
+- 真实机器有界检查：用 Windows 环境 API 读机器＋用户 `PATH`（不扫盘、不枚举目录），实际 `resolveEngine` 解析到 `E:\Programme\software\Git\bin\bash.exe`；该 PATH 上唯一的直接 `<项>\bash.exe` 命中全部是被拒绝的 WSL `System32\bash.exe`，所以修复前确实没有可用候选。证据 `tmp/task14-shell-card-fix/real-discovery.json`（含逐项事实与期望值）。
+- 门禁：`pnpm pack:plugin`（typecheck → build → 默认测试 → 包检查）第一、二次各因**与本改动无关**的 Windows `EPERM: operation not permitted, rename`（`node_modules/.cache` 的原子写在并行测试下的抖动）失败 1 条随机用例；第三次 **42 文件 / 593 测试，exit 0**，产物 458,747 字节、15 个成员、SHA-256 `632815d4ad54864c6436364b5e4b66a36a562235b3c981fcba49bd5ea9e7c41d`。这个 EPERM 是本机既有环境抖动，不是本波缺陷：`tmp/task8-check.log` 早有同样的失败，随后 `tmp/task8-check-final.log` 通过。三次日志全部保留：`pack.log`、`pack-retry.log`、`pack-green.log`。`pnpm verify:runtime` exit 0。集成 **16**、Windows **13** 仍属 651604b 的历史证据，本轮按范围没有重跑。
+- 安装：`dsh plugin --profile web add E:/Programme/Project/dsh-nexus/dist/dsh-nexus-0.1.5.tgz`，真实 exit 0；spec 更新为 0.1.5，15/15 tarball 成员与已安装文件逐字节相同，21 个声明依赖、23 条 bundle、`dsh-nexus` 只有一条，其它声明包的 manifest 未变。安装前后原有监听 3080／62699（PID 28296）、18787（PID 61612）完全不变；未重启、未终止、未刷新用户的应用／浏览器／会话，也没有手工改 Profile 文件或手工调用 pnpm。
+- **未验证项**：没有真实 GUI 观察折叠后的卡片（要用户自己重载后再看），也没有用真实模型重跑一次 `shell`；日常第三方皮肤、实际 DPI／zoom／插件组合、账号／模型、图像／web／子 Agent 代表性任务、AC-17 仍未验证；AC-07 受限 Git Bash 环境阻塞不变。本轮未作交付、接受、推送或合并。
+
+完整证据在根 `tmp/task14-shell-card-fix/`：`engines-red.log`、`engines-green.log`、`cards-red.log`、`cards-green.log`、`focused.log`、`pack.log`、`pack-retry.log`、`pack-green.log`、`verify-runtime.log`、`real-discovery.mjs`／`.log`／`.json`、`inventory.mjs`、`inventory-before.log`、`inventory-after.log`、`before-inventory.json`、`after-inventory.json`、`before-profile-package.json`、`after-profile-package.json`、`official-install-output.log`、`official-install-exit.txt`、`listeners-before.txt`、`listeners-after.txt`。权威回执为 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/task-14-shell-card-fix-receipt.json`。
+
+## 历史：0.1.4 UI 修复（上一轮 §0 原文保留）
 
 状态：**IMPLEMENTED_PENDING_REVIEW**。用户批准 A（局部原生化，同时修正两个入口布局）。日常 Profile 本轮未安装、未重启，仍以其原有 0.1.3 证据为准；本节不是最终验收。
 

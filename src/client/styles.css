@@ -88,7 +88,7 @@
 .dsh-nexus-tool-failure { margin: 6px 0 0; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
 .dsh-nexus-tool-reason { display: block; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; }
 .dsh-nexus-tool-note { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px); }
-.dsh-nexus-tool-output { margin-block: 6px 0; }
-.dsh-nexus-tool-output > summary { cursor: pointer; color: var(--dsw-alias-label-secondary); }
-.dsh-nexus-tool-output > summary:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
-.dsh-nexus-tool-output pre { margin: 6px 0 0; padding: 8px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; font-family: var(--dsh-font-family-code, monospace); }
+.dsh-nexus-tool-details { margin-block: 6px 0; }
+.dsh-nexus-tool-details > summary { cursor: pointer; color: var(--dsw-alias-label-secondary); }
+.dsh-nexus-tool-details > summary:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
+.dsh-nexus-tool-details pre { margin: 6px 0 0; padding: 8px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; font-family: var(--dsh-font-family-code, monospace); }

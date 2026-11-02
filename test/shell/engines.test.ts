@@ -7,7 +7,7 @@
 
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Config } from '../../src/config.ts'
@@ -128,6 +128,62 @@ describe('resolveEngine', () => {
     expect(spec.executable).toBe(bash)
   })
 
+  it('derives the Git installation root from a cmd PATH entry that holds no bash.exe', async () => {
+    const directory = await root('git-cmd-')
+    const installRoot = join(directory, 'Git')
+    const bash = await executable(join(installRoot, 'bin', 'bash.exe'))
+    // A default Git for Windows installation puts only `<root>\cmd` on PATH,
+    // and that directory carries git.exe without any bash.exe beside it.
+    await executable(join(installRoot, 'cmd', 'git.exe'))
+    const spec = await resolveEngine(
+      'bash',
+      shellConfig({ engine: 'bash' }),
+      discovery({ PATH: join(installRoot, 'cmd') }),
+    )
+    expect(spec.executable).toBe(bash)
+  })
+
+  it('derives the same installation root from mingw64 and installation-root PATH entries', async () => {
+    const directory = await root('git-mingw-')
+    const installRoot = join(directory, 'Git')
+    const bash = await executable(join(installRoot, 'bin', 'bash.exe'))
+    for (const entry of [join(installRoot, 'mingw64', 'bin'), join(installRoot, 'mingw64', 'usr', 'bin'), installRoot]) {
+      const spec = await resolveEngine(
+        'bash',
+        shellConfig({ engine: 'bash' }),
+        discovery({ PATH: entry }),
+      )
+      expect(spec.executable, entry).toBe(bash)
+    }
+  })
+
+  it('keeps a direct bash.exe in a Git PATH entry ahead of the sibling derivation', async () => {
+    const directory = await root('git-direct-')
+    const installRoot = join(directory, 'Git')
+    const direct = await executable(join(installRoot, 'mingw64', 'bin', 'bash.exe'))
+    await executable(join(installRoot, 'bin', 'bash.exe'))
+    const spec = await resolveEngine(
+      'bash',
+      shellConfig({ engine: 'bash' }),
+      discovery({ PATH: join(installRoot, 'mingw64', 'bin') }),
+    )
+    expect(spec.executable).toBe(direct)
+  })
+
+  it('still refuses a bash.exe reached through a WSL or WindowsApps PATH entry', async () => {
+    const directory = await root('git-wsl-sibling-')
+    const systemRoot = join(directory, 'Windows')
+    await executable(join(directory, 'wsl', 'Ubuntu', 'usr', 'bin', 'bash.exe'))
+    await executable(join(directory, 'wsl', 'Ubuntu', 'bin', 'bash.exe'))
+    await expectUnavailable(
+      resolveEngine(
+        'bash',
+        shellConfig({ engine: 'bash' }),
+        discovery({ SystemRoot: systemRoot, PATH: '\\\\wsl$\\Ubuntu\\usr\\bin' }),
+      ),
+    )
+  })
+
   it('never selects WSL or a WindowsApps bash alias as Git Bash', async () => {
     const directory = await root('git-wsl-')
     const systemRoot = join(directory, 'Windows')
@@ -185,16 +241,20 @@ describe('resolveEngine', () => {
     const filteredEntries = (process.env.PATH ?? '')
       .split(';')
       .filter((entry) => entry.length > 0 && !/[\\/]\.?pi([\\/]|$)/i.test(entry))
-    const hostCandidate = filteredEntries
-      .map((entry) => join(entry, 'bash.exe'))
-      .find((candidate) => existsSync(candidate))
-    if (hostCandidate === undefined) return
     const spec = await resolveEngine(
       'bash',
       shellConfig({ engine: 'bash' }),
       discovery({ ...process.env, PATH: filteredEntries.join(';') }),
     )
-    expect(spec.executable).toBe(hostCandidate)
+    expect(existsSync(spec.executable)).toBe(true)
     expect(spec.executable).not.toMatch(/[\\/]System32[\\/]bash\.exe$/i)
+    // A Git for Windows installation on PATH as `<root>\cmd` resolves to that
+    // same installation's bash, never to a bash from another directory.
+    const cmdEntry = filteredEntries.find((entry) => /[\\/]git[\\/]cmd[\\/]?$/i.test(entry))
+    if (cmdEntry !== undefined) {
+      const installRoot = resolve(cmdEntry, '..')
+      expect([join(installRoot, 'bin', 'bash.exe'), join(installRoot, 'usr', 'bin', 'bash.exe')])
+        .toContain(spec.executable)
+    }
   })
 })

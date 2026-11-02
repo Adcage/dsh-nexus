@@ -2,7 +2,7 @@
 
 本文是 **真实运行验收** 的操作手册，和自动化证据分层，不能互相冒充。自动化能证明什么、不能证明什么，写在最后。示例命令都在仓库根目录执行，且只操作项目内目录或一个**独立的** DSH Profile；不要动日常使用的 Profile，也不要手工修改 Profile 文件。
 
-当前产物：`dsh-nexus` 0.1.4，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。本轮 UI 修复仅安装到项目隔离 Profile `nexus-ui-fix-014`，状态 `IMPLEMENTED_PENDING_REVIEW`；日常 Profile 未更新，原有 0.1.3 安装记录见验证记录历史章节。隔离 Chrome 已验证双入口、五页、双主题及英文窄屏，不能替代日常第三方皮肤与账号验收；须先独立 SPEC / QUALITY 评审。
+当前产物：`dsh-nexus` 0.1.5，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。本轮修的是真实 Git Bash 发现缺陷（PATH 只给出 `<gitRoot>\cmd` 时也能找到同一安装的 `bash`）并把 `shell`／`web`／`agent` 卡片折叠；日常 `web` Profile 已按用户授权用官方管理器从 0.1.4 更新到 0.1.5，但本轮**没有**重启应用或刷新页面，状态 `INSTALLED_PENDING_USER_RETRY`。用户自行重载后，请按本清单确认 `shell` 能真正执行、卡片默认只显示标题／阶段／参数摘要／错误行。上一轮 0.1.4 的隔离 Chrome 证据见验证记录历史章节。
 
 ## 0. 先决条件
 

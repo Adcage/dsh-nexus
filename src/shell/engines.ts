@@ -217,6 +217,32 @@ function looksLikeGitDirectory(directory: string): boolean {
   return /(^|[\\/])git([\\/]|$)/i.test(directory)
 }
 
+/**
+ * PATH-entry tails a Git for Windows installation exposes, longest first: an
+ * installer adds `<root>\cmd` alone, while a bash session adds the
+ * `mingw64` directories of the same installation.
+ */
+const GIT_PATH_TAILS: readonly string[] = ['mingw64\\usr\\bin', 'mingw64\\bin', 'cmd']
+
+/**
+ * The installation root a Git-looking PATH directory names.
+ *
+ * `<root>\cmd`, `<root>\mingw64\bin` and `<root>\mingw64\usr\bin` are all
+ * directories of one installation whose bash lives in `<root>\bin` and
+ * `<root>\usr\bin`. The root is read from the entry text alone: discovery never
+ * scans a disk and never reads the registry, so an unknown layout stays
+ * unknown instead of being guessed. An entry with no such tail names the root
+ * itself.
+ */
+function gitInstallRootOf(directory: string): string {
+  const trimmed = directory.replace(/[\\/]+$/, '')
+  const normalized = trimmed.replace(/\//g, '\\').toLowerCase()
+  for (const tail of GIT_PATH_TAILS) {
+    if (normalized.endsWith(`\\${tail}`)) return trimmed.slice(0, trimmed.length - tail.length - 1)
+  }
+  return trimmed
+}
+
 /** Whether a directory belongs to WSL or an app-execution alias, never Git Bash. */
 function isWslOrAliasDirectory(directory: string, env: NodeJS.ProcessEnv): boolean {
   const normalized = directory.replace(/\//g, '\\').toLowerCase().replace(/\\+$/, '')
@@ -230,8 +256,10 @@ function isWslOrAliasDirectory(directory: string, env: NodeJS.ProcessEnv): boole
  * Discover Git Bash without ever selecting WSL's `bash.exe`.
  *
  * Order: Git installation roots derived from standard Windows locations and
- * `GIT_INSTALL_ROOT`, then Git-looking PATH entries, then other non-WSL PATH
- * entries. PowerShell is not consulted here; no fallback engine is chosen.
+ * `GIT_INSTALL_ROOT`, then Git-looking PATH entries (a direct `bash.exe` first,
+ * then the sibling `bin`/`usr\bin` of the installation that entry belongs to),
+ * then other non-WSL PATH entries. PowerShell is not consulted here; no
+ * fallback engine is chosen.
  */
 function findBash(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | undefined {
   if (platform !== 'win32') {
@@ -261,7 +289,12 @@ function findBash(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | u
     (directory) => !isWslOrAliasDirectory(directory, env),
   )
   for (const directory of pathDirectories.filter(looksLikeGitDirectory)) {
-    candidates.push(join(directory, 'bash.exe'))
+    const root = gitInstallRootOf(directory)
+    candidates.push(
+      join(directory, 'bash.exe'),
+      join(root, 'bin', 'bash.exe'),
+      join(root, 'usr', 'bin', 'bash.exe'),
+    )
   }
   for (const directory of pathDirectories.filter((entry) => !looksLikeGitDirectory(entry))) {
     candidates.push(join(directory, 'bash.exe'))
