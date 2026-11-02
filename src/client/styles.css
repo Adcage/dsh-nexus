@@ -44,3 +44,29 @@
 .dsh-nexus-console .dsh-nexus-actions { margin-block: 16px; }
 .dsh-nexus-console .dsh-nexus-error { color: var(--dsw-alias-state-error-primary); }
 .dsh-nexus-console .dsh-nexus-fact { border-bottom: 1px solid var(--dsw-alias-border-l1); padding-block: 8px; }
+
+/* Tool result cards. Rendered inside the conversation flow, outside the
+   console panel, so these rules are namespaced under .dsh-nexus-tool instead of
+   the .dsh-nexus-console scope and only use host theme tokens. */
+.dsh-nexus-tool { display: block; margin-block: 4px; color: var(--dsw-alias-label-primary); font: inherit; }
+.dsh-nexus-tool-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.dsh-nexus-tool-title { font-size: calc(var(--dsh-content-font-size-secondary, 13px)); font-weight: 600; }
+.dsh-nexus-tool-stage { color: var(--dsw-alias-label-secondary); font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px); }
+.dsh-nexus-tool[data-dsh-nexus-stage='failed'] .dsh-nexus-tool-stage { color: var(--dsw-alias-state-error-primary); }
+.dsh-nexus-tool[data-dsh-nexus-stage='stopRequested'] .dsh-nexus-tool-stage { color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary)); }
+.dsh-nexus-tool-inspect { box-sizing: border-box; font: inherit; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 0 10px; cursor: pointer; }
+.dsh-nexus-tool-inspect:hover { background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); }
+.dsh-nexus-tool-inspect:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
+.dsh-nexus-tool-summary { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); }
+.dsh-nexus-tool-summary code { color: var(--dsw-alias-label-primary); font-family: var(--dsh-font-family-code, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsh-nexus-tool-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 6px 0 0; }
+.dsh-nexus-tool-facts > div { display: contents; }
+.dsh-nexus-tool-facts dt { color: var(--dsw-alias-label-secondary); }
+.dsh-nexus-tool-facts dd { margin: 0; overflow-wrap: anywhere; }
+.dsh-nexus-tool-failure { margin: 6px 0 0; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.dsh-nexus-tool-reason { display: block; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; }
+.dsh-nexus-tool-note { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px); }
+.dsh-nexus-tool-output { margin-block: 6px 0; }
+.dsh-nexus-tool-output > summary { cursor: pointer; color: var(--dsw-alias-label-secondary); }
+.dsh-nexus-tool-output > summary:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
+.dsh-nexus-tool-output pre { margin: 6px 0 0; padding: 8px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; font-family: var(--dsh-font-family-code, monospace); }

@@ -36,12 +36,12 @@ export function PromptsPage({ store, state, t }: ConsolePageProps) {
     <button type="button" disabled={atModuleCap} onClick={addModule}>{t('addModule')}</button>
     <h3>{t('selection')}</h3>
     {state.selection.length === 0 ? <p>{t('emptySelection')}</p> : <ol>{state.selection.map((id, index) => <li key={id}>
-      <span>{library.modules.find((m) => m.id === id)?.name || id}</span>
+      <span>{library.modules.find((m) => m.id === id)?.name || t('untitledModule')}</span>
       <button type="button" disabled={index === 0} onClick={() => move(index, -1)}>{t('moveUp')}</button>
       <button type="button" disabled={index === state.selection.length - 1} onClick={() => move(index, 1)}>{t('moveDown')}</button>
     </li>)}</ol>}
     <p>{t('defaultHelp')}</p><button type="button" onClick={() => store.useSelectionAsDefault()}>{t('useDefault')}</button>
-    <h3>{t('savedDefault')}</h3><ol>{state.librarySaved?.value.defaultSelection.map((id) => <li key={id}>{state.librarySaved?.value.modules.find((m) => m.id === id)?.name || id}</li>)}</ol>
+    <h3>{t('savedDefault')}</h3><ol>{state.librarySaved?.value.defaultSelection.map((id) => <li key={id}>{state.librarySaved?.value.modules.find((m) => m.id === id)?.name || t('untitledModule')}</li>)}</ol>
     <p>{t(state.libraryDirty ? 'libraryDirty' : 'libraryClean')}</p>
     <div className="dsh-nexus-actions">
       <button type="button" disabled={state.busy.library} onClick={() => void store.saveLibrary()}>{t('saveLibrary')}</button>

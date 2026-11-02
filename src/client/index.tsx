@@ -13,6 +13,7 @@ import css from './styles.css?raw'
 import { createNexusApi } from './api.ts'
 import { createConsoleStore } from './store.ts'
 import { NexusConsole } from './console.tsx'
+import { registerNexusToolViews } from './tool-views.tsx'
 
 export const NS = 'dshNexus'
 export const inject = ['slots', 'locale']
@@ -64,6 +65,17 @@ export function apply(ctx: Context): void {
       try { unsubscribe = ctx.locale.subscribe(register) } catch { /* Initial native label remains usable. */ }
       return () => { try { unsubscribe() } catch { /* Foreign observer cleanup cannot block unload. */ } remove() }
     })), 'dsh-nexus: settings console')
+    ctx.effect(() => {
+      // The Tool owner declares `tool.call.toolview`. When that package is not
+      // composed every call keeps its generic card, so a missing declaration
+      // must not disturb the console seats registered above.
+      try {
+        return ctx.slots.inject('tool.call.toolview', () => registerNexusToolViews(ctx))
+      } catch {
+        console.warn('[dsh-nexus] the native tool card slot is unavailable')
+        return noop
+      }
+    }, 'dsh-nexus: tool result views')
     void store.refresh()
   } catch {
     // Do not print foreign errors, native objects, tokens or request bodies.

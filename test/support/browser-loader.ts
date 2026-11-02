@@ -131,7 +131,7 @@ export function defaultBundlePath(): string {
  */
 export function createClientHost(options: ClientHostOptions = {}): ClientHost {
   const bundlePath = options.bundlePath ?? defaultBundlePath()
-  const declaredSlots = new Set(options.declaredSlots ?? ['main', 'sidebar.panellist', 'settings.section'])
+  const declaredSlots = new Set(options.declaredSlots ?? ['main', 'sidebar.panellist', 'settings.section', 'tool.call.toolview'])
   const loadedClientIds: string[] = []
   const locales = new Map<string, { en: Record<string, string>; zh: Record<string, string> }>()
   const registrations: SlotRegistration[] = []

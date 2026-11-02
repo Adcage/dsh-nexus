@@ -47,8 +47,10 @@ describe('built client bundle', () => {
     expect(context.slots).toBeDefined()
 
     host.unload()
+    // Four console registrations plus the three Tool cards, each counted by the
+    // disposer that actually ran.
     const disposeCountAfterUnload = host.disposeCount
-    expect(disposeCountAfterUnload).toBe(4)
+    expect(disposeCountAfterUnload).toBe(7)
     expect(host.locales.size).toBe(0)
     expect(host.slotRegistrations).toEqual([])
   })
@@ -62,7 +64,7 @@ describe('built client bundle', () => {
     expect(host.locales.size).toBe(1)
     host.unload()
     expect(host.locales.size).toBe(0)
-    expect(host.disposeCount).toBe(8)
+    expect(host.disposeCount).toBe(14)
   })
 
   it('does not mask a registration whose disposer is missing', () => {
@@ -93,11 +95,12 @@ describe('built client bundle', () => {
     expect(new Set(loaded.runtimeRequests)).toEqual(new Set(['react', 'react/jsx-runtime']))
   })
 
-  it('adds matching sidebar/main/settings cells and removes only its own entries', () => {
+  it('adds matching sidebar/main/settings cells and one Tool card per owned wire name, and removes only its own entries', () => {
     const host = createClientHost()
     host.mount()
     expect(host.slotRegistrations.map((row) => [row.name, row.cell])).toEqual([
       ['main', NS], ['sidebar.panellist', NS], ['settings.section', NS],
+      ['tool.call.toolview', 'shell'], ['tool.call.toolview', 'web'], ['tool.call.toolview', 'agent'],
     ])
     host.unload()
     expect(host.slotRegistrations).toEqual([])
