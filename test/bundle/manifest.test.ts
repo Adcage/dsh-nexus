@@ -58,7 +58,11 @@ describe('dsh-nexus package identity', () => {
     expect(manifest.dsh.bundle.patch).toBe('./cordis.patch.yml')
     expect(existsSync(`${packageRoot}cordis.patch.yml`)).toBe(true)
     expect(manifest.dsh.client.platform).toBe('web')
-    expect(manifest.dsh.client.inject).toEqual(['@deepseek-ai/dsh-client-locale'])
+    expect(manifest.dsh.client.inject).toEqual([
+      '@deepseek-ai/dsh-client-locale', '@deepseek-ai/dsh-client-ui-renderer',
+      '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-sidebar',
+      '@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-settings-general',
+    ])
   })
 
   it('pins the runtime the package was built for', () => {

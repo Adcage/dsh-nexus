@@ -16,7 +16,7 @@
 
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, URL as NodeURL } from 'node:url'
 
 /** One loader entry, captured from the fake module table. */
 export interface LoaderEntry {
@@ -32,6 +32,8 @@ export interface LoadedClientModule {
   readonly id: string
   /** Module exports: `apply`, `inject`, and any ids the bundle publishes. */
   readonly exports: Record<string, unknown>
+  /** Actual factory requests, checked against the browser's platform seed table. */
+  readonly runtimeRequests?: readonly string[]
 }
 
 /** How the fake host is configured. */
@@ -116,7 +118,7 @@ export interface FakeClientContext {
  * @returns the absolute bundle path.
  */
 export function defaultBundlePath(): string {
-  return fileURLToPath(new URL('../../lib/client.js', import.meta.url))
+  return fileURLToPath(new NodeURL('../../lib/client.js', import.meta.url))
 }
 
 /**
@@ -126,7 +128,7 @@ export function defaultBundlePath(): string {
  */
 export function createClientHost(options: ClientHostOptions = {}): ClientHost {
   const bundlePath = options.bundlePath ?? defaultBundlePath()
-  const declaredSlots = new Set(options.declaredSlots ?? ['main', 'sidebar.panellist'])
+  const declaredSlots = new Set(options.declaredSlots ?? ['main', 'sidebar.panellist', 'settings.section'])
   const loadedClientIds: string[] = []
   const locales = new Map<string, { en: Record<string, string>; zh: Record<string, string> }>()
   const registrations: SlotRegistration[] = []
@@ -198,7 +200,13 @@ function executeBundle(bundlePath: string): LoadedClientModule {
     if (entry === undefined) throw new Error(`bundle ${bundlePath} never called window.__ModuleLoader__.load`)
     const captured = entry as LoaderEntry
     const requireFromBundle = createRequire(bundlePath)
-    return { id: captured.id, exports: captured.factory((specifier) => requireFromBundle(specifier)) }
+    const runtimeRequests: string[] = []
+    const exports = captured.factory((specifier) => {
+      runtimeRequests.push(specifier)
+      if (!['react', 'react/jsx-runtime', 'react-dom'].includes(specifier)) throw new Error(`not a browser platform seed: ${specifier}`)
+      return requireFromBundle(specifier)
+    })
+    return { id: captured.id, exports, runtimeRequests }
   } finally {
     if (previous === undefined) delete globals.window
     else globals.window = previous
@@ -222,8 +230,10 @@ function createClientContext(state: {
       register(namespace, dictionaries) {
         state.locales.set(namespace, dictionaries)
         return () => {
-          if (state.locales.get(namespace) === dictionaries) state.locales.delete(namespace)
-          state.countDisposal()
+          if (state.locales.get(namespace) === dictionaries) {
+            state.locales.delete(namespace)
+            state.countDisposal()
+          }
         }
       },
       bind(namespace) {
@@ -255,8 +265,10 @@ function createClientContext(state: {
         state.registrations.push(entry)
         return () => {
           const index = state.registrations.indexOf(entry)
-          if (index !== -1) state.registrations.splice(index, 1)
-          state.countDisposal()
+          if (index !== -1) {
+            state.registrations.splice(index, 1)
+            state.countDisposal()
+          }
         }
       },
     },

@@ -48,7 +48,7 @@ describe('built client bundle', () => {
 
     host.unload()
     const disposeCountAfterUnload = host.disposeCount
-    expect(disposeCountAfterUnload).toBe(1)
+    expect(disposeCountAfterUnload).toBe(4)
     expect(host.locales.size).toBe(0)
     expect(host.slotRegistrations).toEqual([])
   })
@@ -62,7 +62,7 @@ describe('built client bundle', () => {
     expect(host.locales.size).toBe(1)
     host.unload()
     expect(host.locales.size).toBe(0)
-    expect(host.disposeCount).toBe(2)
+    expect(host.disposeCount).toBe(8)
   })
 
   it('does not mask a registration whose disposer is missing', () => {
@@ -86,6 +86,21 @@ describe('built client bundle', () => {
     host.unload()
     expect(host.locales.size).toBe(1)
     expect(host.disposeCount).toBe(0)
+  })
+
+  it('materializes using only actual platform seeds, with no Node or SDK registry runtime requests', () => {
+    const loaded = createClientHost().load()
+    expect(new Set(loaded.runtimeRequests)).toEqual(new Set(['react', 'react/jsx-runtime']))
+  })
+
+  it('adds matching sidebar/main/settings cells and removes only its own entries', () => {
+    const host = createClientHost()
+    host.mount()
+    expect(host.slotRegistrations.map((row) => [row.name, row.cell])).toEqual([
+      ['main', NS], ['sidebar.panellist', NS], ['settings.section', NS],
+    ])
+    host.unload()
+    expect(host.slotRegistrations).toEqual([])
   })
 
   it('does not bundle a second copy of React', () => {

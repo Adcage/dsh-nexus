@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import type { UserConfig } from 'tsdown'
 
 /**
@@ -54,7 +55,15 @@ const clientConfig: UserConfig = {
   dts: false,
   sourcemap: true,
   clean: false,
-  deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
+  deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'], alwaysBundle: ['zod'], onlyBundle: ['zod'] },
+  plugins: [{
+    name: 'nexus-inline-styles',
+    load(id) {
+      if (id.endsWith('/styles.css?raw') || id.endsWith('\\styles.css?raw')) {
+        return `export default ${JSON.stringify(readFileSync(id.slice(0, -4), 'utf8'))}`
+      }
+    },
+  }],
   outputOptions: {
     entryFileNames: 'client.js',
     banner: 'window.__ModuleLoader__.load({ id: "dsh-nexus", factory: (require) => {',

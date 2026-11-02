@@ -1,63 +1,72 @@
-/**
- * `dsh-nexus` — browser half.
- *
- * The `dsh.client` manifest entry in package.json loads this bundle in the web
- * GUI; the bundle must register itself under the package name, because that id
- * is the boot graph row id. It contributes the plugin's locale dictionaries
- * here, wrapped in the one effect that owns their lifetime, and the console
- * surface arrives with the task that builds it.
- *
- * Two rules shape this file:
- * - every registration goes through `ctx.effect`, whose callback returns the
- *   disposer, so unloading the bundle removes exactly what it installed;
- * - `apply` catches its own failures, because the web shell fails the whole boot
- *   when a plugin's `apply` throws.
- *
- * @module dsh-nexus/client
- */
-
+/// <reference path="./assets.d.ts" />
+/** Additive browser face; all SDK imports below are declarations, not runtime modules. */
+import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import en from '../locale/en.json' with { type: 'json' }
 import zh from '../locale/zh.json' with { type: 'json' }
+import css from './styles.css?raw'
+import { createNexusApi } from './api.ts'
+import { createConsoleStore } from './store.ts'
+import { NexusConsole } from './console.tsx'
 
-/** Console key and locale namespace; the sidebar and main registrations share it. */
 export const NS = 'dshNexus'
-
-/** Client services that must exist before this bundle may mount. */
-export const inject: string[] = ['locale']
-
-/** Structural face of the client locale service this bundle uses. */
-interface LocaleService {
-  /**
-   * Publish one namespace's dictionaries.
-   * @param namespace - locale namespace, equal to {@link NS}.
-   * @param dictionaries - copy for the languages the web client ships.
-   * @returns the disposer that withdraws the namespace.
-   */
-  register(
-    namespace: string,
-    dictionaries: { en: Record<string, string>; zh: Record<string, string> },
-  ): () => void
+export const inject = ['slots', 'locale']
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap { dshNexus: keyof typeof en }
+}
+const noop = () => {}
+function safeRegistration(register: () => () => void): () => void {
+  try { return register() } catch {
+    console.warn('[dsh-nexus] a native console seat is unavailable')
+    return noop
+  }
+}
+function ConsoleIcon({ size }: SidebarPanelIconOwnerProps) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
 }
 
-/** Structural face of the client root context this bundle uses. */
-interface ClientContext {
-  /**
-   * Run one registration and keep its disposer for unload.
-   * @param callback - registration body returning its disposer.
-   * @param label - effect label used by the host's diagnostics.
-   */
-  effect(callback: () => (() => void) | void, label?: string): void
-  readonly locale: LocaleService
-}
-
-/**
- * Register the browser half.
- * @param ctx - client root context carrying the locale service.
- */
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: Context): void {
   try {
     ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'dsh-nexus: dictionaries')
-  } catch (error) {
-    console.warn('[dsh-nexus] the console could not mount', error)
+    const store = createConsoleStore(createNexusApi())
+    ctx.effect(() => () => store.dispose(), 'dsh-nexus: console state')
+    ctx.effect(() => {
+      if (typeof document === 'undefined') return noop
+      const style = document.createElement('style')
+      style.dataset.dshNexus = ''
+      style.textContent = css
+      document.head.append(style)
+      return () => style.remove()
+    }, 'dsh-nexus: console styles')
+    const t = ctx.locale.bind(NS)
+    // These factories close over owned values only: no foreign snapshots or
+    // native session objects are read during the renderer's inject phase.
+    const consoleFace = () => ({ store })
+    ctx.effect(() => ctx.slots.inject('main', () => safeRegistration(() =>
+      ctx.slots.register({ name: 'main', key: NS, locale: NS, inject: consoleFace }, NexusConsole),
+    )), 'dsh-nexus: main console')
+    ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => safeRegistration(() =>
+      ctx.slots.register({ name: 'sidebar.panellist', id: NS, order: 50, label: () => t('panel') }, ConsoleIcon),
+    )), 'dsh-nexus: sidebar entry')
+    ctx.effect(() => ctx.slots.inject('settings.section', () => safeRegistration(() => {
+      let remove = noop
+      const register = () => {
+        remove()
+        remove = safeRegistration(() => ctx.slots.register({ name: 'settings.section', id: NS, order: 50, label: t('panel'), locale: NS, inject: consoleFace }, NexusConsole))
+      }
+      register()
+      let unsubscribe = noop
+      try { unsubscribe = ctx.locale.subscribe(register) } catch { /* Initial native label remains usable. */ }
+      return () => { try { unsubscribe() } catch { /* Foreign observer cleanup cannot block unload. */ } remove() }
+    })), 'dsh-nexus: settings console')
+    void store.refresh()
+  } catch {
+    // Do not print foreign errors, native objects, tokens or request bodies.
+    console.warn('[dsh-nexus] the console could not mount')
   }
 }

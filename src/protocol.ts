@@ -57,6 +57,13 @@ export interface PromptSnapshot {
 /** HTTP console namespace; these named routes have their own security boundary. */
 export const NEXUS_API_PREFIX = '/api/dsh-nexus'
 
+/** A distinct keyed route prevents WHATWG dot-segment normalization. The literal
+ * `~` prefix is framing, never part of the ID; the remainder is decoded ONCE.
+ * Legacy /sessions/:id/prompt paths retain their original interpretation. */
+export function consolePromptPath(sessionId: string): string {
+  return `${NEXUS_API_PREFIX}/session-keys/~${encodeURIComponent(sessionId)}/prompt`
+}
+
 /** Opaque lost-update token, not a user-visible version. */
 export interface ConsoleStored<T> { readonly value: T; readonly hash: string }
 /** Strict complete PUT payload for library/settings. */

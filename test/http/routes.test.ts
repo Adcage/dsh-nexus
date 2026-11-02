@@ -7,6 +7,8 @@ import { mountPresetHarness, type PresetHarness } from '../support/preset-harnes
 import { LIBRARY_TABLE, SETTINGS_TABLE, PROMPTS_TABLE } from '../../src/storage/domain.ts'
 import { BASE_PROMPT } from '../../src/prompts/base.ts'
 import { consoleRequest } from './transport.ts'
+import { createNexusApi } from '../../src/client/api.ts'
+import { createConsoleStore } from '../../src/client/store.ts'
 
 const prefix = '/api/dsh-nexus'
 const opened: PresetHarness[] = []
@@ -188,6 +190,57 @@ describe('native console HTTP routes', () => {
     expect(runtime.prompts.peek(actor).modules).toEqual(library.modules)
     await h.disposeAgent(actor)
     expect((await send('sessions/chosen/prompt')).status).toBe(404)
+  })
+
+  it('addresses dot IDs and special-key collisions without aliasing native actors or hiding the roster', async () => {
+    const { h, runtime, send, token } = await open()
+    const auth = await token()
+    const ids = ['.', '..', '~.', '%2e', 'ordinary', 'a/b', '字 空格']
+    const actors = await Promise.all(ids.map((id) => h.createAgent(id, 'nexus')))
+    expect((await (await send('sessions')).json() as { id: string }[]).map((s) => s.id).sort()).toEqual([...ids].sort())
+    const saved = await runtime.store.readLibrary()
+    for (const [i, id] of ids.entries()) {
+      const path = `session-keys/~${encodeURIComponent(id)}/prompt`
+      const read = await send(path)
+      expect(read.status, id).toBe(200)
+      expect(await read.json()).toEqual(runtime.prompts.peek(actors[i]!))
+      const applied = await send(path, 'POST', { selection: [], expectedLibraryHash: saved.hash }, auth)
+      expect(applied.status, id).toBe(200)
+      expect((await applied.json() as { sessionId: string }).sessionId).toBe(id)
+    }
+    expect((await send('sessions/ordinary/prompt')).status).toBe(200)
+    expect((await send('sessions/%7E./prompt')).status).toBe(200)
+    expect((await send('session-keys/~%252e/prompt')).status).toBe(200)
+    expect((await send('session-keys/%7E./prompt')).status).toBe(404)
+    expect((await send('session-keys/~%ZZ/prompt')).status).toBe(400)
+  })
+
+  it('runs the exported browser API/store against the native guarded host with conditional saves and exact dot targeting', async () => {
+    const { h, runtime, origin } = await open()
+    const actor = await h.createAgent('.', 'nexus')
+    const fetcher: typeof fetch = async (input, init = {}) => consoleRequest(`${origin}${String(input)}`, init.method,
+      init.body === undefined ? undefined : Buffer.from(String(init.body)), { ...Object.fromEntries(new Headers(init.headers)), Origin: origin })
+    const a = createConsoleStore(createNexusApi(fetcher)), b = createConsoleStore(createNexusApi(fetcher))
+    try {
+      await Promise.all([a.refresh(), b.refresh()])
+      expect(a.getSnapshot().targetId).toBeUndefined()
+      a.editLibrary(library)
+      a.setSelection(['one'])
+      await a.preview()
+      expect(a.getSnapshot().preview?.text).toBe(`${BASE_PROMPT}\n\n${library.modules[0]!.body}`)
+      expect(runtime.prompts.peek(actor).selection).toEqual([])
+      await a.saveLibrary()
+      b.editLibrary({ modules: [], defaultSelection: [] })
+      await b.saveLibrary()
+      expect(b.getSnapshot().notice).toBe('conflict')
+      await a.selectTarget('.')
+      await a.applySelection()
+      expect(a.getSnapshot().notice).toBe('applied')
+      expect(a.getSnapshot().applied).toEqual(runtime.prompts.peek(actor))
+      expect(a.getSnapshot().applied?.sessionId).toBe('.')
+      expect(a.getSnapshot().applied?.modules).toEqual(library.modules)
+      expect(JSON.stringify(a.getSnapshot())).not.toContain('csrfToken')
+    } finally { a.dispose(); b.dispose() }
   })
 
   it('uses the same module and UTF-8 limits for save, preview and saved-library apply', async () => {

@@ -104,7 +104,8 @@ export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void 
         const url = new URL(req.url ?? '/', ctx.webServer.getOrigin())
         if (url.search !== '') throw new HttpError(400, 'INVALID_REQUEST', 'Query parameters are not supported.')
         const path = url.pathname.slice(NEXUS_API_PREFIX.length)
-        const targetPath = /^\/sessions\/([^/]+)\/prompt$/.exec(path)
+        const keyedTarget = /^\/session-keys\/~([^/]*)\/prompt$/.exec(path)
+        const targetPath = keyedTarget ?? /^\/sessions\/([^/]+)\/prompt$/.exec(path)
         const methods = path === '/library' || path === '/settings' ? ['GET', 'PUT']
           : path === '/prompts/preview' ? ['POST']
             : targetPath !== null ? ['GET', 'POST']
