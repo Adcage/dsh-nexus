@@ -53,7 +53,7 @@
   "maxCharsPerPage": "网页每页字符数",
   "pageBudgetHelp": "每页预算限制提供给模型的输出，不会截短已保存正文；可继续读取后续页。",
   "toolDisplay": "工具调用显示",
-  "toolDisplayHelp": "只影响显示：该模式随其它设置一起保存，切换后无需刷新页面即可生效；调用记录本身没有任何变化。",
+  "toolDisplayHelp": "只影响显示：切换会立即在本页预览，但只有点「保存全部设置」才会成为已保存默认，保存后无需刷新页面即可生效；调用记录本身没有任何变化。",
   "toolDisplayNexus": "Nexus 卡片",
   "toolDisplayAuto": "让位给其它插件",
   "toolDisplayNative": "宿主默认",

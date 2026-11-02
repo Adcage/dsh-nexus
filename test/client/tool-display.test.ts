@@ -24,7 +24,7 @@ import { createConsoleStore, type ConsoleStore } from '../../src/client/store.ts
 import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 import type { RuntimeSettings } from '../../src/protocol.ts'
 import en from '../../src/locale/en.json' with { type: 'json' }
-import { clientFixture } from './fixture.ts'
+import { clientFixture, deferred } from './fixture.ts'
 import { button, input, mountConsole } from './render.ts'
 
 const require = createRequire(import.meta.url)
@@ -54,11 +54,26 @@ function ThirdPartyView() {
   return null
 }
 
+interface MountOptions {
+  /** Wire names a third-party view claims at the default priority before the plugin mounts. */
+  readonly foreignKeys?: readonly string[]
+  /** Reject the stored-settings read with a server error instead of answering. */
+  readonly failSettings?: boolean
+  /** Hold the stored-settings read until {@link Mounted.releaseSettings} runs. */
+  readonly holdSettings?: boolean
+  /** Declare the Tool owner's slot before the plugin mounts, as a real host does. */
+  readonly preDeclare?: boolean
+  /** Throw from `ctx.slots.inject` this many times before delegating to the registry. */
+  readonly injectFailures?: number
+}
+
 interface Mounted {
   readonly ctx: Context
   readonly slots: SlotRegistry
   /** Declare the Tool owner's slots, as the shipped tool package does. */
   declare(): () => void
+  /** Open a held stored-settings read; a no-op when the read was not held. */
+  releaseSettings(): void
   /** The live console store, read through the settings seat. */
   store(): ConsoleStore
   /** Locale registration the plugin performed at mount. */
@@ -92,12 +107,18 @@ function settingsWith(mode: string | undefined): RuntimeSettings {
   return value as unknown as RuntimeSettings
 }
 
-async function mountClient(stored: RuntimeSettings): Promise<Mounted> {
+async function mountClient(stored: RuntimeSettings, options: MountOptions = {}): Promise<Mounted> {
   const fixture = clientFixture()
   fixture.settings = { value: stored, hash: 'stored-settings' }
   const fetch = fixture.fetch
-  globalThis.fetch = ((input: string | URL | Request, init: RequestInit = {}) => {
-    if (String(input).endsWith('/settings') && init.method === 'PUT') settingsPuts.push(String(init.body))
+  const settingsGate = deferred<void>()
+  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const path = String(input), method = init.method ?? 'GET'
+    if (path.endsWith('/settings') && method === 'PUT') settingsPuts.push(String(init.body))
+    if (path.endsWith('/settings') && method === 'GET') {
+      if (options.holdSettings === true) await settingsGate.promise
+      if (options.failSettings === true) return Response.json({ error: { code: 'SETTINGS_UNAVAILABLE', message: 'unavailable' } }, { status: 500 })
+    }
     return fetch(input, init)
   }) as typeof globalThis.fetch
   const ctx = new Context()
@@ -111,6 +132,31 @@ async function mountClient(stored: RuntimeSettings): Promise<Mounted> {
       return originalRegister(options, component)
     },
   })
+  if (options.injectFailures !== undefined) {
+    const originalInject = slots.inject.bind(slots)
+    let remaining = options.injectFailures
+    Object.defineProperty(slots, 'inject', {
+      configurable: true,
+      value: (name: Parameters<typeof originalInject>[0], factory: Parameters<typeof originalInject>[1]) => {
+        if (name === SLOT && remaining > 0) { remaining -= 1; throw new Error('slot not ready') }
+        return originalInject(name, factory)
+      },
+    })
+  }
+  const declare = () => slots.register(
+    { name: 'root', children: {
+      main: { kind: 'keyed', scope: 'root' },
+      'sidebar.panellist': { kind: 'list', scope: 'root' },
+      'settings.section': { kind: 'list', scope: 'root' },
+      [SLOT]: { kind: 'keyed', scope: 'session' },
+    } },
+    (_props: PropsRenderSlots<'main' | 'sidebar.panellist' | 'settings.section' | typeof SLOT>) => null,
+  )
+  // A coexistence case the feature exists for: the other plugin got there first.
+  if (options.preDeclare === true || (options.foreignKeys?.length ?? 0) > 0) {
+    declare()
+    for (const key of options.foreignKeys ?? []) slots.register({ name: SLOT, key, priority: 0 }, ThirdPartyView)
+  }
   const localeListeners: (() => void)[] = []
   const localeRegister = vi.fn(() => () => {})
   ctx.provide('locale', {
@@ -124,15 +170,8 @@ async function mountClient(stored: RuntimeSettings): Promise<Mounted> {
   const view: Mounted = {
     ctx,
     slots,
-    declare: () => slots.register(
-      { name: 'root', children: {
-        main: { kind: 'keyed', scope: 'root' },
-        'sidebar.panellist': { kind: 'list', scope: 'root' },
-        'settings.section': { kind: 'list', scope: 'root' },
-        [SLOT]: { kind: 'keyed', scope: 'session' },
-      } },
-      (_props: PropsRenderSlots<'main' | 'sidebar.panellist' | 'settings.section' | typeof SLOT>) => null,
-    ),
+    declare,
+    releaseSettings: () => settingsGate.resolve(),
     store: () => (slots.entries('settings.section')[0]!.inject!() as unknown as { store: ConsoleStore }).store,
     localeRegister,
     toolRegistrations: () => toolRegistrations,
@@ -254,6 +293,104 @@ describe('tool display mode registration', () => {
     await settingsLoaded(invalidStore)
     expect(invalidStore.getSnapshot().settingsDraft?.toolDisplay).toBe('nexus')
     expect(priorities(invalid.slots)).toEqual({ shell: 0, web: 0, agent: 0 })
+  })
+})
+
+describe('tool display boot order and recovery', () => {
+  /** Wire names of the live cells, in registration order. */
+  const keys = (slots: SlotRegistry) => slots.entries(SLOT).map((entry) => (entry.options as { key?: string }).key)
+
+  it('waits for a stored auto read, then yields the third-party rank-0 cell instead of claiming it', async () => {
+    const client = await mountClient(settingsWith('auto'), { foreignKeys: ['shell'], holdSettings: true })
+    // The stored mode is not known yet, so nothing may occupy the default rank.
+    expect(keys(client.slots)).toEqual(['shell'])
+    client.releaseSettings()
+    const store = client.store()
+    await settingsLoaded(store)
+    expect(store.getSnapshot().settingsDraft?.toolDisplay).toBe('auto')
+    const ranks = (key: string) => client.slots.entries(SLOT)
+      .filter((entry) => (entry.options as { key?: string }).key === key)
+      .map((entry) => (entry.options as { priority?: number }).priority)
+      .sort((a, b) => (a ?? 0) - (b ?? 0))
+    expect(ranks('shell')).toEqual([0, 10])
+    expect(ranks('web')).toEqual([10])
+    expect(ranks('agent')).toEqual([10])
+    const shell = client.slots.entriesOfSlot(SLOT).find((entry) => (entry.options as { key?: string }).key === 'shell')
+    expect(shell?.component).toBe(ThirdPartyView)
+  })
+
+  it('waits for a stored native read and then registers no cell at all', async () => {
+    const client = await mountClient(settingsWith('native'), { foreignKeys: ['web'], holdSettings: true })
+    expect(keys(client.slots)).toEqual(['web'])
+    client.releaseSettings()
+    const store = client.store()
+    await settingsLoaded(store)
+    expect(store.getSnapshot().settingsDraft?.toolDisplay).toBe('native')
+    expect(keys(client.slots)).toEqual(['web'])
+  })
+
+  it('falls back to nexus rank when the first settings read fails, with the existing error notice', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const client = await mountClient(settingsWith('auto'), { failSettings: true, holdSettings: true, preDeclare: true })
+      expect(keys(client.slots)).toEqual([])
+      client.releaseSettings()
+      const store = client.store()
+      await vi.waitFor(() => { expect(store.getSnapshot().notice).toBe('error') }, { timeout: 2_000 })
+      expect(store.getSnapshot().settingsDraft).toBeUndefined()
+      expect(priorities(client.slots)).toEqual({ shell: 0, web: 0, agent: 0 })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps the other two keys when a rank-0 third party registered before the plugin in nexus mode', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const client = await mountClient(settingsWith('nexus'), { foreignKeys: ['shell'] })
+      const store = client.store()
+      await settingsLoaded(store)
+      expect(store.getSnapshot().settingsDraft?.toolDisplay).toBe('nexus')
+      const rows = client.slots.entries(SLOT)
+      const cells = (key: string) => rows.filter((entry) => (entry.options as { key?: string }).key === key)
+      // The foreign cell keeps the key; the per-key refusal must not cost the other two.
+      expect(keys(client.slots)).toEqual(['shell', 'web', 'agent'])
+      expect(cells('shell')).toHaveLength(1)
+      expect(client.slots.entriesOfSlot(SLOT).find((entry) => (entry.options as { key?: string }).key === 'shell')?.component).toBe(ThirdPartyView)
+      expect(cells('web')).toHaveLength(1)
+      expect(cells('agent')).toHaveLength(1)
+      expect((cells('web')[0]!.options as { priority?: number }).priority).toBe(0)
+      expect((cells('agent')[0]!.options as { priority?: number }).priority).toBe(0)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('removes its three cells when the plugin unloads', async () => {
+    const client = await mountClient(settingsWith('nexus'))
+    client.declare()
+    await settingsLoaded(client.store())
+    expectSingleCells(client.slots)
+    await client.unload()
+    expect(client.slots.entries(SLOT)).toEqual([])
+  })
+
+  it('retries a refused inject on the next publish and ends with the cells registered', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const client = await mountClient(settingsWith('nexus'), { injectFailures: 1 })
+      client.declare()
+      const store = client.store()
+      await settingsLoaded(store)
+      // The refused attempt must not be remembered as applied: the publishes that
+      // follow it retry, so the cards end up registered without a reload.
+      expect(keys(client.slots)).toEqual(['shell', 'web', 'agent'])
+      const draft = store.getSnapshot().settingsDraft!
+      store.editSettings({ ...draft, files: { ...draft.files, defaultLines: 321 } })
+      expect(priorities(client.slots)).toEqual({ shell: 0, web: 0, agent: 0 })
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

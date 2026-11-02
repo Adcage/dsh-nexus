@@ -29,16 +29,23 @@ function safeRegistration(register: () => () => void): () => void {
   }
 }
 /**
- * The display mode the live console asks for right now.
+ * The display mode the live console asks for right now, or `undefined` while the
+ * stored mode is still unknown.
  *
  * Draft first: the console control previews its own presentation immediately,
  * while saving remains the explicit action that makes it the stored default.
- * Saved settings answer on a fresh load before the read completes, and a missing
- * value means the documented default.
+ * Saved settings answer on a fresh load before the read completes. Until either
+ * exists nothing may be registered: the documented default would claim rank 0
+ * in that window and can make a third-party plugin registering the same key at
+ * that rank throw, which is the coexistence case this switch exists for. A
+ * failed first read publishes `error` and answers with the default so a user
+ * still gets cards.
  */
-function requestedToolDisplay(store: ConsoleStore): ToolDisplayMode {
+function requestedToolDisplay(store: ConsoleStore): ToolDisplayMode | undefined {
   const snapshot = store.getSnapshot()
-  return snapshot.settingsDraft?.toolDisplay ?? snapshot.settingsSaved?.value.toolDisplay ?? 'nexus'
+  if (snapshot.settingsDraft !== undefined) return snapshot.settingsDraft.toolDisplay
+  if (snapshot.settingsSaved !== undefined) return snapshot.settingsSaved.value.toolDisplay
+  return snapshot.notice === 'error' ? 'nexus' : undefined
 }
 function ConsoleIcon({ size }: SidebarPanelIconOwnerProps) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
@@ -83,20 +90,22 @@ export function apply(ctx: Context): void {
       // The Tool owner declares `tool.call.toolview`. When that package is not
       // composed every call keeps its generic card, so a missing declaration
       // must not disturb the console seats registered above. The mode is read
-      // from the live store on every publish: a switch disposes the old cells
-      // and registers once at the new rank, and an unchanged mode does nothing.
+      // from the live store on every publish: registration waits until the
+      // stored mode is known, a switch disposes the old cells and registers
+      // once at the new rank, and an unchanged mode does nothing.
       let dispose = noop
       let active: ToolDisplayMode | undefined
       const reconcile = () => {
         const mode = requestedToolDisplay(store)
         if (mode === active) return
-        active = mode
         dispose()
         dispose = noop
-        if (mode === 'native') return
+        if (mode === undefined || mode === 'native') { active = mode; return }
         try {
           dispose = ctx.slots.inject(TOOL_VIEW_SLOT, () => registerNexusToolViews(ctx, TOOL_VIEW_PRIORITY[mode]))
+          active = mode
         } catch {
+          // Not applied: leave the mode unknown so a later publish retries.
           console.warn('[dsh-nexus] the native tool card slot is unavailable')
         }
       }

@@ -20,7 +20,7 @@ import { act, createElement, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply } from '../../src/client/index.tsx'
 import { NEXUS_TOOL_STAGE, type NexusToolStage } from '../../src/client/tool-models.ts'
 import { createConsoleStore } from '../../src/client/store.ts'
@@ -66,7 +66,25 @@ interface Mounted {
 const mounted: Mounted[] = []
 afterEach(async () => { for (const view of mounted.splice(0)) await view.close() })
 
+/**
+ * Wait for the plugin's three cells.
+ *
+ * Registration now waits for the stored mode to become known. This spec has no
+ * host, so the first settings read fails and the documented `nexus` fallback is
+ * what registers the cards the render assertions below read.
+ * @param client - mounted plugin.
+ */
+async function cellsReady(client: Mounted): Promise<void> {
+  await vi.waitFor(() => {
+    const keys = client.slots.entries('tool.call.toolview').map((row) => row.options.key)
+    expect(keys).toEqual(expect.arrayContaining([...NEXUS_KEYS]))
+  }, { timeout: 2_000 })
+}
+
 async function mountClient(): Promise<Mounted> {
+  // No host answers this spec: the failing read exercises the fallback that
+  // registers the cards, instead of leaving the render assertions with no view.
+  globalThis.fetch = (() => Promise.reject(new Error('no host in this spec'))) as typeof fetch
   const ctx = new Context()
   const slots = nativeRegistry(ctx)
   // The locale service is a controlled external boundary; slot registration and
@@ -169,6 +187,7 @@ describe('Nexus tool views', () => {
   it('registers one keyed view per Nexus wire name, keeps foreign views and unregisters cleanly', async () => {
     const client = await mountClient()
     const owner = client.declare()
+    await cellsReady(client)
     expect(client.slots.entries('tool.call.toolview').map((row) => row.options.key)).toEqual([...NEXUS_KEYS])
     expect(client.slots.spec('tool.call.toolview')).toMatchObject({ kind: 'keyed', scope: 'session' })
 
@@ -177,6 +196,7 @@ describe('Nexus tool views', () => {
     owner()
     expect(client.slots.entries('tool.call.toolview')).toEqual([])
     client.declare()
+    await cellsReady(client)
     expect(client.slots.entries('tool.call.toolview').map((row) => row.options.key).sort()).toEqual(['agent', 'shell', 'web'])
 
     // A third-party view keeps its own cell: our unload removes our three and
@@ -190,6 +210,7 @@ describe('Nexus tool views', () => {
   it('presents the preparing and running stages with no recorded output and no completion claim', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const preparing = await render(shell, recorded('shell', 'preparing', { phase: 'preparing', name: 'shell' }))
     expect(preparing.node.querySelector('[data-dsh-nexus-stage="pending"]')).not.toBeNull()
@@ -206,6 +227,7 @@ describe('Nexus tool views', () => {
   it('reads the stage from the recorded block when the owner passes no phase', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const dispatch = (block: unknown) => ({ callId: 'call-1', toolName: 'shell', block, t: (key: keyof typeof en) => en[key] })
     // The profile's 0.1.0 owner passes the frozen call block and no `phase`; its
@@ -253,6 +275,7 @@ describe('Nexus tool views', () => {
   it('renders recorded shell facts and the recorded failure identity as recorded', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const settled = await render(shell, recorded('shell', 'result', resultBlock()))
     expect(settled.node.querySelector('[data-dsh-nexus-stage="recorded"]')).not.toBeNull()
@@ -285,6 +308,7 @@ describe('Nexus tool views', () => {
   it('shows only the title, stage, argument summary and failure line until the card disclosure opens', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const card = await render(shell, recorded('shell', 'result', resultBlock({
       isError: true,
@@ -327,6 +351,7 @@ describe('Nexus tool views', () => {
   it('folds the non-text block count and the cut-preview note into the same disclosure', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const card = await render(shell, recorded('shell', 'result', resultBlock({
       content: [{ type: 'image', source: { type: 'base64', data: 'AAAA' } }, { type: 'text', text: 'z'.repeat(40_000) }],
@@ -346,6 +371,7 @@ describe('Nexus tool views', () => {
   it('compacts the web and agent cards without dropping a recorded fact', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const web = await render(viewOf(client.slots, 'web'), recorded('web', 'result', resultBlock({
       name: 'web',
       call: { name: 'web', argsRaw: JSON.stringify({ action: 'search', queries: ['dsh tools'] }) },
@@ -374,6 +400,7 @@ describe('Nexus tool views', () => {
   it('renders web and agent facts from the recorded meta of their owning tools', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const web = await render(viewOf(client.slots, 'web'), recorded('web', 'result', resultBlock({
       name: 'web',
       call: { name: 'web', argsRaw: JSON.stringify({ action: 'search', queries: ['dsh tools'] }) },
@@ -399,6 +426,7 @@ describe('Nexus tool views', () => {
   it('never renders a background launch, a stop request, a timeout or empty output as an exit or a success', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     // A published background command returns before the process does: the card
     // shows the recorded status and never a completion label.
@@ -450,6 +478,7 @@ describe('Nexus tool views', () => {
   it('safely_replays_malformed_results_without_inventing_completion', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const hostile = new Proxy({}, { get() { throw new Error('hostile block') } })
     const payloads: Record<string, unknown>[] = [
@@ -486,6 +515,7 @@ describe('Nexus tool views', () => {
   it('bounds oversized recorded output and meta instead of rendering them whole', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const oversized = await render(shell, recorded('shell', 'result', resultBlock({
       content: [{ type: 'text', text: 'z'.repeat(40_000) }],
@@ -499,6 +529,7 @@ describe('Nexus tool views', () => {
   it('renders PTC subcalls as recorded without rebuilding their pairing', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const parent = await render(shell, recorded('shell', 'result', resultBlock({
       content: [{ type: 'text', text: 'parent call recorded output' }],
@@ -516,6 +547,7 @@ describe('Nexus tool views', () => {
   it('offers Inspect only when the owner supplies that callback, and offers no live lookup', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     let inspected = 0
     let loaded = 0
@@ -539,6 +571,7 @@ describe('Nexus tool views', () => {
   it('replays the same recorded payload identically and does not consult current state', async () => {
     const client = await mountClient()
     client.declare()
+    await cellsReady(client)
     const shell = viewOf(client.slots, 'shell')
     const block = resultBlock()
     const first = await render(shell, recorded('shell', 'result', block))
