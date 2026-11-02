@@ -28,6 +28,7 @@ import { createNexusPreset } from './preset/definition.ts'
 import { detectNativeComposition } from './preset/native.ts'
 import { registerTerminalBackends } from './shell/terminals.ts'
 import { NEXUS_RUNTIME_INJECT, openNexusRuntime } from './runtime/service.ts'
+import { registerRoutes } from './http/routes.ts'
 
 /** Loader row id; mirrors the package name and `cordis.patch.yml`. */
 export const name = 'dsh-nexus'
@@ -56,6 +57,10 @@ export { Config } from './config.ts'
  */
 export async function apply(ctx: Context, config: NexusConfig): Promise<void> {
   const runtime = await openNexusRuntime(ctx, config)
+
+  // Optional transport: a headless/CLI host still owns the same runtime/preset.
+  // This narrower gate also declares the native registry needed on HTTP cold paths.
+  ctx.inject(['webServer', 'agents'], (scope) => { registerRoutes(scope, runtime) })
 
   // One registration per composed realm: the terminal service is a host
   // service, so every Nexus generation consumes these same backends. Registering

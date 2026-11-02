@@ -39,7 +39,8 @@ import {
   type WriteCoordinator,
 } from '../agent/coordination.ts'
 import { createPromptSessions, type PromptSessions } from '../prompts/sessions.ts'
-import type { RuntimeSettings } from '../protocol.ts'
+import type { PromptLibrary, RuntimeSettings } from '../protocol.ts'
+import { validatePromptLibrary } from '../prompts/validate.ts'
 import { NexusError } from './errors.ts'
 import type { ShellExecutionConfig } from '../shell/engines.ts'
 import { openNexusStore, type NexusStore, type Stored } from '../storage/store.ts'
@@ -127,6 +128,10 @@ export interface NexusRuntime {
    * @returns the immutable committed record; the hash is only a lost-update guard.
    */
   getSettings(): Stored<RuntimeSettings>
+  /** Host admission check, including already-entered HTTP handlers after awaits. */
+  assertAvailable(): void
+  /** Admit a validated library write synchronously, before shutdown can drain the store. */
+  saveLibrary(value: PromptLibrary, expectedHash: string): Promise<Stored<PromptLibrary>>
   /**
    * Replace the settings after the durable write succeeds.
    *
@@ -337,6 +342,15 @@ class NexusRuntimeHandle implements NexusRuntime {
   getSettings(): Stored<RuntimeSettings> {
     this.assertOpen('read the Nexus settings')
     return this.committed
+  }
+
+  assertAvailable(): void {
+    this.assertAdmitting('use the Nexus runtime')
+  }
+
+  async saveLibrary(value: PromptLibrary, expectedHash: string): Promise<Stored<PromptLibrary>> {
+    this.assertAvailable()
+    return this.store.saveLibrary(validatePromptLibrary(value), expectedHash)
   }
 
   async saveSettings(value: RuntimeSettings, expectedHash: string): Promise<Stored<RuntimeSettings>> {

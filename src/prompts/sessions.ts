@@ -39,10 +39,9 @@
  * other — production composition must hold ONE instance across the generations
  * that can overlap (Task 9).
  *
- * Module count and byte limits are NOT validated here: Task 10 owns the single
- * library validator behind the console save/apply/preview path, so this seam
- * validates references only and never duplicates the 32-module/32 KiB/128 KiB
- * bounds.
+ * Explicit apply uses the shared library validator also used by console saves
+ * and draft previews. Recovery and initialization still read historical saved
+ * snapshots without tightening the storage schemas.
  *
  * @module dsh-nexus/prompts/sessions
  */
@@ -53,6 +52,7 @@ import type { PromptModule, PromptSnapshot } from '../protocol.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { NexusStore } from '../storage/store.ts'
 import { composePromptText, selectedPromptModules } from './assemble.ts'
+import { validatePromptLibrary } from './validate.ts'
 
 /** The per-session prompt state one Nexus plugin instance owns. */
 export interface PromptSessions {
@@ -75,12 +75,13 @@ export interface PromptSessions {
    * @param agent - the exact live Agent.
    * @param selection - module ids in assembly order.
    * @param expectedLibraryHash - hash the caller last read; a library that changed since then refuses the apply.
+   * @param assertTarget - optional host identity/admission check, repeated after queued IO and before durable write/publication.
    * @returns the snapshot now effective for that agent.
    * @throws NexusError `NO_AGENT` when the Agent has no initialized snapshot or was disposed meanwhile.
    * @throws NexusError `CONFIG_CONFLICT` when the library changed since `expectedLibraryHash`.
    * @throws NexusError `INVALID_ARGUMENT` for a repeated, unknown or ambiguous module id.
    */
-  apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string): Promise<PromptSnapshot>
+  apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string, assertTarget?: () => void): Promise<PromptSnapshot>
   /**
    * Read the snapshot currently effective for one agent.
    * @param agent - the exact live Agent.
@@ -180,7 +181,7 @@ class PromptSessionsHandle implements PromptSessions {
     return this.serialize(entry.sessionId, () => this.resolveInitial(entry))
   }
 
-  async apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string): Promise<PromptSnapshot> {
+  async apply(agent: Agent, selection: readonly string[], expectedLibraryHash: string, assertTarget?: () => void): Promise<PromptSnapshot> {
     this.assertAdmitting('apply a Nexus prompt')
     const entry = this.entries.get(agent)
     if (entry === undefined) {
@@ -189,7 +190,7 @@ class PromptSessionsHandle implements PromptSessions {
         `the Nexus prompt for session "${agent.id}" was never initialized; apply needs the exact Agent whose persona registration ran, not a session id`,
       )
     }
-    return this.serialize(entry.sessionId, () => this.applySelection(entry, selection, expectedLibraryHash))
+    return this.serialize(entry.sessionId, () => this.applySelection(entry, selection, expectedLibraryHash, assertTarget))
   }
 
   peek(agent: Agent): PromptSnapshot {
@@ -362,6 +363,7 @@ class PromptSessionsHandle implements PromptSessions {
     entry: AgentEntry,
     selection: readonly string[],
     expectedLibraryHash: string,
+    assertTarget?: () => void,
   ): Promise<PromptSnapshot> {
     this.assertLive(entry)
     if (entry.snapshot === undefined) {
@@ -377,10 +379,12 @@ class PromptSessionsHandle implements PromptSessions {
         'the prompt library changed since it was read; read it again and reapply the selection you meant',
       )
     }
-    const modules = selectedPromptModules(library.value, selection)
+    const modules = selectedPromptModules(validatePromptLibrary(library.value), selection)
     const snapshot = freezeSnapshot(entry.sessionId, selection, modules, composePromptText(modules))
     this.assertLive(entry)
+    assertTarget?.()
     await this.store.putPrompt(snapshot)
+    assertTarget?.()
     return this.publish(entry, snapshot)
   }
 

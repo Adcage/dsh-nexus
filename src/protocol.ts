@@ -54,6 +54,32 @@ export interface PromptSnapshot {
   readonly text: string
 }
 
+/** HTTP console namespace; these named routes have their own security boundary. */
+export const NEXUS_API_PREFIX = '/api/dsh-nexus'
+
+/** Opaque lost-update token, not a user-visible version. */
+export interface ConsoleStored<T> { readonly value: T; readonly hash: string }
+/** Strict complete PUT payload for library/settings. */
+export interface ConsoleSave<T> { readonly value: T; readonly expectedHash: string }
+/** Draft-only preview: never includes a fabricated session identity. */
+export interface PromptPreviewRequest { readonly library: PromptLibrary; readonly selection: readonly string[] }
+export interface PromptPreview { readonly selection: readonly string[]; readonly modules: readonly PromptModule[]; readonly text: string }
+/** Explicit apply always resolves bodies from the saved library. */
+export interface PromptApplyRequest { readonly selection: readonly string[]; readonly expectedLibraryHash: string }
+/** GET sessions: exact live Nexus actors only. */
+export interface ConsoleSession { readonly id: string; readonly title: string }
+/** Every HTTP failure uses this shape; infrastructure details stay on the host. */
+export interface ConsoleError { readonly error: { readonly code: string; readonly message: string } }
+/** Registration facts do not claim OS, account, GUI or provider verification. */
+export interface ConsoleCapabilities {
+  readonly csrfToken: string
+  readonly verification: 'unverified'
+  readonly registered: { readonly consoleApi: true; readonly nexusRuntime: true }
+  readonly diagnostics: readonly string[]
+  readonly settingsLocation: { readonly namespace: 'dsh-nexus'; readonly domain: 'dsh_nexus' }
+  readonly basePrompt: string
+}
+
 /** Shell dialect Nexus can start; both are supported, `bash` is the default. */
 export type ShellEngine = 'bash' | 'pwsh'
 
