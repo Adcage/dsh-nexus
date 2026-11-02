@@ -59,11 +59,16 @@ interface MountOptions {
   readonly foreignKeys?: readonly string[]
   /** Reject the stored-settings read with a server error instead of answering. */
   readonly failSettings?: boolean
+  /** Reject the prompt-library read, which shares the store's `error` notice with the settings read. */
+  readonly failLibrary?: boolean
   /** Hold the stored-settings read until {@link Mounted.releaseSettings} runs. */
   readonly holdSettings?: boolean
   /** Declare the Tool owner's slot before the plugin mounts, as a real host does. */
   readonly preDeclare?: boolean
-  /** Throw from `ctx.slots.inject` this many times before delegating to the registry. */
+  /**
+   * Throw from `ctx.slots.inject` this many times before delegating to the
+   * registry; `Number.POSITIVE_INFINITY` refuses every attempt.
+   */
   readonly injectFailures?: number
 }
 
@@ -80,6 +85,8 @@ interface Mounted {
   readonly localeRegister: () => () => void
   /** Count of `tool.call.toolview` registrations the plugin performed so far. */
   toolRegistrations(): number
+  /** Count of `ctx.slots.inject` attempts the plugin made for `tool.call.toolview`. */
+  toolInjectAttempts(): number
   /** Unload this plugin's client half and nothing else. */
   unload(): Promise<void>
   /** Unload the plugin and dispose the context; safe to call more than once. */
@@ -119,6 +126,9 @@ async function mountClient(stored: RuntimeSettings, options: MountOptions = {}):
       if (options.holdSettings === true) await settingsGate.promise
       if (options.failSettings === true) return Response.json({ error: { code: 'SETTINGS_UNAVAILABLE', message: 'unavailable' } }, { status: 500 })
     }
+    if (path.endsWith('/library') && method === 'GET' && options.failLibrary === true) {
+      return Response.json({ error: { code: 'LIBRARY_UNAVAILABLE', message: 'unavailable' } }, { status: 500 })
+    }
     return fetch(input, init)
   }) as typeof globalThis.fetch
   const ctx = new Context()
@@ -132,17 +142,19 @@ async function mountClient(stored: RuntimeSettings, options: MountOptions = {}):
       return originalRegister(options, component)
     },
   })
-  if (options.injectFailures !== undefined) {
-    const originalInject = slots.inject.bind(slots)
-    let remaining = options.injectFailures
-    Object.defineProperty(slots, 'inject', {
-      configurable: true,
-      value: (name: Parameters<typeof originalInject>[0], factory: Parameters<typeof originalInject>[1]) => {
-        if (name === SLOT && remaining > 0) { remaining -= 1; throw new Error('slot not ready') }
-        return originalInject(name, factory)
-      },
-    })
-  }
+  const originalInject = slots.inject.bind(slots)
+  let injectRemaining = options.injectFailures ?? 0
+  let toolInjectAttempts = 0
+  Object.defineProperty(slots, 'inject', {
+    configurable: true,
+    value: (name: Parameters<typeof originalInject>[0], factory: Parameters<typeof originalInject>[1]) => {
+      if (name === SLOT) {
+        toolInjectAttempts += 1
+        if (injectRemaining > 0) { injectRemaining -= 1; throw new Error('slot not ready') }
+      }
+      return originalInject(name, factory)
+    },
+  })
   const declare = () => slots.register(
     { name: 'root', children: {
       main: { kind: 'keyed', scope: 'root' },
@@ -175,6 +187,7 @@ async function mountClient(stored: RuntimeSettings, options: MountOptions = {}):
     store: () => (slots.entries('settings.section')[0]!.inject!() as unknown as { store: ConsoleStore }).store,
     localeRegister,
     toolRegistrations: () => toolRegistrations,
+    toolInjectAttempts: () => toolInjectAttempts,
     unload: async () => { if (!closed) { closed = true; await fork.dispose() } },
     close: async () => { if (!closed) { closed = true; await fork.dispose() } await ctx.fiber.dispose() },
   }
@@ -185,6 +198,11 @@ async function mountClient(stored: RuntimeSettings, options: MountOptions = {}):
 /** Wait until the asynchronous settings read has reached the live draft. */
 async function settingsLoaded(store: ConsoleStore): Promise<void> {
   await vi.waitFor(() => { expect(store.getSnapshot().settingsDraft).toBeDefined() }, { timeout: 2_000 })
+}
+
+/** Wait until the mount's first refresh has finished, so no publish is still queued. */
+async function refreshSettled(store: ConsoleStore): Promise<void> {
+  await vi.waitFor(() => { expect(store.getSnapshot().busy.refresh).toBe(false) }, { timeout: 2_000 })
 }
 
 /** Priority the registry holds for each Nexus wire name, or undefined when absent. */
@@ -339,6 +357,60 @@ describe('tool display boot order and recovery', () => {
       await vi.waitFor(() => { expect(store.getSnapshot().notice).toBe('error') }, { timeout: 2_000 })
       expect(store.getSnapshot().settingsDraft).toBeUndefined()
       expect(priorities(client.slots)).toEqual({ shell: 0, web: 0, agent: 0 })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps the default rank free when a failing library read precedes the stored mode', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // The library read shares the store-wide `error` notice with the settings
+      // read, but it says nothing about the stored display mode: only the
+      // settings read settling may decide the rank.
+      const client = await mountClient(settingsWith('auto'), { foreignKeys: ['shell'], holdSettings: true, failLibrary: true })
+      const store = client.store()
+      await vi.waitFor(() => { expect(store.getSnapshot().notice).toBe('error') }, { timeout: 2_000 })
+      expect(store.getSnapshot().settingsDraft).toBeUndefined()
+      expect(keys(client.slots)).toEqual(['shell'])
+      client.releaseSettings()
+      await settingsLoaded(store)
+      await refreshSettled(store)
+      expect(store.getSnapshot().settingsDraft?.toolDisplay).toBe('auto')
+      const ranks = (key: string) => client.slots.entries(SLOT)
+        .filter((entry) => (entry.options as { key?: string }).key === key)
+        .map((entry) => (entry.options as { priority?: number }).priority)
+        .sort((a, b) => (a ?? 0) - (b ?? 0))
+      expect(ranks('shell')).toEqual([0, 10])
+      expect(ranks('web')).toEqual([10])
+      expect(ranks('agent')).toEqual([10])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('warns once per mode while a refused tool slot keeps retrying', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const client = await mountClient(settingsWith('nexus'), { injectFailures: Number.POSITIVE_INFINITY })
+      client.declare()
+      const store = client.store()
+      await settingsLoaded(store)
+      await refreshSettled(store)
+      const slotWarnings = () => warn.mock.calls.filter(([message]) => String(message).includes('native tool card slot')).length
+      expect(slotWarnings()).toBe(1)
+      const attempts = client.toolInjectAttempts()
+      const draft = store.getSnapshot().settingsDraft!
+      store.editSettings({ ...draft, files: { ...draft.files, defaultLines: 321 } })
+      store.editSettings({ ...draft, files: { ...draft.files, defaultLines: 322 } })
+      // Every publish still retries the slot; only the warning is latched.
+      expect(client.toolInjectAttempts()).toBe(attempts + 2)
+      expect(keys(client.slots)).toEqual([])
+      expect(slotWarnings()).toBe(1)
+      // A new mode is a new attempt, so the latch must not silence it forever.
+      store.editSettings({ ...draft, toolDisplay: 'auto' })
+      expect(client.toolInjectAttempts()).toBe(attempts + 3)
+      expect(slotWarnings()).toBe(2)
     } finally {
       warn.mockRestore()
     }

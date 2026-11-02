@@ -11,6 +11,14 @@ export interface ConsoleSnapshot {
   readonly libraryDraft?: PromptLibrary
   readonly settingsSaved?: ConsoleStored<RuntimeSettings>
   readonly settingsDraft?: RuntimeSettings
+  /**
+   * Whether the stored-settings read has answered — successfully or not.
+   *
+   * `notice` is store-wide and is published by every failing request, so it
+   * cannot tell a caller whether the *settings* read is still in flight. Only
+   * this flag may gate a decision that depends on the stored settings.
+   */
+  readonly settingsSettled: boolean
   readonly libraryDirty: boolean
   readonly settingsDirty: boolean
   readonly selection: readonly string[]
@@ -29,7 +37,7 @@ function freeze<T>(value: T): T {
   return value
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
-export const EMPTY_CONSOLE_SNAPSHOT: ConsoleSnapshot = freeze({ sessions: [], libraryDirty: false, settingsDirty: false, selection: [], canApply: false, notice: 'idle', busy: { refresh: false, library: false, settings: false, preview: false, apply: false } })
+export const EMPTY_CONSOLE_SNAPSHOT: ConsoleSnapshot = freeze({ sessions: [], libraryDirty: false, settingsDirty: false, settingsSettled: false, selection: [], canApply: false, notice: 'idle', busy: { refresh: false, library: false, settings: false, preview: false, apply: false } })
 
 export function createConsoleStore(api: NexusApi) {
   let state = EMPTY_CONSOLE_SNAPSHOT
@@ -51,7 +59,7 @@ export function createConsoleStore(api: NexusApi) {
     for (const listener of listeners) { try { listener() } catch { /* A foreign observer cannot break the state owner. */ } }
   }
   const busy = (key: keyof ConsoleSnapshot['busy'], value: boolean) => publish({ busy: { ...state.busy, [key]: value } })
-  const failed = (error: unknown) => publish({ notice: error instanceof NexusApiError && error.status === 409 ? 'conflict' : 'error' })
+  const failed = (error: unknown, patch: Partial<ConsoleSnapshot> = {}) => publish({ ...patch, notice: error instanceof NexusApiError && error.status === 409 ? 'conflict' : 'error' })
   function acceptLibrary(value: unknown, revision: number, discard: boolean) {
     const saved = consoleData.library.parse(value)
     const replace = libraryRevision === revision && (discard || !state.libraryDirty)
@@ -67,7 +75,7 @@ export function createConsoleStore(api: NexusApi) {
   function acceptSettings(value: unknown, revision: number, discard: boolean) {
     const saved = consoleData.settings.parse(value)
     const replace = settingsRevision === revision && (discard || !state.settingsDirty)
-    publish({ settingsSaved: saved, ...(replace ? { settingsDraft: saved.value, ...(discard ? { notice: 'idle' as const } : {}) } : {}) })
+    publish({ settingsSaved: saved, settingsSettled: true, ...(replace ? { settingsDraft: saved.value, ...(discard ? { notice: 'idle' as const } : {}) } : {}) })
   }
   async function readLibrary(discard: boolean) {
     if (disposed || state.busy.library) return
@@ -77,7 +85,7 @@ export function createConsoleStore(api: NexusApi) {
   async function readSettings(discard: boolean) {
     if (disposed || state.busy.settings) return
     const request = ++settingsRequest, revision = settingsRevision
-    try { const value = await api.settings(); if (request === settingsRequest) acceptSettings(value, revision, discard) } catch (e) { if (request === settingsRequest) failed(e) }
+    try { const value = await api.settings(); if (request === settingsRequest) acceptSettings(value, revision, discard) } catch (e) { if (request === settingsRequest) failed(e, { settingsSettled: true }) }
   }
   const store = {
     getSnapshot: () => state,
@@ -91,14 +99,19 @@ export function createConsoleStore(api: NexusApi) {
       const request = ++refreshRequest
       busy('refresh', true)
       try {
-        const [caps, sessions] = await Promise.all([api.capabilities(), api.sessions()])
-        if (disposed || request !== refreshRequest) return
-        const facts = consoleData.capabilities.parse(caps), roster = consoleData.sessions.parse(sessions)
-        publish({ capabilities: facts, sessions: roster })
-        if (state.targetId !== undefined && !roster.some((s) => s.id === state.targetId)) await store.selectTarget(undefined)
+        try {
+          const [caps, sessions] = await Promise.all([api.capabilities(), api.sessions()])
+          if (disposed || request !== refreshRequest) return
+          const facts = consoleData.capabilities.parse(caps), roster = consoleData.sessions.parse(sessions)
+          publish({ capabilities: facts, sessions: roster })
+          if (state.targetId !== undefined && !roster.some((s) => s.id === state.targetId)) await store.selectTarget(undefined)
+        } catch (e) { if (request === refreshRequest) failed(e) }
+        // Both reads run even when the roster stage above failed: they publish
+        // the stored mode and, through `settingsSettled`, decide whether anyone
+        // may fall back to a default. A partly unavailable console API must not
+        // leave that question open for the next publish to answer wrongly.
         await Promise.all([readLibrary(false), readSettings(false)])
-      } catch (e) { if (request === refreshRequest) failed(e) }
-      finally { if (request === refreshRequest) busy('refresh', false) }
+      } finally { if (request === refreshRequest) busy('refresh', false) }
     },
     reloadLibrary: () => readLibrary(true),
     reloadSettings: () => readSettings(true),
@@ -190,7 +203,7 @@ const snapshotShape = z.object({
   capabilities: consoleData.capabilities.optional(), sessions: consoleData.sessions,
   librarySaved: consoleData.library.optional(), libraryDraft: consoleData.library.shape.value.optional(),
   settingsSaved: consoleData.settings.optional(), settingsDraft: consoleData.settings.shape.value.optional(),
-  libraryDirty: z.boolean(), settingsDirty: z.boolean(), selection: z.array(z.string()), targetId: z.string().optional(),
+  libraryDirty: z.boolean(), settingsDirty: z.boolean(), settingsSettled: z.boolean(), selection: z.array(z.string()), targetId: z.string().optional(),
   applied: consoleData.prompt.optional(), preview: consoleData.preview.optional(), canApply: z.boolean(),
   notice: z.enum(['idle', 'saved', 'previewed', 'applied', 'error', 'conflict']),
   busy: z.object({ refresh: z.boolean(), library: z.boolean(), settings: z.boolean(), preview: z.boolean(), apply: z.boolean() }),

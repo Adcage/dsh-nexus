@@ -37,15 +37,19 @@ function safeRegistration(register: () => () => void): () => void {
  * Saved settings answer on a fresh load before the read completes. Until either
  * exists nothing may be registered: the documented default would claim rank 0
  * in that window and can make a third-party plugin registering the same key at
- * that rank throw, which is the coexistence case this switch exists for. A
- * failed first read publishes `error` and answers with the default so a user
- * still gets cards.
+ * that rank throw, which is the coexistence case this switch exists for.
+ *
+ * The `nexus` fallback waits for the settings read itself, not for a failed
+ * request: `notice` is store-wide, so a failing library read while the settings
+ * GET is still in flight would otherwise claim rank 0 in exactly that window.
+ * Only a settled settings read with no stored value answers with the default, so
+ * a user still gets cards when the settings read is refused.
  */
 function requestedToolDisplay(store: ConsoleStore): ToolDisplayMode | undefined {
   const snapshot = store.getSnapshot()
   if (snapshot.settingsDraft !== undefined) return snapshot.settingsDraft.toolDisplay
   if (snapshot.settingsSaved !== undefined) return snapshot.settingsSaved.value.toolDisplay
-  return snapshot.notice === 'error' ? 'nexus' : undefined
+  return snapshot.settingsSettled ? 'nexus' : undefined
 }
 function ConsoleIcon({ size }: SidebarPanelIconOwnerProps) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
@@ -95,8 +99,13 @@ export function apply(ctx: Context): void {
       // once at the new rank, and an unchanged mode does nothing.
       let dispose = noop
       let active: ToolDisplayMode | undefined
+      let requested: ToolDisplayMode | undefined
+      let warned: ToolDisplayMode | undefined
       const reconcile = () => {
         const mode = requestedToolDisplay(store)
+        // A requested mode that changes is a fresh attempt, so the warning latch
+        // below must not silence a later refusal of the same mode forever.
+        if (mode !== requested) { requested = mode; warned = undefined }
         if (mode === active) return
         dispose()
         dispose = noop
@@ -105,7 +114,10 @@ export function apply(ctx: Context): void {
           dispose = ctx.slots.inject(TOOL_VIEW_SLOT, () => registerNexusToolViews(ctx, TOOL_VIEW_PRIORITY[mode]))
           active = mode
         } catch {
-          // Not applied: leave the mode unknown so a later publish retries.
+          // Not applied: leave the mode unknown so a later publish retries, and
+          // warn once per mode so a permanently absent slot cannot spam the log.
+          if (warned === mode) return
+          warned = mode
           console.warn('[dsh-nexus] the native tool card slot is unavailable')
         }
       }
