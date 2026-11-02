@@ -436,8 +436,15 @@ describe('startProcess', () => {
 const MSYS_STARTUP_STDERR =
   '      0 [main] bash (4548) E:\\Programme\\software\\Git\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-df7f0c9bbf0ef292): 0xC0000022\n'
 
-/** The Windows status code that fatal line exits with (0xC0000022 as unsigned). */
+/** The process exit status the confined bash run actually reports (`0xC0000142`, STATUS_DLL_INIT_FAILED). */
 const MSYS_STARTUP_STATUS = 3221225794
+
+/**
+ * The Win32 API error inside the stderr line (`0xC0000022`, STATUS_ACCESS_DENIED).
+ * It is a different fact from the process exit status above and must keep its own
+ * label in the diagnostic.
+ */
+const MSYS_STARTUP_API_ERROR_STATUS = 3221225506
 
 describe('confined Git Bash startup refusal', () => {
   it('refuses a confined Windows bash start that died on the MSYS2 shared-memory object', async () => {
@@ -457,11 +464,29 @@ describe('confined Git Bash startup refusal', () => {
     expect(refusal).toBeInstanceOf(NexusError)
     expect(refusal).toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
     const message = (refusal as Error).message
-    // Original facts survive in the diagnostic: status, signature and engine hint.
+    // Original facts survive in the diagnostic: the actual process status with
+    // ITS hex, the stderr's API-error signature, and the engine hint.
     expect(message).toContain('3221225794')
-    expect(message).toContain('0xC0000022')
+    expect(message).toContain('0xC0000142')
     expect(message).toContain('NtCreateDirectoryObject')
     expect(message).toContain('pwsh')
+    // The two labels are distinct facts: the exit status is not ACCESS_DENIED.
+    expect(message).not.toContain('3221225794 (0xC0000022)')
+    // The API error keeps the hex the captured stderr actually carries.
+    expect(message).toContain('0xC0000022')
+  })
+
+  it('does not classify the ACCESS_DENIED status when it is the process exit', async () => {
+    // A process that exits with 0xC0000022 itself (3221225506) is not the
+    // observed MSYS2 shape: the API error lives inside stderr, the process
+    // status is 0xC0000142. The numeric guard must not drift to the other code.
+    const shell = await openShellHarness({
+      sandbox: true,
+      script: () => ({ stderr: MSYS_STARTUP_STDERR, exitCode: MSYS_STARTUP_API_ERROR_STATUS }),
+    })
+    const managed = await start(shell.harness, { command: 'echo hi', cwd: CWD })
+    await managed.done
+    expect(() => refuseConfinedBashStartupFailure(managed, 'bash', 'win32')).not.toThrow()
   })
 
   it('does not classify a plain non-zero exit under the same confinement', async () => {

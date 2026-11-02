@@ -2,7 +2,7 @@
 
 本文是 **真实运行验收** 的操作手册，和自动化证据分层，不能互相冒充。自动化能证明什么、不能证明什么，写在最后。示例命令都在仓库根目录执行，且只操作项目内目录或一个**独立的** DSH Profile；不要动日常使用的 Profile，也不要手工修改 Profile 文件。
 
-当前版本：`dsh-nexus` 0.1.1，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。
+当前版本：`dsh-nexus` 0.1.2，目标运行时 DSH `0.2.1-rc.2`（`package.json` 的 `engines.dsh`）。
 
 ## 0. 先决条件
 
@@ -81,9 +81,10 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 
 ### 4.1 受限权限与 Git Bash（本机环境阻塞）
 
-DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令；MSYS2 运行时在启动阶段申请 `\BaseNamedObjects` 共享内存对象会被该令牌拒绝，bash 在解析命令前就以 `0xC0000022` 退出。因此在 `read-only`／`workspace-write` 权限预设下：
+DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令；MSYS2 运行时在启动阶段申请 `\BaseNamedObjects` 共享内存对象会被该令牌拒绝。这里有两个不同的量：stderr 里的 Win32 API 错误是 `0xC0000022`（`STATUS_ACCESS_DENIED`），进程退出状态是 `3221225794`（`0xC0000142`，`STATUS_DLL_INIT_FAILED`）。因此在 `read-only`／`workspace-write` 权限预设下：
 
-- Nexus 的 `shell` 工具会返回 `UNSUPPORTED_CAPABILITY`，消息说明是 MSYS2 运行时无法启动、保留原始退出码和有限的 stderr 片段，并提示显式改用 `engine: "pwsh"`；不会静默换引擎，也不会提高权限。
+- 只有**前台** `shell run` 会返回 `UNSUPPORTED_CAPABILITY`：消息说明是 MSYS2 运行时无法启动、同时保留原始退出状态（`3221225794` / `0xC0000142`）与有限的 stderr 片段（含 `0xC0000022`），并提示显式改用 `engine: "pwsh"`；不会静默换引擎，也不会提高权限。
+- 后台 `run background: true` 的完成报告目前只给原始退出状态与 stderr，没有这条命名错误；持久终端 `open` 也不走这条分类。
 - 需要受限执行时请显式传 `engine: "pwsh"`（PowerShell 7）。
 - `danger-full-access` 预设（默认）不受影响，Git Bash 正常。
 

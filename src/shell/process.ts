@@ -131,10 +131,14 @@ const PWSH_VERSION_PROBE_TIMEOUT_MS = 10_000
 const PWSH_VERSION_PROBE_COMMAND = '$PSVersionTable.PSVersion.Major'
 
 /**
- * Windows status code an MSYS2 program exits with when a Win32 call was denied
- * (`0xC0000022`, reported as an unsigned exit code).
+ * The process exit status a confined MSYS2 runtime reports on this host:
+ * `3221225794` = `0xC0000142` = STATUS_DLL_INIT_FAILED (unsigned).
+ *
+ * It is NOT `0xC0000022` (STATUS_ACCESS_DENIED, `3221225506`): that code appears
+ * only as the Win32 API error inside the captured stderr line, and it is the
+ * stderr signature — not this number — that proves the denial.
  */
-const WINDOWS_ACCESS_DENIED_STATUS = 3221225794
+const WINDOWS_DLL_INIT_FAILED_STATUS = 3221225794
 
 /**
  * The MSYS2 runtime's fatal startup line. Git Bash creates a shared-memory
@@ -145,6 +149,16 @@ const MSYS2_STARTUP_SIGNATURE = /NtCreateDirectoryObject\(\\BaseNamedObjects\\ms
 
 /** Captured stderr characters kept in a startup-refusal diagnostic. */
 const STARTUP_STDERR_EXCERPT_CHARS = 400
+
+/**
+ * Render an unsigned Windows status as its hex form, so a diagnostic never
+ * states a hex label that disagrees with the number it prints.
+ * @param status - unsigned 32-bit process status.
+ * @returns the `0x…` form.
+ */
+function hexStatus(status: number): string {
+  return `0x${(status >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+}
 
 /**
  * Start one managed ordinary process.
@@ -599,9 +613,13 @@ function readStderrTail(handle: SubprocessHandle): string {
  * the model would otherwise see an opaque failed command it has no way to
  * interpret — and retrying cannot help. The refusal fires only on all four
  * facts together: a Windows bash start, a confinement the provider actually
- * enforced, that exact status code, and the MSYS2 signature in captured stderr.
- * A plain denial, an unconfined run, a pwsh start and a non-Windows host are
- * never classified here, and no engine fallback is ever applied.
+ * enforced, that exact process status (`0xC0000142`), and the MSYS2 signature
+ * (which carries the API error `0xC0000022`) in captured stderr. The two codes
+ * are separate facts and the diagnostic labels each one correctly. A plain
+ * denial, an unconfined run, a pwsh start and a non-Windows host are never
+ * classified here, and no engine fallback is ever applied. Only the foreground
+ * `run` path reaches this refusal; a background run's completion report carries
+ * the raw status and stderr.
  * @param managed - settled managed process of the start being reported.
  * @param engine - engine that start selected.
  * @param platform - host platform whose confinement dialect applies.
@@ -618,14 +636,14 @@ export function refuseConfinedBashStartupFailure(
   // `danger-full-access` and a composition without `ctx.sandbox` leave it absent.
   if (sandbox === undefined || sandbox.enforcement === undefined) return
   const exitCode = managed.view().exitCode
-  if (exitCode !== WINDOWS_ACCESS_DENIED_STATUS) return
+  if (exitCode !== WINDOWS_DLL_INIT_FAILED_STATUS) return
   const stderr = readStderrTail(managed.handle)
   const signature = MSYS2_STARTUP_SIGNATURE.exec(stderr)
   if (signature === null) return
   const excerpt = stderr.trim().slice(0, STARTUP_STDERR_EXCERPT_CHARS)
   throw new NexusError(
     'UNSUPPORTED_CAPABILITY',
-    `Git Bash cannot start under this session's ${sandbox.mode} permission preset: the MSYS2 runtime was denied its shared-memory object and exited with status ${exitCode} (0xC0000022), so the command never ran. Choose engine "pwsh" explicitly for confined shell work on Windows; no engine fallback was applied. Captured stderr: "${excerpt}"`,
+    `Git Bash cannot start under this session's ${sandbox.mode} permission preset: the MSYS2 runtime was denied its shared-memory object (${signature[0]}) and the process exited with status ${exitCode} (${hexStatus(exitCode)}), so the command never ran. Choose engine "pwsh" explicitly for confined shell work on Windows; no engine fallback was applied. Captured stderr: "${excerpt}"`,
   )
 }
 

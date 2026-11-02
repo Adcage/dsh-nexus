@@ -14,11 +14,13 @@
  *
  * - CONFINED Git Bash. The harness confines win32 commands through the
  *   `windows-acl` runner, whose restricted token denies the MSYS2 runtime its
- *   `\BaseNamedObjects` shared-memory object, so bash dies at startup with
- *   `0xC0000022` before the command is parsed. That incompatibility is
- *   environment-level and recorded in `docs/testing/verification-record.md`
- *   (AC-07, blocked) with a minimal reproduction; it is not re-simulated here.
- *   The product's named refusal for that shape is covered by
+ *   `\BaseNamedObjects` shared-memory object. Two facts are separate there: the
+ *   stderr's Win32 API error is `0xC0000022` (STATUS_ACCESS_DENIED), while the
+ *   process exit status is `3221225794` = `0xC0000142` (STATUS_DLL_INIT_FAILED).
+ *   That incompatibility is environment-level and recorded in
+ *   `docs/testing/verification-record.md` (AC-07, blocked) with a minimal
+ *   reproduction; it is not re-simulated here. The product's named refusal for
+ *   that shape (foreground `run` only) is covered by
  *   `test/shell/process.test.ts` and `test/shell/tool.test.ts`.
  * - A live model, account, browser page or third-party installation.
  *
@@ -30,7 +32,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -39,7 +41,7 @@ import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import SubprocessLocal from '@deepseek-ai/dsh-subprocess-local'
 import { apply as applyShellEnv } from '@deepseek-ai/dsh-shell-env'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { TerminalSessionService } from '@deepseek-ai/dsh-terminal'
+import TerminalService, { TerminalSessionService } from '@deepseek-ai/dsh-terminal'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   mountAgentLoopTestDependencies,
@@ -48,7 +50,8 @@ import {
 import type { CallOwner } from '../../src/runtime/owner.ts'
 import { resolveEngine, type ShellExecutionConfig, type ShellEngineSpec } from '../../src/shell/engines.ts'
 import { registerTerminalBackends } from '../../src/shell/terminals.ts'
-import { createShellTool } from '../../src/shell/tool.ts'
+import { createShellSurface, createShellTool } from '../../src/shell/tool.ts'
+import { pidAlive } from '../support/pid-liveness.ts'
 
 // ---------------------------------------------------------------------------
 // Host gate: this file is the Windows acceptance evidence, not a portable suite.
@@ -87,20 +90,6 @@ async function eventually(predicate: () => boolean, boundMs: number): Promise<bo
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50))
   }
   return predicate()
-}
-
-/**
- * Whether a process id is still alive in this OS.
- * @param pid - process id to probe.
- * @returns true while the process exists.
- */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -174,19 +163,40 @@ interface WindowsShell {
    * @returns the registry result.
    */
   call(args: Record<string, unknown>): Promise<ToolExecutionResult>
-  /** Unload everything and assert the services are gone. */
+  /**
+   * Retire the generation scope this fixture mounted (`generationScope` only).
+   *
+   * This is the product's own retirement unit: the plugin fiber that owns the
+   * isolated terminal service, its backends and the shell surface is disposed,
+   * exactly as a preset generation is retired.
+   */
+  retireGeneration(): Promise<void>
+  /** Unload everything and throw if any service survived. */
   dispose(): Promise<void>
 }
 
-/** Fixtures owned by this file, disposed once at the end. */
+/** Fixtures mounted by the current case; drained after every case. */
 const mounted: WindowsShell[] = []
+
+/** What to mount: terminal settings, and whether to mount a generation scope. */
+interface WindowsShellOptions {
+  /** Terminal settings a case needs to change. */
+  readonly terminal?: Partial<ShellExecutionConfig['terminal']>
+  /**
+   * Mount the terminal capability the way a Nexus generation does — isolated
+   * `terminals`, its native backends and the shell surface inside one plugin
+   * fiber — instead of on the host context. The fixture then exposes
+   * {@link WindowsShell.retireGeneration}.
+   */
+  readonly generationScope?: boolean
+}
 
 /**
  * Mount the real shell surface: no scripted spawn, no scripted terminal.
- * @param overrides - terminal settings a case needs to change.
+ * @param options - terminal overrides and the mount shape.
  * @returns the mounted fixture.
  */
-async function openWindowsShell(overrides: Partial<ShellExecutionConfig['terminal']> = {}): Promise<WindowsShell> {
+async function openWindowsShell(options: WindowsShellOptions = {}): Promise<WindowsShell> {
   const ctx = new Context()
   // The testkit mounts the session-projection registry, the filesystem and the
   // native working-directory service (which needs both) in one order.
@@ -195,18 +205,37 @@ async function openWindowsShell(overrides: Partial<ShellExecutionConfig['termina
   await ctx.plugin(RefusingSandboxProvider)
   await ctx.plugin(SubprocessLocal)
   await ctx.plugin(applyShellEnv, {})
-  await ctx.plugin(LocalJobRegistry, {})
-  await ctx.plugin(TerminalSessionService)
+  await ctx.plugin(LocalJobRegistry)
   const loop = await mountAgentLoopTestHarness(ctx)
   const agent = await loop.create(SessionId('windows-acceptance'), {}, { cwd: workspace })
   const controller = new AbortController()
   const owner: CallOwner = { agent, sessionId: SessionId('windows-acceptance'), signal: controller.signal }
   const config: ShellExecutionConfig = {
     deployment: {},
-    terminal: { engine: 'bash', ...overrides },
+    terminal: { engine: 'bash', ...options.terminal },
   }
-  registerTerminalBackends(ctx, () => config)
-  ctx.tools.register(createShellTool(ctx, () => config))
+  let generation: { dispose(): Promise<unknown> } | undefined
+  if (options.generationScope === true) {
+    // Mirrors `src/preset/index.ts`: one plugin fiber owns the isolated terminal
+    // service, the native backends and the shell surface, so disposing the
+    // fiber is the generation retirement. There is no host-level `terminals`
+    // service at all, which is the deployed profile's shape.
+    generation = ctx.plugin({
+      name: 'windows-generation-scope',
+      inject: ['tools'],
+      apply(generationCtx) {
+        const scope = generationCtx.isolate('terminals')
+        scope.plugin(TerminalService)
+        generationCtx.effect(() => registerTerminalBackends(scope, () => config), 'windows generation backends')
+        scope.tools.register(createShellSurface(scope, () => config).tool)
+      },
+    })
+    await generation
+  } else {
+    await ctx.plugin(TerminalSessionService)
+    registerTerminalBackends(ctx, () => config)
+    ctx.tools.register(createShellTool(ctx, () => config))
+  }
   let callCount = 0
   const fixture: WindowsShell = {
     ctx,
@@ -222,15 +251,57 @@ async function openWindowsShell(overrides: Partial<ShellExecutionConfig['termina
         signal: controller.signal,
       })
     },
+    async retireGeneration() {
+      const fiber = generation
+      generation = undefined
+      if (fiber === undefined) throw new Error('this fixture did not mount a generation scope')
+      await fiber.dispose()
+    },
     async dispose() {
       await ctx.fiber.dispose()
-      for (const service of ['agentLoop', 'agents', 'subprocess', 'terminals', 'jobs', 'tools']) {
-        expect(ctx.get(service), `${service} survived teardown`).toBeUndefined()
-      }
+      assertServicesRemoved(ctx, ['agentLoop', 'agents', 'subprocess', 'terminals', 'jobs', 'tools'])
     },
   }
   mounted.push(fixture)
   return fixture
+}
+
+/**
+ * Assert that the named services are gone from a context.
+ *
+ * Kept as a function so its own sensitivity can be tested: a teardown assertion
+ * that can never fail is worse than none.
+ * @param ctx - context to inspect (any `get` shape).
+ * @param services - service names the unloaded composition must not provide.
+ * @throws Error naming the first service that survived.
+ */
+function assertServicesRemoved(
+  ctx: { get(name: string): unknown },
+  services: readonly string[],
+): void {
+  for (const service of services) {
+    if (ctx.get(service) !== undefined) throw new Error(`${service} survived teardown`)
+  }
+}
+
+/**
+ * Dispose every fixture the current case mounted.
+ *
+ * A disposal failure is rethrown after the remaining fixtures are disposed, so
+ * one case can neither hide cleanup failures nor strand the others.
+ */
+async function drainFixtures(): Promise<void> {
+  const fixtures = mounted.splice(0)
+  const failures: unknown[] = []
+  for (const fixture of fixtures) {
+    try {
+      await fixture.dispose()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) throw new AggregateError(failures, `${String(failures.length)} fixtures failed teardown`)
 }
 
 /**
@@ -252,7 +323,7 @@ interface RunValue {
 
 /** One terminal action result as this suite reads it. */
 interface TerminalValue {
-  terminal?: { resourceId: string; status?: string }
+  terminal?: { resourceId: string; status?: string; pid?: number }
   resourceId?: string
   text?: string
   closed?: boolean
@@ -288,15 +359,15 @@ async function engineSpec(engine: 'bash' | 'pwsh'): Promise<ShellEngineSpec> {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+afterEach(async () => {
+  // Per-case disposal: teardown failures belong to the case that caused them,
+  // and no fixture outlives its case (listener accumulation was a real symptom).
+  await drainFixtures()
+})
+
 afterAll(async () => {
-  for (const fixture of mounted.splice(0)) {
-    try {
-      await fixture.dispose()
-    } catch {
-      // A case that already failed must not hide the original failure; the
-      // remaining fixtures still get disposed.
-    }
-  }
+  // Last-resort net: only reachable when a case failed before its own drain.
+  await drainFixtures()
   if (testRoot !== '') rmSync(testRoot, { recursive: true, force: true })
 })
 
@@ -384,7 +455,7 @@ describe('real Windows shell acceptance', () => {
   })
 
   it('refuses an unusable configured bash path without switching engines', async () => {
-    const shell = await openWindowsShell({ bashPath: join(workspace, 'missing-bash.exe') })
+    const shell = await openWindowsShell({ terminal: { bashPath: join(workspace, 'missing-bash.exe') } })
     const result = await shell.call({ action: 'run', command: 'echo hi', cwd: workspace })
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'SHELL_UNAVAILABLE' })
@@ -393,7 +464,7 @@ describe('real Windows shell acceptance', () => {
 
   it('refuses Windows PowerShell 5.1 for the pwsh engine instead of running it', async () => {
     expect(existsSync(WINDOWS_POWERSHELL)).toBe(true)
-    const shell = await openWindowsShell({ pwshPath: WINDOWS_POWERSHELL })
+    const shell = await openWindowsShell({ terminal: { pwshPath: WINDOWS_POWERSHELL } })
     const result = await shell.call({ action: 'run', engine: 'pwsh', command: 'Write-Output hi', cwd: workspace })
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'SHELL_UNAVAILABLE' })
@@ -530,5 +601,60 @@ describe('real Windows shell acceptance', () => {
       )
       expect(closed.closed).toBe(true)
     }
+  })
+
+  it('closes the live ConPTY shell when its generation scope is retired', async () => {
+    const cwd = caseWorkspace('generation-pty')
+    const shell = await openWindowsShell({ generationScope: true })
+    // No host-level terminal service: this fixture is the deployed shape where
+    // the generation owns the only registry.
+    expect(shell.ctx.get('terminals')).toBeUndefined()
+
+    const opened = valueOf<TerminalValue>(
+      await withBound(shell.call({ action: 'open', cwd, engine: 'bash' }), 40_000, 'generation terminal open'),
+    )
+    const resourceId = opened.terminal?.resourceId ?? opened.resourceId
+    expect(resourceId).toMatch(/^nexus-term-/u)
+
+    // The PTY shell reports its own Windows process id through the MSYS2 procfs
+    // (`$$` is an MSYS pid; `/proc/<pid>/winpid` is the OS pid), so the id below
+    // is the real process the retirement must kill.
+    const sent = valueOf<TerminalValue>(
+      await withBound(
+        shell.call({
+          action: 'send',
+          resourceId,
+          text: `printf 'WINPID=%s\n' "$(cat /proc/$$/winpid)"`,
+        }),
+        40_000,
+        'generation terminal send',
+      ),
+    )
+    const page = valueOf<TerminalValue>(
+      await withBound(shell.call({ action: 'read', resourceId }), 20_000, 'generation terminal read'),
+    )
+    const match = /WINPID=(\d+)/u.exec(`${sent.text ?? ''}\n${page.text ?? ''}`)
+    expect(match, `no WINPID line in terminal output: ${JSON.stringify({ sent: sent.text, page: page.text })}`).not.toBeNull()
+    const shellPid = Number(match?.[1])
+    expect(shellPid).toBeGreaterThan(0)
+    expect(pidAlive(shellPid)).toBe(true)
+    expect(shell.ctx.get('terminals')).toBeUndefined()
+
+    // Retire the generation WITHOUT closing the terminal first: disposal of the
+    // owning scope is the only thing that can clean the live PTY up.
+    await withBound(shell.retireGeneration(), 30_000, 'generation retirement')
+    expect(shell.ctx.get('terminals')).toBeUndefined()
+    expect(shell.ctx.tools.schemas().map((schema) => schema.name)).not.toContain('shell')
+    expect(await eventually(() => !pidAlive(shellPid), 20_000)).toBe(true)
+  })
+
+  it('keeps the teardown assertion able to fail', () => {
+    // A dead check is worse than none: prove assertServicesRemoved rejects a
+    // surviving service instead of passing vacuously.
+    const surviving = { get: (name: string) => (name === 'terminals' ? {} : undefined) }
+    expect(() => assertServicesRemoved(surviving, ['agentLoop', 'terminals'])).toThrowError(
+      /terminals survived teardown/u,
+    )
+    expect(() => assertServicesRemoved({ get: () => undefined }, ['terminals'])).not.toThrow()
   })
 })

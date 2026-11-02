@@ -31,9 +31,12 @@
  * instead of opening a second store, and unloading a generation never disposes
  * the runtime.
  *
- * Native terminal backends are registered by the host row, not here: the
- * terminal service lives in the host realm, so one registration per composed
- * realm is the correct count and a second generation must not repeat it.
+ * The native terminal capability belongs to the generation, not to the host:
+ * the deployed profile provides no host-level `terminals` service (each native
+ * preset owns one inside an isolated group), so this row mounts the shipped
+ * registry in its own isolated scope and registers the native backends through
+ * that same scope. The host row deliberately registers none — doing so would
+ * land them in a realm no generation can reach.
  *
  * @module dsh-nexus/preset
  */

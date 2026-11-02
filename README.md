@@ -65,7 +65,7 @@ pnpm dev:profile -- remove --yes  # 用完清理
 
 ## 已知限制
 
-- **受限权限下 Git Bash 不可用（Windows）。** DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令，MSYS2 运行时在启动阶段申请 `\BaseNamedObjects` 共享内存对象会被拒绝，bash 在解析命令前就以 `0xC0000022` 退出。因此在 `read-only` / `workspace-write` 权限预设下，`shell` 工具会以 `UNSUPPORTED_CAPABILITY` 明确拒绝并提示改用 `engine: "pwsh"`，而不会静默换引擎或提高权限；`danger-full-access` 预设不受影响。详细命令与最小复现见 `docs/testing/verification-record.md`。
+- **受限权限下 Git Bash 不可用（Windows）。** DSH 在 Windows 用 `windows-acl` 受限令牌执行受管命令，MSYS2 运行时在启动阶段申请 `\BaseNamedObjects` 共享内存对象会被拒绝；stderr 里的这个 Win32 API 错误是 `0xC0000022`（`STATUS_ACCESS_DENIED`），而进程本身的退出状态是 `3221225794`（`0xC0000142`，`STATUS_DLL_INIT_FAILED`）——两者是不同的量，别把它们混成一个。因此在 `read-only` / `workspace-write` 权限预设下，**前台** `shell run` 会以 `UNSUPPORTED_CAPABILITY` 明确拒绝并提示改用 `engine: "pwsh"`，不会静默换引擎或提高权限；后台 `run background: true` 的完成报告目前只给原始退出状态与 stderr（尚未归类），持久终端 `open` 也不走这条分类。`danger-full-access` 预设不受影响。详细命令与最小复现见 `docs/testing/verification-record.md`。
 - 插件只提供 Nexus 预设一个组合；不做多预设、装配管理、配置版本号或差异对比。
 - 真实第三方插件兼容、真实账号联网与页面双主题需要人工确认，自动化不冒充这部分证据。
 

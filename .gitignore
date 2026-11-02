@@ -13,3 +13,8 @@ coverage/
 # Local logs and TypeScript build metadata.
 *.log
 *.tsbuildinfo
+
+# Root scratch directory: retained verification logs, probe scripts and the
+# tarball-install probes. Ignored since this wave; the files that were already
+# here are kept, not deleted.
+/tmp/

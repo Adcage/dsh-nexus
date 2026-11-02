@@ -22,19 +22,20 @@
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 默认离线套件 | `pnpm test`（`pnpm check` 内） | 40 个文件 / 575 个测试通过 |
-| 新增：受限 Git Bash 拒绝分类（5 个回归） | `npx vitest run test/shell/process.test.ts` | 27 个测试通过（含 5 个新增：命中特征、普通非零退出不命中、未受限不命中、pwsh 不命中、非 Windows 不命中） |
+| 默认离线套件 | `pnpm test`（`pnpm pack:plugin` → `pnpm run check` 内） | 41 个文件 / 581 个测试通过 |
+| 新增：受限 Git Bash 拒绝分类（5 个回归 + 1 个诊断回归） | `npx vitest run test/shell/process.test.ts` | 28 个测试通过（命中特征、普通非零退出不命中、未受限不命中、pwsh 不命中、非 Windows 不命中，加一条：进程退出状态为 `3221225506`（`0xC0000022`）且 stderr 相同时**不**命中；诊断断言进程状态与 `0xC0000142`、stderr API 错误 `0xC0000022` 分别标注） |
 | 新增：工具管线上的受限 Git Bash 拒绝 | `npx vitest run test/shell/tool.test.ts` | 28 个测试通过（`UNSUPPORTED_CAPABILITY`，消息含原始状态码与 `pwsh` 提示） |
+| 新增：PID 存活语义 | `npx vitest run test/support/pid-liveness.test.ts` | 5 个测试通过（只有 `ESRCH` 表示不存在；`EPERM` 仍算存活；其它错误显式报「不确定」而不是「已消失」） |
 | 新增：生成域退役时仍有打开的终端 | `npx vitest run --config vitest.integration.config.ts test/integration/terminal-scope.test.ts` | 4 个测试通过（含退役场景：无显式 close 时退役生成域，旧 `resourceId` 在新生成域与宿主行重启后都不可用，兄弟实例无后端、无宿主级 `terminals`） |
 
-> 证据保留说明：受限 Git Bash 拒绝的**首次失败日志没有保留**（最早的 `task14-check-*.log` 已经是全绿的 27/28）。可核查的最早证据是绿跑，加上结构事实——`refuseConfinedBashStartupFailure` 在 BASE `2dff7df` 中并不存在，因此该回归在 BASE 上必然失败。此后按「保留首次失败」执行。
+> 证据保留说明：受限 Git Bash 拒绝的**首次失败日志没有保留**（最早的 `task14-check-*.log` 已经是全绿的 27/28）。「BASE 上没有这个导出」是静态事实，不等于一次执行过的行为 RED；这里不重建历史。本波新增的诊断回归保留了首次失败：`tmp/task14fix2-p1-red.log`（消息缺 `0xC0000142`，exit 1）与 `tmp/task14fix2-pid-red.log`（`EPERM` 被当成消失、意外错误被吞，exit 1）。
 
 ## 3. 集成（真实 Cordis 组合、受控模型边界）
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 集成套件 | `pnpm test:integration` | 5 个文件 / 15 个测试通过（原 12 个 + 新增 3 个） |
-| 真实 profile 形状下的终端能力（新增） | `test/integration/terminal-scope.test.ts` | 3 个测试通过：无宿主级 `terminals` 时六个工具与 persona 正常激活；`standard` 形状的兄弟实例 `listBackends()` 保持为空；`open/send/read/close` 使用生成域后端；卸载后重新注册不残留 |
+| 集成套件 | `pnpm test:integration` | 5 个文件 / 16 个测试通过（原 12 个 + 新增 4 个），exit 0 |
+| 真实 profile 形状下的终端能力 | `test/integration/terminal-scope.test.ts` | 4 个测试通过：无宿主级 `terminals` 时六个工具与 persona 正常激活；`standard` 形状的兄弟实例 `listBackends()` 保持为空；`open/send/read/close` 使用生成域后端；退役时仍有打开的终端，旧 `resourceId` 在新生成域与宿主行重启后都不可用（脚本化 PTY 边界，真实 OS 证据见 §4） |
 
 集成套件的边界（不变）：模型传输是受控替身；进程派生与终端派生在该套件里是脚本化提供方（真实 ConPTY／真实 Git Bash 证据见下一节）。
 
@@ -42,8 +43,10 @@
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Windows 验收套件 | `pnpm test:windows`（`vitest.windows.config.ts` → `test/integration/windows.test.ts`） | 11 个测试通过（5.5 秒） |
+| Windows 验收套件 | `pnpm test:windows`（`vitest.windows.config.ts` → `test/integration/windows.test.ts`） | 13 个测试通过，exit 0 |
 | 覆盖 | 同上 | 真实 Git Bash 与真实 PowerShell 7 两种方言；中文与空格路径（参数 `你好 世界` 原样、`pwd` 回到同一目录）；非零退出码如实报告；不可用 bash 路径 `SHELL_UNAVAILABLE` 且不换引擎；Windows PowerShell 5.1 被拒绝；取消后真实 Windows 子进程从进程表消失；超时后同样消失；父进程被停后孙进程（真实 Windows PID）消失且 `cleanupConfirmed`；真实后台任务可 list／stop／close；真实 ConPTY 持久终端跨 `send` 保留 shell 状态并可 `close` |
+| 生成域 PTY 清理（新增） | 同上 | 按 `src/preset/index.ts` 的挂载顺序（`isolate('terminals')` → 挂载 native registry → 注册后端 → 建 shell surface）在一个插件 fiber 内挂载；打开真实 ConPTY 后由 shell 自己通过 `/proc/$$/winpid` 报告真实 Windows PID 并确认存活；**不先 close** 直接退役该生成域，随后该 PID 从进程表消失、宿主级 `terminals` 始终不存在、工具注册消失 |
+| 清理断言灵敏度（新增） | 同上 | `assertServicesRemoved` 对仍存活的 service 会抛错（不是空断言）；每个用例结束后立即卸载自己的 fixture，`afterAll` 只作兜底——之前 11 个 fixture 累积导致的 `MaxListenersExceededWarning` 不再出现 |
 | 非 Windows 主机 | 同上 | 文件在收集阶段显式报错拒绝，不跳过记成通过 |
 
 ### 4.1 受限权限链（AC-07 的受限证据：环境阻塞，未验证）
@@ -53,14 +56,14 @@
 ```
 node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|workspace-write \
   -- "E:\Programme\software\Git\usr\bin\bash.exe" --noprofile --norc -c "echo confined-ok"
-→ 退出码 3221225794 (0xC0000022)
-→ stderr: bash (…): *** fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022
+→ 进程退出状态 `3221225794`（`0xC0000142`，`STATUS_DLL_INIT_FAILED`）
+→ stderr: bash (…): *** fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022（这是 Win32 API 错误 `STATUS_ACCESS_DENIED`，与上面的进程退出状态是两个不同的量）
 ```
 
 - 与模式（read-only / workspace-write）、cwd、TMP、命令内容无关；`TMPDIR` 覆盖无效。
 - 对照组：同一条 provider argv 换成 `C:\Program Files\PowerShell\7\pwsh.exe` 退出码 0；`workspace-write` 下工作区内写入成功，工作区外写入被拒（`Access to the path '…' is denied`，文件不存在）。
 - 未受限 bash 正常：退出码 0，中文 + 空格路径原样。
-- 结论：这是 MSYS2 运行时与受限令牌的环境级不兼容，不是命令失败。产品现在的行为是在四个事实同时成立时（win32 + bash + 确实应用了受限策略 + `0xC0000022` 且 stderr 命中 `BaseNamedObjects…msys-`）以 `UNSUPPORTED_CAPABILITY` 明确拒绝，消息保留原始状态码与有限 stderr 片段，并提示可显式改用 `engine: "pwsh"`，不静默换引擎、不提高权限。
+- 结论：这是 MSYS2 运行时与受限令牌的环境级不兼容，不是命令失败。产品现在的行为是在四个事实同时成立时（win32 + bash + 确实应用了受限策略 + 进程退出状态 `3221225794` 且 stderr 命中 `BaseNamedObjects…msys-` 与 `0xC0000022`）以 `UNSUPPORTED_CAPABILITY` 明确拒绝；消息分别标注进程退出状态与它自己的十六进制（`0xC0000142`）、stderr 中的 API 错误（`0xC0000022`）以及有限 stderr 片段，并提示可显式改用 `engine: "pwsh"`，不静默换引擎、不提高权限。**只有前台 `shell run` 走到这条分类**；后台运行的完成报告给原始状态与 stderr，持久终端 `open` 不使用它。
 - 因此 **AC-07 的「受限只读／越根写入被拒绝」没有在 Git Bash 上验证**：标记为环境阻塞。受限链路本身可用由 pwsh 对照组证明。
 
 ## 5. 隔离 Profile（项目内 `.dev-home`）
@@ -93,8 +96,8 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 安装 0.1.0 时 pnpm 报告 `Packages: +5 -2`，重装 0.1.1 时报告 `Packages: +1 -2`。逐项核对如下：
 
 - `+5` = `dsh-nexus` 本身加它的四个运行期依赖 `turndown`、`@joplin/turndown-plugin-gfm`、`@mixmark-io/domino`、`zod`（重装时这四项已在，只有 `+1` 个新 tarball）。
-- `-2` = pnpm 从 profile 的 `node_modules` 中清掉两个**不在清单里**的残留包（pnpm 的 extraneous 修剪），不是用户声明的插件。
-- 核对：`dsh plugin --profile web list` 显示 21 条声明依赖全部在位；逐条检查 `node_modules/<name>/package.json` 也是 21/21 存在、0 缺失。没有用户插件被移除。
+- `-2` 的身份**无法从保留的日志确定**：pnpm 只打印了计数。可以肯定的是——安装后 `dsh plugin --profile web list` 显示 21 条声明依赖全部在位，逐条检查 `node_modules/<name>/package.json` 也是 21/21 存在、0 缺失，原有 23 条 bundle 声明里 `dsh-nexus` 只有一条——但这**不**证明被移除/改动的传递包身份，也**不**证明其它每个插件仍可正常工作（没有做 store/家目录审计，也不改 Profile）。
+- 本波的 0.1.2 重装沿用同一命令，安装输出与核对结果记在 §6 与报告中。
 
 ### 6.2 真实 Nexus 会话（无模型、无账号）
 
@@ -125,7 +128,7 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 | AC-04 | 离线行为测试（观察守卫、多处编辑、字节/原子失败） | 已验证（测试层） |
 | AC-05 | 离线 + Windows 真实 ConPTY（持久状态）与普通命令（独立状态）对照 | 已验证（含真实 ConPTY） |
 | AC-06 | 离线行为（续读游标、停止清理）+ Windows 真实后台任务与真实树清理 | 已验证 |
-| AC-07 | Windows 两种方言、中文/空格路径、真实树清理通过；受限只读/越根写入未能在 Git Bash 上验证（第 4.1 节，环境阻塞），受限链路由 pwsh 对照组证明 | 部分验证 + 部分**环境阻塞** |
+| AC-07 | Windows 两种方言、中文/空格路径、真实树清理通过；受限只读/越根写入未能在 Git Bash 上验证（第 4.1 节，环境阻塞），受限链路由 pwsh 对照组证明；命名拒绝只覆盖前台 `run` | 部分验证 + 部分**环境阻塞** |
 | AC-08 | 集成：当前配置的后端请求组装；未接后端时明确失败 | 已验证（测试层）。真实联网账号：**未验证**，未使用用户账号发起请求 |
 | AC-09 | 离线 + 集成行为（来源、范围、续读定位、逐项失败） | 已验证（测试层） |
 | AC-10 | 集成：技能目录/正文、`ask_user_question`、`todo_write` 真实往返 | 已验证（测试层） |
@@ -146,3 +149,11 @@ node <dsh>/lib/runner.js --workspace "<dir>" --temp "<dir>" --mode read-only|wor
 4. 真实第三方插件在本 Profile 中的兼容结论（AC-16）。
 5. 代表性开发任务（AC-17）。
 6. 若要在 `read-only` / `workspace-write` 权限预设下使用终端，请显式选择 `engine: "pwsh"`；受限 Git Bash 在此主机不可用（第 4.1 节）。
+
+## 9. 附录：证据位置、口径与后续修正
+
+- **日志位置**：本波（fix2）的完整日志在 SDD 目录 `.superpowers/sdd/2026-11-01-dsh-nexus-implementation/tmp/task14fix2-*.log`（含真实 exit 状态，用 `cmd > log 2>&1; echo rc=$?` 采集，不经管道）。fix1 的 pack/install/list/boot 日志与历史证据在**仓库根** `tmp/`（本波开始被 `.gitignore` 忽略，既有文件保留未删）。最初的日志里多数只有 Vitest 摘要、没有保留退出码（当时用了管道），已由控制器补充的 `task14-controller-gates.log` 佐证，但**没有**完整日志可引用。
+- **`/tmp/` 忽略规则是本次新增的**：本波之前仓库并未忽略根 `tmp/`，相关文档里「已被 git 忽略」的说法当时并不成立；本波加上了 `/tmp/`，并且没有删除任何既有文件。
+- **状态码口径修正**：进程退出状态是 `3221225794`（`0xC0000142`），stderr 里的 Win32 API 错误才是 `0xC0000022`（`3221225506`）。此前文档把它们写成同一个值，本波已在前台拒绝消息、README、manual-acceptance 与本文 §4.1 更正；数值守卫（`3221225794`）与 stderr 正则未改。
+- **C1 的边界**：§6.2 的无模型探针只证明「生成域激活 + 活会话 + persona 快照 + 原生 `agentPreset` 投影」。它**没有**证明六个工具的真实 schema、请求内系统层顺序、GUI/主题、图片/联网或第三方安装，也没有证明 AC-17。
+- **AC-07** 仍是环境阻塞，不是用户批准的降级；命名拒绝只覆盖**前台** `run`。
