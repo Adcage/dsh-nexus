@@ -37,11 +37,12 @@ describe('built client bundle', () => {
     expect(loaded.exports.NS).toBe(NS)
   })
 
-  it('registers its dictionaries on mount and removes them on unload, once', () => {
+  it('registers its dictionaries on mount and removes them on unload, once', async () => {
     const host = createClientHost()
     const loaded = host.load()
     expect(loaded.id).toBe(packageName)
     const context = host.mount()
+    await host.settle()
     expect([...host.locales.keys()]).toEqual([NS])
     expect(host.locales.get(NS)).toMatchObject({ en: { panel: 'Nexus' }, zh: { panel: 'Nexus' } })
     expect(context.slots).toBeDefined()
@@ -55,12 +56,14 @@ describe('built client bundle', () => {
     expect(host.slotRegistrations).toEqual([])
   })
 
-  it('survives a second start/stop without leaving a registration behind', () => {
+  it('survives a second start/stop without leaving a registration behind', async () => {
     const host = createClientHost()
     host.load()
     host.mount()
+    await host.settle()
     host.unload()
     host.mount()
+    await host.settle()
     expect(host.locales.size).toBe(1)
     host.unload()
     expect(host.locales.size).toBe(0)
@@ -95,9 +98,10 @@ describe('built client bundle', () => {
     expect(new Set(loaded.runtimeRequests)).toEqual(new Set(['react', 'react/jsx-runtime']))
   })
 
-  it('adds matching sidebar/main/settings cells and one Tool card per owned wire name, and removes only its own entries', () => {
+  it('adds matching sidebar/main/settings cells and one Tool card per owned wire name, and removes only its own entries', async () => {
     const host = createClientHost()
     host.mount()
+    await host.settle()
     expect(host.slotRegistrations.map((row) => [row.name, row.cell])).toEqual([
       ['main', NS], ['sidebar.panellist', NS], ['settings.section', NS],
       ['tool.call.toolview', 'shell'], ['tool.call.toolview', 'web'], ['tool.call.toolview', 'agent'],
@@ -106,10 +110,11 @@ describe('built client bundle', () => {
     expect(host.slotRegistrations).toEqual([])
   })
 
-  it('keeps the console seats and registers no tool card when the Tool slot is not declared', () => {
+  it('keeps the console seats and registers no tool card when the Tool slot is not declared', async () => {
     const host = createClientHost({ declaredSlots: ['main', 'sidebar.panellist', 'settings.section'] })
     host.load()
     expect(() => host.mount()).not.toThrow()
+    await host.settle()
     // The composition has no Tool owner, so the tool effect must degrade to a
     // no-op: the console dictionary and its three cells still arrive.
     expect([...host.locales.keys()]).toEqual([NS])

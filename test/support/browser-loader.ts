@@ -88,6 +88,14 @@ export interface ClientHost {
    * @returns the context the bundle received.
    */
   mount(): FakeClientContext
+  /**
+   * Let the mounted bundle's first asynchronous read settle.
+   *
+   * Tool-card registration waits until the stored display mode is known. No host
+   * answers here, so that read fails and the documented `nexus` fallback is what
+   * registers the cards; this lets those promise chains run before a count.
+   */
+  settle(): Promise<void>
   /** Run every registration's disposer once, in reverse registration order. */
   unload(): void
 }
@@ -174,6 +182,9 @@ export function createClientHost(options: ClientHostOptions = {}): ClientHost {
       if (typeof apply !== 'function') throw new Error(`bundle ${loaded.id} exports no apply function`)
       ;(apply as (ctx: FakeClientContext) => void)(context)
       return context
+    },
+    async settle() {
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
     },
     unload() {
       // Only the registrations' own disposers may empty these registries. The
