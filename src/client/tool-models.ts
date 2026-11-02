@@ -144,6 +144,50 @@ export function asNexusToolName(value: unknown): NexusToolName | undefined {
   return NEXUS_TOOL_NAMES.find((name) => name === value)
 }
 
+/** Whether `value` owns `key`, without letting a hostile proxy trap escape. */
+function hasOwn(value: unknown, key: string): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  try {
+    return Object.prototype.hasOwnProperty.call(value, key)
+  } catch {
+    return true
+  }
+}
+
+/** Whether `value` declares `key` at all, without letting a hostile trap escape. */
+function hasKey(value: unknown, key: string): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  try {
+    return key in value
+  } catch {
+    return true
+  }
+}
+
+/**
+ * The stage to read, from the owner's phase when it supplies one.
+ *
+ * The 0.2.1 owner passes `phase`; the profile's 0.1.0 owner passes the frozen
+ * call block alone. In that block a settled result is the only variant that
+ * declares a `kind` (the 0.2.1 owner derives its phase the same way), while a
+ * running call is the one that carries its own `callId` and `name` and no result
+ * `content`. A block matching neither keeps the conservative settled default, so
+ * an unrecognised payload never presents the unfinished-stage copy. No live
+ * state is consulted: the block is the recorded call or result itself.
+ */
+function stageOf(phase: unknown, block: unknown): 'preparing' | 'start' | 'result' {
+  if (phase === 'preparing' || phase === 'start' || phase === 'result') return phase
+  // An unrecognised phase is a payload this card cannot classify: stay settled.
+  if (phase !== undefined) return 'result'
+  if (hasKey(block, 'kind')) return 'result'
+  const callId = field(block, 'callId')
+  const name = field(block, 'name')
+  const running = typeof callId === 'string' && callId.trim() !== ''
+    && typeof name === 'string' && name.trim() !== ''
+    && !hasOwn(block, 'content')
+  return running ? 'start' : 'result'
+}
+
 /** Recorded result text, joined in order, bounded, with the non-text blocks counted. */
 function recordedOutput(content: unknown): { text: string; truncated: boolean; otherBlocks: number } {
   const parts: string[] = []
@@ -283,7 +327,8 @@ function recordedStage(phase: string, block: unknown, output: string, stopAction
 
 /**
  * Derive one card from the payload the dispatch recorded with the call.
- * @param input - the dispatched wire name, the current stage and the recorded block.
+ * @param input - the dispatched wire name, the owner's stage when it supplies
+ *   one (`undefined` in the 0.1.0 owner build) and the recorded block.
  * @returns the card model; every field is derived from `input` alone.
  */
 export function readNexusToolCard(input: {
@@ -292,10 +337,7 @@ export function readNexusToolCard(input: {
   readonly block: unknown
 }): NexusToolCardModel {
   const tool = asNexusToolName(input.tool)
-  // An unrecognised stage is read as the settled one: a payload this card cannot
-  // classify may only ever present recorded content or "no recorded output", never
-  // the unfinished-stage copy that would claim nothing has run.
-  const phase = input.phase === 'preparing' || input.phase === 'start' ? input.phase : 'result'
+  const phase = stageOf(input.phase, input.block)
   const output = phase === 'result'
     ? recordedOutput(field(input.block, 'content'))
     : { text: '', truncated: false, otherBlocks: 0 }

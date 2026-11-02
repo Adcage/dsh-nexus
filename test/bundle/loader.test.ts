@@ -106,6 +106,23 @@ describe('built client bundle', () => {
     expect(host.slotRegistrations).toEqual([])
   })
 
+  it('keeps the console seats and registers no tool card when the Tool slot is not declared', () => {
+    const host = createClientHost({ declaredSlots: ['main', 'sidebar.panellist', 'settings.section'] })
+    host.load()
+    expect(() => host.mount()).not.toThrow()
+    // The composition has no Tool owner, so the tool effect must degrade to a
+    // no-op: the console dictionary and its three cells still arrive.
+    expect([...host.locales.keys()]).toEqual([NS])
+    expect(host.locales.get(NS)).toMatchObject({ en: { panel: 'Nexus' }, zh: { panel: 'Nexus' } })
+    expect(host.slotRegistrations.map((row) => [row.name, row.cell])).toEqual([
+      ['main', NS], ['sidebar.panellist', NS], ['settings.section', NS],
+    ])
+    expect(host.slotRegistrations.filter((row) => row.name === 'tool.call.toolview')).toEqual([])
+    host.unload()
+    expect(host.slotRegistrations).toEqual([])
+    expect(host.disposeCount).toBe(4)
+  })
+
   it('re-registers the settings cell once when the locale changes', () => {
     const host = createClientHost()
     host.mount()

@@ -22,6 +22,7 @@ import type { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it } from 'vitest'
 import { apply } from '../../src/client/index.tsx'
+import { NEXUS_TOOL_STAGE, type NexusToolStage } from '../../src/client/tool-models.ts'
 import { createConsoleStore } from '../../src/client/store.ts'
 import { createNexusApi } from '../../src/client/api.ts'
 import en from '../../src/locale/en.json' with { type: 'json' }
@@ -185,6 +186,53 @@ describe('Nexus tool views', () => {
     running.unmount()
   })
 
+  it('reads the stage from the recorded block when the owner passes no phase', async () => {
+    const client = await mountClient()
+    client.declare()
+    const shell = viewOf(client.slots, 'shell')
+    const dispatch = (block: unknown) => ({ callId: 'call-1', toolName: 'shell', block, t: (key: keyof typeof en) => en[key] })
+    // The profile's 0.1.0 owner passes the frozen call block and no `phase`; its
+    // running call has neither a `kind` nor a stage field, only the identity of
+    // the call it started.
+    const live = await render(shell, dispatch({
+      callId: 'call-1',
+      name: 'shell',
+      argsRaw: JSON.stringify({ action: 'run', command: 'pnpm test' }),
+      turn: 1,
+      step: 0,
+      time: 1_700_000_000_000,
+      callView: null,
+      subCalls: [],
+    }))
+    expect(live.node.querySelector('[data-dsh-nexus-stage="running"]')).not.toBeNull()
+    expect(live.text).toContain(en.toolStageRunning)
+    expect(live.text).toContain('pnpm test')
+    expect(live.text, 'a live call is not settled').not.toContain(en.toolStageEmpty)
+    expect(live.text, 'a live call carries no replay note').not.toContain(en.toolReplayNote)
+    live.unmount()
+    // A settled record carries `kind` and still settles without the phase prop.
+    const settled = await render(shell, dispatch(resultBlock()))
+    expect(settled.node.querySelector('[data-dsh-nexus-stage="recorded"]')).not.toBeNull()
+    expect(settled.text).toContain(en.toolStageRecorded)
+    expect(settled.text).toContain(en.toolReplayNote)
+    settled.unmount()
+    // A payload with neither running-call evidence nor a recognised stage keeps
+    // the conservative settled default instead of claiming an unfinished run.
+    const unreadable = await render(shell, dispatch({}))
+    expect(unreadable.node.querySelector('[data-dsh-nexus-stage="empty"]')).not.toBeNull()
+    unreadable.unmount()
+    // A block that throws on every read stays settled and does not throw.
+    const hostile = new Proxy({}, { get() { throw new Error('hostile block') }, has() { throw new Error('hostile block') } })
+    const hostileView = await render(shell, dispatch(hostile))
+    expect(hostileView.node.querySelector('[data-dsh-nexus-tool]')!.getAttribute('data-dsh-nexus-stage')).toBe('empty')
+    hostileView.unmount()
+    // A phase prop this card cannot classify stays settled even next to a block
+    // that would otherwise read as running.
+    const unexpected = await render(shell, { ...dispatch({ callId: 'call-1', name: 'shell', argsRaw: '{}', subCalls: [] }), phase: 'unexpected' })
+    expect(unexpected.node.querySelector('[data-dsh-nexus-stage="empty"]')).not.toBeNull()
+    unexpected.unmount()
+  })
+
   it('renders recorded shell facts and the recorded failure identity as recorded', async () => {
     const client = await mountClient()
     client.declare()
@@ -206,6 +254,15 @@ describe('Nexus tool views', () => {
     expect(failed.text).toContain(en.toolStageFailed)
     expect(failed.text).toContain('SHELL_UNAVAILABLE')
     failed.unmount()
+    // An error record with neither a name nor a code has no failure identity to
+    // print, so the card shows the failure label alone rather than a bare ": ".
+    const withoutDetails = await render(shell, recorded('shell', 'result', resultBlock({ isError: true, content: [] })))
+    expect(withoutDetails.node.querySelector('[data-dsh-nexus-stage="failed"]')).not.toBeNull()
+    const failure = withoutDetails.node.querySelector('.dsh-nexus-tool-failure')
+    expect(failure).not.toBeNull()
+    expect(failure!.querySelector('code')).toBeNull()
+    expect(failure!.textContent).toBe(en.toolFailure)
+    withoutDetails.unmount()
   })
 
   it('renders web and agent facts from the recorded meta of their owning tools', async () => {
@@ -254,12 +311,17 @@ describe('Nexus tool views', () => {
     expect(background.text).not.toContain(zh.toolStageStopRequested)
     background.unmount()
     const stopped = await render(shell, {
-      ...recorded('shell', 'result', resultBlock({ meta: { action: 'stop', status: 'exited', resourceId: 'proc-7' } })),
+      ...recorded('shell', 'result', resultBlock({ content: [], meta: { action: 'stop', status: 'exited', resourceId: 'proc-7' } })),
       t: (key: keyof typeof zh) => zh[key],
     })
     expect(stopped.node.querySelector('[data-dsh-nexus-stage="stopRequested"]')).not.toBeNull()
     expect(stopped.text).toContain(zh.toolStageStopRequested)
     expect(stopped.text).not.toContain(zh.toolStageRecorded)
+    // The interrupted resource is still named, but its recorded status is not
+    // restated: that status describes the resource, not the stop request.
+    expect(stopped.text).toContain('proc-7')
+    expect(stopped.text).not.toContain('exited')
+    expect(stopped.text).not.toContain(zh.toolFactStatus)
     stopped.unmount()
     const timedOut = await render(viewOf(client.slots, 'agent'), recorded('agent', 'result', resultBlock({
       name: 'agent',
@@ -302,10 +364,15 @@ describe('Nexus tool views', () => {
     ]
     for (const [index, block] of payloads.entries()) {
       const view = await render(shell, recorded('shell', 'result', block))
-      expect(view.text, `payload ${index} must not claim completion`).not.toMatch(/已完成|Completed/)
-      expect(view.text, `payload ${index} must not claim an exit`).not.toContain('已退出')
-      const stage = view.node.querySelector('[data-dsh-nexus-tool]')!.getAttribute('data-dsh-nexus-stage')
+      const stage = view.node.querySelector('[data-dsh-nexus-tool]')!.getAttribute('data-dsh-nexus-stage')!
       expect(['recorded', 'failed', 'empty', 'timedOut', 'stopRequested'], `payload ${index} stage`).toContain(stage)
+      // The English face is checked here too: the visible label is the English
+      // dictionary's own label for the classified stage. A word blocklist cannot
+      // carry this, because the English stage copy negates completion in words.
+      expect(view.node.querySelector('.dsh-nexus-tool-stage')?.textContent, `payload ${index} label`)
+        .toBe(en[NEXUS_TOOL_STAGE[stage as NexusToolStage]])
+      expect(view.text, `payload ${index} must not claim completion`).not.toContain('已完成')
+      expect(view.text, `payload ${index} must not claim an exit`).not.toContain('已退出')
       view.unmount()
     }
   })

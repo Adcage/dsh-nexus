@@ -98,6 +98,11 @@ export function NexusToolCard({ toolName, phase, block, inspect, t }: NexusToolV
   const model = readNexusToolCard({ tool: toolName, phase, block })
   const settled = model.stage !== 'pending' && model.stage !== 'running'
   const openTrajectory = typeof inspect === 'function' ? inspect : undefined
+  // The separator belongs between two recorded parts, not after a lone label: an
+  // error record with neither a name nor a code has no identity to print.
+  const failureIdentity = model.failure === undefined
+    ? ''
+    : [model.failure.name, model.failure.code].filter((part) => part !== '').join(': ')
   return <article className="dsh-nexus-tool" data-dsh-nexus-tool={model.tool ?? toolName} data-dsh-nexus-stage={model.stage}>
     <header className="dsh-nexus-tool-head">
       <strong className="dsh-nexus-tool-title">{model.tool === undefined ? toolName : t(NEXUS_TOOL_TITLE[model.tool])}</strong>
@@ -109,7 +114,7 @@ export function NexusToolCard({ toolName, phase, block, inspect, t }: NexusToolV
       <div key={fact.label}><dt>{t(fact.label)}</dt><dd>{fact.value}</dd></div>)}</dl>}
     {model.otherBlocks > 0 && <p className="dsh-nexus-tool-note"><span>{t('toolNonTextBlocks')}</span> <span>{model.otherBlocks}</span></p>}
     {model.failure !== undefined && <p className="dsh-nexus-tool-failure">
-      <span>{t('toolFailure')}</span> <code>{`${model.failure.name}: ${model.failure.code}`}</code>
+      <span>{t('toolFailure')}</span>{failureIdentity !== '' && <>{' '}<code>{failureIdentity}</code></>}
       {model.failure.reason !== undefined && <span className="dsh-nexus-tool-reason">{model.failure.reason}</span>}
     </p>}
     {model.output !== '' && <details className="dsh-nexus-tool-output">
