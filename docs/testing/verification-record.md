@@ -4,7 +4,7 @@
 
 ## 当前：0.1.13 子 Agent 权限与提供方路由（2026-11-03，未接受）
 
-状态：**RELEASE_GATES_PASSED / INSTALLATION_PENDING / NOT ACCEPTED**。实现提交 `38eb5b6` 增加 `agents.childAccess`、`agents.role.provider`、工具 start／batch 的 provider 路由，以及控制台共享草稿里的权限警告与非约束目录建议。本节补齐独立评审指出的记录缺口，不构成 Task 14／AC-17 接受。
+状态：**RELEASED / INSTALLED_PENDING_USER_RESTART / NOT ACCEPTED**。实现提交 `38eb5b6` 增加 `agents.childAccess`、`agents.role.provider`、工具 start／batch 的 provider 路由，以及控制台共享草稿里的权限警告与非约束目录建议。本节补齐独立评审指出的记录缺口，不构成 Task 14／AC-17 接受。
 
 - 评审时已有的证据：聚焦命令 `pnpm exec vitest run test/agent test/client test/runtime/defaults.test.ts test/runtime/store.test.ts test/http/capabilities.test.ts` 为 **15 文件／209 测试通过，exit 0**（`tmp/task14-focused-final.log`）；`pnpm typecheck` 为 **exit 0**（`tmp/task14-typecheck-green.log`，发生在最终少量测试、README 与版本号改动前）。
 - 明确的时间边界：在 `38eb5b6` 交给评审以及补写本节时，本轮的单次 **`pnpm pack:plugin` 尚未运行**，`pnpm verify:runtime` 也尚未运行；不能把聚焦通过说成全量构建、整套默认测试或包成员已验证。后续实际门禁结果另行追加，不覆盖这个事实。
@@ -15,7 +15,10 @@
 - 跨路由证据：`test/agent/internal.test.ts` **28/28 通过**（`cross-provider.log`）。父适配器 `nexus-test/nexus-test-model` 确实先接收父请求；子请求由不同的 `nexus-second` 适配器接收，并按同一个 child session id 断言父适配器收到 **0** 条子请求。provider-only 保留父模型 id、角色默认与 batch 也走不同的第二适配器；这仍是离线脚本传输，不是真实 GPT 访问。
 - 最终门禁实际只执行一次 `pnpm pack:plugin`，**exit 0**（`pack.log`／`pack.exit`）：两份 TypeScript 检查 → 构建 → **44 文件／637 条默认测试全部通过** → 包检查，产物 `dist/dsh-nexus-0.1.13.tgz`，**478,799 字节、15 个成员、SHA-256 `c4916a298889116e8896aaa9249461315d7c4d4f0a310e890a0406f1aec8a409`**，要求入口齐全、无未声明根目录。pnpm pack 触发既有 prepare 再构建一次；没有第二次调用 pack:plugin。
 - `pnpm verify:runtime` **exit 0**（`verify-runtime.log`／`verify-runtime.exit`），报告 `dsh-nexus 0.1.13 targets dsh 0.2.1-rc.2`，manifest／patch 行／client 注册一致。全量默认测试覆盖 HTTP guard、设置冲突、preset/lifecycle、bundle-loader 与脚本模型下的权限／文件系统边界；**没有重跑独立 integration／Windows 套件，没有新增真实 shell／GUI／账号的验证**。
-- 本次记录门禁时尚未发行、安装；不预报安装或 GUI 成功。不修改账号／模型配置，不编辑操作者的 `pnpm-workspace.yaml`，不重启其应用。未来安装后仍须由操作者重启 DSH。
+- 发行：修复提交 `b5525df` 已推送 `main`；注释 tag `v0.1.13` 指向同一提交，GitHub Release `https://github.com/Adcage/dsh-nexus/releases/tag/v0.1.13` 已附 `dsh-nexus-0.1.13.tgz`。GitHub 返回的 digest 与本地 SHA-256 一致，重新下载的 Release asset 与本地包逐字节一致（`release.json`／`download.log`）。之后只补写本文件里的实际安装事实；`docs/` 不在包中，不重新打包、不移动 tag。
+- 日常安装：官方命令 `DSH_HOME=C:/Users/l1577/.dsh dsh plugin --profile web add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.13/dsh-nexus-0.1.13.tgz`，本地 **2026-11-03 11:24:12～11:24:17，exit 0**（`official-install.log`／`official-install.exit`）；保留了 profile 的 peer 警告，未为消警告改配置。`dsh plugin --profile web list --depth 0` exit 0，显示 **dsh-nexus 0.1.13**。
+- 安装独立核对：`inventory.mjs before`／`after` 均 exit 0；**15/15 包成员与已安装文件逐字节相同**，仍是 21 个声明依赖、23 个 bundle、且仅一条 Nexus；profile manifest 只有 Nexus URL 从 0.1.11 更新为 0.1.13，其余 20 个声明包的安装 manifest 均未变。操作者 `pnpm-workspace.yaml` 的 SHA-256 前后同为 `ae7c5b68e2f157528e62885804e69e88583897b775e03c86fcbe52feaf498aba`（**没有编辑**）；账号／模型配置未改。证据为 `before-inventory.json`／`after-inventory.json`、profile manifest 快照及 `inventory-before.log`／`inventory-after.log`。
+- **仍须操作者重启 DSH**：安装只证明新文件落盘，不证明正在运行的应用或页面已加载新代码。没有重启、终止、刷新其应用／浏览器／会话；安装前后 `127.0.0.1:3080`（PID 23616）与 `18787`（PID 34640）监听不变。真实目录仍按上述 **401／未验证** 记录，不把脚本测试或已安装包冒充 GPT／codex 路由现场证据。本轮没有接受结论。
 
 ## 历史：AC-17 真实安装验收现场证据（2026-11-03，未接受）
 
