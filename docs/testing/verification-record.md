@@ -2,7 +2,22 @@
 
 本文按「静态 → 离线行为 → 构建 bundle → 隔离组合 → 真实安装 → 真实 GUI／账号」分层记录**实际执行过**的验证。每一行都写明命令或操作、版本、结果，以及没有验证的原因。没有执行的项一律写「未验证」，不用替身、模拟页面或推测填补。
 
-## 0. 最新：AC-17 真实安装验收现场证据（2026-11-03，未接受）
+## 当前：0.1.13 子 Agent 权限与提供方路由（2026-11-03，未接受）
+
+状态：**RELEASE_GATES_PASSED / INSTALLATION_PENDING / NOT ACCEPTED**。实现提交 `38eb5b6` 增加 `agents.childAccess`、`agents.role.provider`、工具 start／batch 的 provider 路由，以及控制台共享草稿里的权限警告与非约束目录建议。本节补齐独立评审指出的记录缺口，不构成 Task 14／AC-17 接受。
+
+- 评审时已有的证据：聚焦命令 `pnpm exec vitest run test/agent test/client test/runtime/defaults.test.ts test/runtime/store.test.ts test/http/capabilities.test.ts` 为 **15 文件／209 测试通过，exit 0**（`tmp/task14-focused-final.log`）；`pnpm typecheck` 为 **exit 0**（`tmp/task14-typecheck-green.log`，发生在最终少量测试、README 与版本号改动前）。
+- 明确的时间边界：在 `38eb5b6` 交给评审以及补写本节时，本轮的单次 **`pnpm pack:plugin` 尚未运行**，`pnpm verify:runtime` 也尚未运行；不能把聚焦通过说成全量构建、整套默认测试或包成员已验证。后续实际门禁结果另行追加，不覆盖这个事实。
+- 实际目录仍**未验证**：对 `127.0.0.1:3080` 的实时模型目录请求返回 **HTTP 401**；旧的已授权观察会话不再可用。没有拿到真实提供方／模型 id，**没有观察到 codex-subscription 路由或 GPT 模型**，不能从已安装订阅插件推断它们可见。离线脚本适配器只证明 API 转发与建议行为，不证明真实账号连通性。
+- 本次仅按评审修三处：补当前记录；同一提供方的目录请求合并为一份尚未完成的底层操作（即使 HTTP 等待已超时也不重复启动）；用与父路由不同的脚本适配器证明子请求实际换路由。既有 guard、1.5 秒等待上限、仅返回 id、权限／租约／深度与不回退语义保持不变。
+- 修复后的聚焦：`pnpm exec vitest run test/agent test/client test/runtime/defaults.test.ts test/runtime/store.test.ts test/http/capabilities.test.ts test/http/model-catalog.test.ts` 为 **16 文件／212 测试，exit 0**；另跑 `pnpm typecheck` **exit 0**。日志均在 `tmp/task14-child-access-release/` 的 `focused.log`／`typecheck.log`，对应 `.exit` 文件保存真实退出码。
+- 目录合并的 TDD：`test/http/model-catalog.test.ts` 先真实 **3/3 失败**（同提供方并发与超时后重复请求都调用了两次适配器）；改后 **3/3 通过**，连同已有 guard／目录测试 **4/4 通过**（`catalog-red.log`／`catalog-green.log`）。合并表由一个 HTTP 路由注册持有；每个提供方只保留一份未完成操作，1.5 秒超时不删除它，底层成功／拒绝落定后才删除；不缓存已完成结果，不增加全局状态、不改 guard 或 id 投影。
+- 跨路由证据：`test/agent/internal.test.ts` **28/28 通过**（`cross-provider.log`）。父适配器 `nexus-test/nexus-test-model` 确实先接收父请求；子请求由不同的 `nexus-second` 适配器接收，并按同一个 child session id 断言父适配器收到 **0** 条子请求。provider-only 保留父模型 id、角色默认与 batch 也走不同的第二适配器；这仍是离线脚本传输，不是真实 GPT 访问。
+- 最终门禁实际只执行一次 `pnpm pack:plugin`，**exit 0**（`pack.log`／`pack.exit`）：两份 TypeScript 检查 → 构建 → **44 文件／637 条默认测试全部通过** → 包检查，产物 `dist/dsh-nexus-0.1.13.tgz`，**478,799 字节、15 个成员、SHA-256 `c4916a298889116e8896aaa9249461315d7c4d4f0a310e890a0406f1aec8a409`**，要求入口齐全、无未声明根目录。pnpm pack 触发既有 prepare 再构建一次；没有第二次调用 pack:plugin。
+- `pnpm verify:runtime` **exit 0**（`verify-runtime.log`／`verify-runtime.exit`），报告 `dsh-nexus 0.1.13 targets dsh 0.2.1-rc.2`，manifest／patch 行／client 注册一致。全量默认测试覆盖 HTTP guard、设置冲突、preset/lifecycle、bundle-loader 与脚本模型下的权限／文件系统边界；**没有重跑独立 integration／Windows 套件，没有新增真实 shell／GUI／账号的验证**。
+- 本次记录门禁时尚未发行、安装；不预报安装或 GUI 成功。不修改账号／模型配置，不编辑操作者的 `pnpm-workspace.yaml`，不重启其应用。未来安装后仍须由操作者重启 DSH。
+
+## 历史：AC-17 真实安装验收现场证据（2026-11-03，未接受）
 
 状态：**EVIDENCE_RECORDED_PENDING_REVIEW / NOT ACCEPTED**。本节只记录 2026-11-02T18:4xZ～19:0xZ（本地 2026-11-03 凌晨）在操作者真实安装的 DSH 上做的两次 AC-17 现场取证：第一次跑出一个「写子 Agent 起不了 `shell`」的阻塞，独立诊断判定为**环境前提**问题；第二次换到调用者自有目录后把同一类操作跑通。两次都**没有**改动产品源码、设置、账号或模型，也**没有**做接受、推送或合并。本节只增补证据，不改变下文 0.1.8 等历史结论，也不构成本轮 AC-17／Task 14 验收。
 

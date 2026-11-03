@@ -25,7 +25,7 @@ import { createAgentTool } from '../../src/agent/tool.ts'
 import { canonicalDirectory, createWriteCoordinator, type WriteCoordinator } from '../../src/agent/coordination.ts'
 import { registerChildPolicy } from '../../src/agent/policy.ts'
 import type { NexusStore } from '../../src/storage/store.ts'
-import { mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
+import { mountModelRoute, mountNexusStoreFixture, type NexusStoreFixture } from '../support/fixtures.ts'
 import { mountSubagentHarness, waitFor, type SubagentHarness } from '../support/agent-harness.ts'
 
 /** One open case and everything it owns. */
@@ -441,34 +441,40 @@ describe('child model route', () => {
     expect(testCase.harness.requests).toHaveLength(0)
   })
 
-  it('forwards provider and model to the native start and runs the child on that route', async () => {
-    const testCase = await openCase({ hold: true })
-    const { harness } = testCase
+  it('switches the child to a distinct provider and model without calling the parent adapter for it', async () => {
+    const testCase = await openCase({ hold: 'children' })
+    const { harness, parent } = testCase
+    const secondRequests = mountSecondModelRoute(harness, 'nexus-second-model')
+    await harness.runTurn(parent, 'parent route baseline')
+    expect(harness.requestsOf(parent.id)[0]?.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
 
     const captured = await captureStartRequests(() =>
-      testCase.call({ action: 'start', task: 'route it', provider: '  nexus-test  ', model: 'nexus-test-model' }),
+      testCase.call({ action: 'start', task: 'route it', provider: '  nexus-second  ', model: 'nexus-second-model' }),
     )
 
-    expect(captured.agentOptions).toEqual([{ provider: 'nexus-test', model: 'nexus-test-model' }])
+    expect(captured.agentOptions).toEqual([{ provider: 'nexus-second', model: 'nexus-second-model' }])
     const childId = valueOf(captured.result).childId as string
-    await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
-    // The route actually used is the requested one, not the parent's default.
-    expect(harness.requestsOf(childId)[0]?.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
-    expect(harness.ctx.agents.get(SessionId(childId))?.options).toMatchObject({ provider: 'nexus-test' })
+    await waitFor(() => secondRequests.length === 1, 'the second adapter to receive the child request')
+    expect(secondRequests[0]).toMatchObject({ sessionId: childId, provider: 'nexus-second', model: 'nexus-second-model' })
+    // These logs are owned by different adapters, not inferred from forwarded options.
+    expect(harness.requestsOf(childId)).toEqual([])
+    expect(parent.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
     harness.releaseAll()
   })
 
-  it('accepts a provider alone and keeps the parent model on that route', async () => {
+  it('switches provider alone while keeping the parent model id on the second adapter', async () => {
     const testCase = await openCase({ hold: true })
     const { harness } = testCase
+    const secondRequests = mountSecondModelRoute(harness, 'nexus-test-model')
 
-    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'route it', provider: 'nexus-test' }))
+    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'route it', provider: 'nexus-second' }))
 
-    // No model is invented: the native merge keeps the parent's model.
-    expect(captured.agentOptions).toEqual([{ provider: 'nexus-test' }])
+    // No model is invented: the native merge keeps the parent's model id.
+    expect(captured.agentOptions).toEqual([{ provider: 'nexus-second' }])
     const childId = valueOf(captured.result).childId as string
-    await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
-    expect(harness.requestsOf(childId)[0]?.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
+    await waitFor(() => secondRequests.length === 1, 'the second adapter to receive the child request')
+    expect(secondRequests[0]).toMatchObject({ sessionId: childId, provider: 'nexus-second', model: 'nexus-test-model' })
+    expect(harness.requestsOf(childId)).toEqual([])
     harness.releaseAll()
   })
 
@@ -486,12 +492,17 @@ describe('child model route', () => {
       hold: true,
       settings: (current) => ({
         ...current,
-        agents: { ...current.agents, role: { ...current.agents.role, provider: 'nexus-test' } },
+        agents: { ...current.agents, role: { ...current.agents.role, provider: 'nexus-second' } },
       }),
     })
+    const secondRequests = mountSecondModelRoute(testCase.harness, 'nexus-test-model')
 
     const fromSettings = await captureStartRequests(() => testCase.call({ action: 'start', task: 'configured route' }))
-    expect(fromSettings.agentOptions).toEqual([{ provider: 'nexus-test' }])
+    expect(fromSettings.agentOptions).toEqual([{ provider: 'nexus-second' }])
+    await waitFor(() => secondRequests.length === 1, 'the configured second adapter')
+    const configuredId = valueOf(fromSettings.result).childId as string
+    expect(secondRequests[0]).toMatchObject({ sessionId: configuredId, provider: 'nexus-second' })
+    expect(testCase.harness.requestsOf(configuredId)).toEqual([])
 
     // An explicit argument still wins over the configured default.
     const explicit = await captureStartRequests(() =>
@@ -541,11 +552,12 @@ describe('child model route', () => {
 
   it('carries the provider route into batch tasks', async () => {
     const testCase = await openCase({ hold: true })
+    const secondRequests = mountSecondModelRoute(testCase.harness, 'nexus-second-model')
 
     const captured = await captureStartRequests(() =>
       testCase.call({
         action: 'batch',
-        tasks: [{ task: 'on the gpt route', provider: 'nexus-test', model: 'nexus-test-model' }, { task: 'on the parent route' }],
+        tasks: [{ task: 'on the second route', provider: 'nexus-second', model: 'nexus-second-model' }, { task: 'on the parent route' }],
       }),
     )
 
@@ -553,10 +565,30 @@ describe('child model route', () => {
     // by content rather than by position.
     expect(captured.agentOptions).toHaveLength(2)
     expect(captured.agentOptions.filter((value) => value === undefined)).toHaveLength(1)
-    expect(captured.agentOptions).toContainEqual({ provider: 'nexus-test', model: 'nexus-test-model' })
+    expect(captured.agentOptions).toContainEqual({ provider: 'nexus-second', model: 'nexus-second-model' })
+    await waitFor(() => secondRequests.length === 1, 'the batch second adapter')
+    expect(secondRequests[0]).toMatchObject({ provider: 'nexus-second', model: 'nexus-second-model' })
+    expect(testCase.harness.requestsOf(secondRequests[0]!.sessionId!)).toEqual([])
     testCase.harness.releaseAll()
   })
 })
+
+/** Register a distinct native adapter and record only requests it actually streams. */
+function mountSecondModelRoute(harness: SubagentHarness, model: string): GenerateOptions[] {
+  const requests: GenerateOptions[] = []
+  mountModelRoute(harness.ctx, {
+    provider: 'nexus-second', model,
+    stream: async function* (request) {
+      requests.push(request)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'second adapter answer' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'second adapter answer' } }
+      yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  return requests
+}
 
 /**
  * Record the `agentOptions` each native start received, without changing it.

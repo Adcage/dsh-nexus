@@ -14,7 +14,7 @@ import { NexusError } from '../runtime/errors.ts'
 import type { NexusRuntime } from '../runtime/service.ts'
 import { NEXUS_DOMAIN_NAME, runtimeSettingsSchema } from '../storage/domain.ts'
 import { guardConsoleRequest, guardConsoleWrite, HttpError, readConsoleJson } from './guards.ts'
-import { inspectBackendRegistrations, inspectModelProviders, inspectModelIds } from './capabilities.ts'
+import { inspectBackendRegistrations, inspectModelProviders, createModelInspector } from './capabilities.ts'
 
 const saveShape = z.strictObject({ value: z.unknown(), expectedHash: z.string().min(1) })
 const previewShape = z.strictObject({ library: z.unknown(), selection: z.array(z.string()) })
@@ -74,6 +74,7 @@ function httpFailure(error: unknown): HttpError {
 export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void {
   const token = randomBytes(32).toString('hex')
   const closing = new AbortController()
+  const inspectModelIds = createModelInspector(ctx)
   let unregister: (() => void) | undefined
   let detachRuntime: (() => void) | undefined
   let disposed = false
@@ -160,7 +161,7 @@ export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void 
             result = await runtime.prompts.apply(exact, input.selection, input.expectedLibraryHash, () => { assertActor(exact) })
           } else result = runtime.prompts.peek(exact)
         } else if (modelProvider !== undefined) {
-          result = { models: await inspectModelIds(ctx, modelProvider) }
+          result = { models: await inspectModelIds(modelProvider) }
           assertAvailable()
         } else {
           result = { csrfToken: token, verification: 'unverified', registered: { consoleApi: true, nexusRuntime: true },
