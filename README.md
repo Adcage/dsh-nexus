@@ -9,6 +9,16 @@
 
 ## 安装
 
+**推荐：直接装 Release 里预构建好的 tarball。** tarball 里已经带着构建产物 `lib/`，安装时不跑构建、不需要本机的 pnpm 开发工具链，也不需要改 Profile 的 `pnpm-workspace.yaml` 去放行任何构建脚本。
+
+```sh
+dsh plugin --profile <profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.11/dsh-nexus-0.1.11.tgz
+```
+
+安装后必须 **重启该 Profile 的宿主进程** 再刷新页面：新 bundle 不会热进已打开的页面。重复安装同一版本是无声空操作——需要重装时先 `dsh plugin --profile <profile> remove dsh-nexus`，或提升版本号。
+
+### 本地构建后安装（开发用）
+
 插件以 **打包后的 tarball** 安装，不要直接链接工作目录：只有 tarball 会作为真实目录进入 Profile 的 `node_modules`，链接目录要在宿主启动时另外注册才可见。
 
 ```sh
@@ -20,28 +30,42 @@ pnpm pack:plugin          # 先 check，再打包到 dist/，并检查 tarball �
 dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 ```
 
-安装后必须 **重启该 Profile 的宿主进程** 再刷新页面：新 bundle 不会热进已打开的页面。重复安装同一版本是无声空操作——需要重装时先 `dsh plugin --profile <profile> remove dsh-nexus`，或提升版本号。
+### 从 Git / codeload 安装（替代方案，需要放行构建脚本）
 
-## 从 Git 安装
+`git+https://…` 和 codeload 源码归档拿到的是**没有 `lib/` 的源码**（构建产物在 `.gitignore` 里，不提交），`package.json` 的 `prepare` 会在安装时执行 `pnpm run build`。pnpm 10 默认**拦截依赖的构建脚本**，所以这条路径有两个硬前提：
 
-仓库是公开的，因此不必先本地构建再传 tarball，三种来源可以直接从 GitHub 装：
+1. 机器上有开发工具链（Node.js ≥ 22.17.0 与 pnpm），安装时会下载 `devDependencies`；
+2. 目标 Profile 的 `pnpm-workspace.yaml` **放行 dsh-nexus 的构建脚本**。
 
-```sh
-# 1) 推荐：按 tag 装，版本可复现
-dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.10
+没有放行时安装会失败（0.1.10 上实际出现的报错）：
 
-# 2) 源码归档（codeload）
-dsh plugin --profile <profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.10
-
-# 3) Release 里预构建好的 tarball
-dsh plugin --profile <profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.10/dsh-nexus-0.1.10.tgz
+```text
+ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-nexus@0.1.10" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist.
 ```
 
-注意三点：
+pnpm 会在这条错误里打印需要放行的键；把它写进**目标 Profile 的** `pnpm-workspace.yaml`（不是本仓库根目录的那份，也不要在 Profile 里手改 `package.json` / `cordis.patch.yml`）：
 
-- **从 Git 安装是“当场构建”**：本仓库不提交 `lib/`（构建产物在 `.gitignore` 里），`package.json` 里的 `prepare` 脚本会在安装时执行 `pnpm run build`，把 `lib/` 现编出来。所以第 1、2 种装法都要求机器上有开发工具链（Node.js ≥ 22.17.0 与 pnpm），并会下载 `devDependencies`；没装 pnpm 的机器请改用第 3 种方式。
-- **codeload 归档按 URL 固定**：它锁定的是抓取那个 ref 时产出的字节，tag 被移动或之后有新提交都不会重新解析；要换版本得先 `remove` 再装，或直接改 URL。这也是仍推荐第 1 种的原因：tag ref 由 pnpm 解析，版本意图写在命令里。
+```yaml
+onlyBuiltDependencies:
+  - 'dsh-nexus@https://codeload.github.com/Adcage/dsh-nexus/tar.gz/b5e1a32cbdc784c52c8f47229058c662e2669a7d'
+```
+
+这个键的形状是 `<包名>@<pnpm 解析出的 codeload 源码 URL>`，URL 末尾就是该 ref 的 hash。它**不稳定**：v0.1.9 解析出 `241c1735…`，v0.1.10 是 `b5e1a32…`；换版本、甚至移动 tag，键都会变，必须重新让 pnpm 打印并更新，不能照抄旧键。字段名也以 pnpm 实际打印的为准：pnpm 10.18／10.20 读 `onlyBuiltDependencies`，当前 DSH 的失败提示写的是 `allowBuilds`，不要把两者混着抄。
+
+```sh
+# git 按 tag 装（版本可复现）
+dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.11
+
+# codeload 源码归档
+dsh plugin --profile <profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.11
+```
+
+另外两点：
+
+- **codeload 归档按 URL 固定**：它锁定的是抓取那个 ref 时产出的字节，tag 被移动或之后有新提交都不会重新解析；换版本要同时改 URL 和上面那个键里的 hash。
 - **重复安装同一个 ref 可能被当成“没有变化”**：pnpm 对同一个 git ref 缓存解析结果，再次 `add` 往往什么都不做。需要重装时先 `dsh plugin --profile <profile> remove dsh-nexus`，或换一个 tag / commit。
+
+因为放行键每次都跟着 commit 变，**git / codeload 目前只适合临时验证**；日常安装请用上面的 Release tarball。
 
 ## 使用
 
