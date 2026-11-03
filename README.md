@@ -22,6 +22,27 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 
 安装后必须 **重启该 Profile 的宿主进程** 再刷新页面：新 bundle 不会热进已打开的页面。重复安装同一版本是无声空操作——需要重装时先 `dsh plugin --profile <profile> remove dsh-nexus`，或提升版本号。
 
+## 从 Git 安装
+
+仓库是公开的，因此不必先本地构建再传 tarball，三种来源可以直接从 GitHub 装：
+
+```sh
+# 1) 推荐：按 tag 装，版本可复现
+dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.9
+
+# 2) 源码归档（codeload）
+dsh plugin --profile <profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.9
+
+# 3) Release 里预构建好的 tarball
+dsh plugin --profile <profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.9/dsh-nexus-0.1.9.tgz
+```
+
+注意三点：
+
+- **从 Git 安装是“当场构建”**：本仓库不提交 `lib/`（构建产物在 `.gitignore` 里），`package.json` 里的 `prepare` 脚本会在安装时执行 `pnpm run build`，把 `lib/` 现编出来。所以这种装法要求机器上有开发工具链（Node.js ≥ 22.17.0 与 pnpm），并会下载 `devDependencies`；没装 pnpm 的机器请改用第 3 种方式。
+- **第 2 种只对“提交了构建产物的仓库”有效**：codeload 拿到的是纯源码归档，不会触发构建，而本仓库不含 `lib/`，装进去的包没有入口文件（`main` 指向的 `lib/index.js` 不存在）。列在这里是为了说清它为什么不可用，实际请用第 1 或第 3 种。
+- **重复安装同一个 ref 可能被当成“没有变化”**：pnpm 对同一个 git ref 缓存解析结果，再次 `add` 往往什么都不做。需要重装时先 `dsh plugin --profile <profile> remove dsh-nexus`，或换一个 tag / commit。
+
 ## 使用
 
 1. 新会话选择 `Nexus` 预设（原生 `standard` 不受影响）。
