@@ -12,15 +12,16 @@
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
-import type {
-  ChildPolicy,
-  PromptLibrary,
-  PromptSnapshot,
-  RuntimeSettings,
-  WebDocument,
-  WriteScopeRecord,
+import {
+  CHILD_ACCESS_SETTINGS,
+  TOOL_DISPLAY_MODES,
+  type ChildPolicy,
+  type PromptLibrary,
+  type PromptSnapshot,
+  type RuntimeSettings,
+  type WebDocument,
+  type WriteScopeRecord,
 } from '../protocol.ts'
-import { TOOL_DISPLAY_MODES } from '../protocol.ts'
 import {
   AGENT_MAX_CONCURRENCY,
   AGENT_MAX_DEPTH,
@@ -98,11 +99,14 @@ export const runtimeSettingsSchema: z.ZodType<RuntimeSettings> = z.object({
   agents: z.object({
     concurrency: z.number().int().min(AGENT_MIN_CONCURRENCY).max(AGENT_MAX_CONCURRENCY),
     maxDepth: z.number().int().min(AGENT_MIN_DEPTH).max(AGENT_MAX_DEPTH),
+    // Legacy records get the documented default; malformed values fail closed.
+    childAccess: z.enum(CHILD_ACCESS_SETTINGS).catch('read-only').default('inherit'),
     role: z
       .object({
         name: z.string().optional(),
         instructions: z.string().optional(),
         model: z.string().optional(),
+        provider: z.string().trim().transform((value) => value === '' ? undefined : value).optional(),
       })
       .optional(),
   }),

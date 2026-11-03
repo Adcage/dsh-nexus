@@ -115,6 +115,7 @@ export const DEFAULT_SETTINGS: RuntimeSettings = Object.freeze({
   agents: Object.freeze({
     concurrency: AGENT_DEFAULT_CONCURRENCY,
     maxDepth: AGENT_DEFAULT_DEPTH,
+    childAccess: 'inherit' as const,
   }),
   web: Object.freeze({
     maxResults: WEB_DEFAULT_RESULTS,

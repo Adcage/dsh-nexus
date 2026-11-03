@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-terminal'
 import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-subagent'
+import type {} from '@deepseek-ai/dsh-llm'
 import type { ConsoleBackendRegistration, ConsoleCapabilities } from '../protocol.ts'
 
 function inspectService<T>(
@@ -27,6 +28,26 @@ function inspectService<T>(
     if (!Array.isArray(names) || !names.every((name) => typeof name === 'string')) return uninspectable
     return { service: 'present', backends: { state: names.length === 0 ? 'absent' : 'registered', names: [...names] }, readiness: 'unverified' }
   } catch { return uninspectable }
+}
+
+/** Synchronous route ids only; initial console load never interrogates adapters. */
+export function inspectModelProviders(ctx: Context): readonly string[] {
+  try { return ctx.get('llm')?.listProviders().map((provider) => provider.id) ?? [] } catch { return [] }
+}
+
+/** Advisory, lazy model ids. A failing or slow adapter cannot block the console.
+ * The SDK has no listModels cancellation parameter; the race bounds our wait,
+ * not the adapter's own operation. Never forward adapter metadata or errors. */
+export async function inspectModelIds(ctx: Context, provider: string): Promise<readonly string[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const llm = ctx.get('llm')
+    if (llm === undefined) return []
+    return await Promise.race([
+      llm.listModels(provider).then((models) => models.map((model) => model.id)),
+      new Promise<readonly string[]>((resolve) => { timer = setTimeout(() => resolve([]), 1500) }),
+    ])
+  } catch { return [] } finally { clearTimeout(timer) }
 }
 
 /** Re-read optional public registries on each guarded request. ctx.get does not

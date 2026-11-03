@@ -11,14 +11,28 @@
  * step, because a resident child can be woken again without a new creation
  * edge.
  *
- * A `read` child runs `read-only`. A `write` child runs `workspace-write`,
- * which the native policy service fences by its session's workspace root — for
+ * A `read` child always runs `read-only`; the model-facing access argument is a
+ * ceiling of its own. A `write` child runs under the deployment's
+ * `agents.childAccess` setting: `inherit` follows the parent session's current
+ * mode, `workspace-write` keeps the historical ceiling, and `read-only` caps
+ * every child. A setting can only narrow, never widen: the ceiling is always the
+ * narrower of the configured mode and the parent's current mode, and a request
+ * that ends up read-only is admitted and recorded as a `read` child, so no write
+ * lease is taken for authority the child does not have. `workspace-write` is
+ * fenced by the native policy service against its session's workspace root — for
  * a delegated child that root is the delegating session's workspace, not the
  * subdirectory the child was asked to use. The lease therefore covers that
  * whole granted root, so one workspace has at most one writer child no matter
  * which subdirectories two children name. The requested directory stays the
  * child's working directory and must live inside the granted root. A parent
  * that is itself read-only cannot delegate write access at all.
+ *
+ * `inherit` is a real widening of what a child may do, and it is the default the
+ * operator chose: with a `danger-full-access` parent a writer child can write
+ * outside the leased workspace root, because that is the parent's own access.
+ * The lease still records the workspace tree as its scope, so the exclusive
+ * writer rule is weaker under `inherit`; that trade is explicit and configurable
+ * in the console rather than hidden.
  *
  * Product limitation, stated because it is a real capability boundary of the
  * installed SDK: there is no public way to give a child a narrower
@@ -70,7 +84,7 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import type { ChildPolicy } from '../protocol.ts'
+import type { ChildAccessSetting, ChildPolicy, RuntimeSettings } from '../protocol.ts'
 import type { CallOwner } from '../runtime/owner.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { NexusStore } from '../storage/store.ts'
@@ -78,6 +92,9 @@ import { canonicalDirectory, scopeContains, type WriteCoordinator, type WriteLea
 
 /** Filesystem access granted to one child. */
 export type ChildAccess = 'read' | 'write'
+
+/** Operator-selectable ceiling for every child's sandbox mode. */
+export type ChildAccessCeiling = ChildAccessSetting
 
 /** The parent directory service Nexus resolves a relative child directory against. */
 interface WorkingDirectoryPort {
@@ -94,6 +111,8 @@ export interface ChildAdmissionRequest {
   readonly access: ChildAccess
   /** Absolute delegation-depth cap of the child's subtree. */
   readonly maxDepth: number
+  /** Configured ceiling a writing child is narrowed to. */
+  readonly accessCeiling: ChildAccessCeiling
 }
 
 /** One admitted child: its durable authorization plus the release path. */
@@ -122,12 +141,31 @@ const MODE_RANK: Readonly<Record<SandboxMode, number>> = Object.freeze({
 })
 
 /**
- * The widest mode one access level may run under.
+ * The widest mode one child request may run under.
+ *
+ * A `read` request is always `read-only`. A `write` request is capped by the
+ * configured ceiling and, whatever the setting says, by the parent's CURRENT
+ * mode, so no setting can hand a child more authority than the session that
+ * delegates to it. A missing parent mode can only happen where the setting does
+ * not need it (`workspace-write`); `inherit` without an observable parent fails
+ * closed to `read-only`.
  * @param access - granted child access.
+ * @param configured - the deployment's child-access setting.
+ * @param parentMode - the delegating session's current mode, when it is observable.
  * @returns the ceiling mode.
  */
-function ceilingMode(access: ChildAccess): SandboxMode {
-  return access === 'write' ? 'workspace-write' : 'read-only'
+function ceilingMode(access: ChildAccess, configured: ChildAccessCeiling, parentMode: SandboxMode | undefined): SandboxMode {
+  if (access === 'read') return 'read-only'
+  switch (configured) {
+    case 'read-only':
+      return 'read-only'
+    case 'workspace-write':
+      return parentMode === undefined || MODE_RANK[parentMode] >= MODE_RANK['workspace-write']
+        ? 'workspace-write'
+        : parentMode
+    case 'inherit':
+      return parentMode ?? 'read-only'
+  }
 }
 
 /**
@@ -149,19 +187,42 @@ function requirePolicy(ctx: Context, subject: string): SandboxPolicyService {
 }
 
 /**
+ * The current sandbox mode of the session that admitted one child.
+ *
+ * `inherit` needs this observation; without a live parent Agent the mode cannot
+ * be read, which is why the caller fails closed instead of assuming one.
+ * @param ctx - context providing the agent registry.
+ * @param service - shared sandbox policy service.
+ * @param policy - the child's durable authorization.
+ * @returns the parent's current mode, or undefined when that session is not live here.
+ */
+function parentSessionMode(
+  ctx: Context,
+  service: SandboxPolicyService,
+  policy: ChildPolicy,
+): SandboxMode | undefined {
+  const parent = ctx.get('agents')?.get(SessionId(policy.parentSessionId))
+  return parent === undefined ? undefined : service.resolve({ session: parent.session }).mode
+}
+
+/**
  * Narrow one agent's session to the ceiling its durable policy allows.
  *
  * Only widening is corrected: a session that is already narrower keeps its
- * stricter mode, so revalidation can never grant access by accident.
+ * stricter mode, so revalidation can never grant access by accident. The ceiling
+ * is recomputed from the CURRENT setting and the parent's CURRENT mode, so a
+ * later tightening applies to resident children too.
  * @param ctx - context providing the policy service.
  * @param policy - the child's durable authorization.
  * @param agent - the exact child Agent being validated.
+ * @param settings - current runtime settings.
  * @throws NexusError `UNSUPPORTED_CAPABILITY` when the policy service is missing.
  */
-function narrowToPolicy(ctx: Context, policy: ChildPolicy, agent: Agent): void {
+function narrowToPolicy(ctx: Context, policy: ChildPolicy, agent: Agent, settings: RuntimeSettings): void {
   const service = requirePolicy(ctx, `child "${policy.childId}"`)
   const current = service.overrideOf(agent.session) ?? service.defaultMode
-  const ceiling = ceilingMode(policy.access)
+  const configured = settings.agents.childAccess
+  const ceiling = ceilingMode(policy.access, configured, parentSessionMode(ctx, service, policy))
   if (MODE_RANK[current] > MODE_RANK[ceiling]) setSandboxMode(agent.session, ceiling)
 }
 
@@ -213,7 +274,7 @@ async function grantedWorkspaceRoot(service: SandboxPolicyService, session: Sess
  * @param store - durable store that keeps the child policy.
  * @param coordinator - shared write coordinator.
  * @param owner - exact caller authorizing the child.
- * @param request - reserved id, directory, access and depth cap.
+ * @param request - reserved id, directory, access, depth cap and configured ceiling.
  * @returns the admission.
  * @throws NexusError `INVALID_ARGUMENT` for a refused directory, access or depth.
  * @throws NexusError `WRITE_SCOPE_BUSY` when the granted workspace already has a writer.
@@ -242,6 +303,18 @@ export async function admitChildPolicy(
   }
 
   const parent = service.resolve({ session: owner.agent.session })
+  if (request.access === 'write' && MODE_RANK[parent.mode] < MODE_RANK['workspace-write']) {
+    throw new NexusError(
+      'INVALID_ARGUMENT',
+      `cannot start a writing child: this session runs read-only, and delegation never widens its own access`,
+    )
+  }
+  // The setting and the parent's own mode decide what a writer is actually
+  // granted. A request that resolves to read-only is admitted as a READ child,
+  // so the durable record, the tool result and the write lease all describe the
+  // authority the child really has.
+  const grantedMode = ceilingMode(request.access, request.accessCeiling, parent.mode)
+  const access: ChildAccess = request.access === 'write' && grantedMode !== 'read-only' ? 'write' : 'read'
   const directory = ctx.get('workingDirectory') as WorkingDirectoryPort | undefined
   const parentDirectory =
     directory === undefined ? undefined : await directory.ensure(owner.agent, owner.signal)
@@ -255,20 +328,12 @@ export async function admitChildPolicy(
   // service derives `workspace-write` from exactly that root. A writer whose
   // working directory left it could not write where it works, and its exclusive
   // scope is the root itself; a read child may still be pointed anywhere.
-  const grantedRoot = request.access === 'write' ? await canonicalDirectory(parent.workspaceRoot) : undefined
-  if (request.access === 'write' && grantedRoot !== undefined) {
-    if (MODE_RANK[parent.mode] < MODE_RANK['workspace-write']) {
-      throw new NexusError(
-        'INVALID_ARGUMENT',
-        `cannot start a writing child: this session runs read-only, and delegation never widens its own access`,
-      )
-    }
-    if (!scopeContains(grantedRoot, cwd)) {
-      throw new NexusError(
-        'INVALID_ARGUMENT',
-        `cannot start a writing child in "${cwd}": it is outside the workspace root its writes would be limited to (${grantedRoot})`,
-      )
-    }
+  const grantedRoot = access === 'write' ? await canonicalDirectory(parent.workspaceRoot) : undefined
+  if (access === 'write' && grantedRoot !== undefined && !scopeContains(grantedRoot, cwd)) {
+    throw new NexusError(
+      'INVALID_ARGUMENT',
+      `cannot start a writing child in "${cwd}": it is outside the workspace root its writes would be limited to (${grantedRoot})`,
+    )
   }
 
   const lease =
@@ -277,7 +342,7 @@ export async function admitChildPolicy(
     childId: request.childId,
     parentSessionId: owner.sessionId,
     cwd,
-    access: request.access,
+    access,
     maxDepth: request.maxDepth,
   })
   try {
@@ -314,13 +379,20 @@ export async function admitChildPolicy(
  * @param ctx - registration scope.
  * @param store - durable store holding child policies.
  * @param coordinator - shared write coordinator.
+ * @param settings - current runtime settings, read on every edge so a tightened
+ *   ceiling applies to resident children too.
  * @returns an idempotent disposer that removes both hooks.
  */
-export function registerChildPolicy(ctx: Context, store: NexusStore, coordinator: WriteCoordinator): () => void {
+export function registerChildPolicy(
+  ctx: Context,
+  store: NexusStore,
+  coordinator: WriteCoordinator,
+  settings: () => RuntimeSettings,
+): () => void {
   const onCreated = ctx.on('agent/created', async ({ agent }) => {
     const policy = await policyOf(store, agent)
     if (policy === undefined) return
-    narrowToPolicy(ctx, policy, agent)
+    narrowToPolicy(ctx, policy, agent, settings())
     if (policy.access !== 'write') return
     const reserved = coordinator.scopeOf(agent.id)
     if (reserved?.state === 'unconfirmed') {
@@ -342,7 +414,7 @@ export function registerChildPolicy(ctx: Context, store: NexusStore, coordinator
   })
   const onStep = ctx.on('agent/pre-step', async ({ agent }, next) => {
     const policy = await policyOf(store, agent)
-    if (policy !== undefined) narrowToPolicy(ctx, policy, agent)
+    if (policy !== undefined) narrowToPolicy(ctx, policy, agent, settings())
     return next()
   })
   let disposed = false

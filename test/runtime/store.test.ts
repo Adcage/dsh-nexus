@@ -293,7 +293,7 @@ describe('openNexusStore', () => {
         ...DEFAULT_SETTINGS,
         files: { defaultLines: 500, maxOutputBytes: 4_096 },
         terminal: { engine: 'pwsh', pwshPath: 'C:/Program Files/PowerShell/7/pwsh.exe' },
-        agents: { concurrency: 6, maxDepth: 3, role: { name: 'Scout', instructions: 'Read first.', model: 'deepseek' } },
+        agents: { concurrency: 6, maxDepth: 3, childAccess: 'workspace-write', role: { name: 'Scout', instructions: 'Read first.', model: 'deepseek' } },
         web: { maxResults: 8, maxCharsPerPage: 20_000 },
       }
       const snapshot: PromptSnapshot = {
@@ -391,7 +391,7 @@ describe('openNexusStore', () => {
       const smallest: RuntimeSettings = {
         files: { defaultLines: 1, maxOutputBytes: 1 },
         terminal: { engine: 'bash' },
-        agents: { concurrency: 1, maxDepth: 0 },
+        agents: { concurrency: 1, maxDepth: 0, childAccess: 'read-only' },
         web: { maxResults: 1, maxCharsPerPage: 1 },
         toolDisplay: 'native',
       }
@@ -399,7 +399,7 @@ describe('openNexusStore', () => {
       const largest: RuntimeSettings = {
         files: { defaultLines: 2_000, maxOutputBytes: 32_768 },
         terminal: { engine: 'pwsh' },
-        agents: { concurrency: 16, maxDepth: 8 },
+        agents: { concurrency: 16, maxDepth: 8, childAccess: 'inherit' },
         web: { maxResults: 10, maxCharsPerPage: 24_000 },
         toolDisplay: 'auto',
       }

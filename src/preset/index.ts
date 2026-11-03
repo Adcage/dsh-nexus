@@ -215,9 +215,9 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
   // Delegation policy: the narrow access mode and the write scope of a Nexus
   // child are enforced on the child's own creation edge, which the loop runs
   // before that child's first request. Registered per generation because the
-  // hooks are scope-filtered; the store and the coordinator they use are the
-  // runtime's single instances.
-  const childPolicy = registerChildPolicy(ctx, runtime.store, runtime.coordinator)
+  // hooks are scope-filtered; the store, the coordinator and the settings
+  // reader they use are the runtime's single instances.
+  const childPolicy = registerChildPolicy(ctx, runtime.store, runtime.coordinator, settings)
 
   const detachShell = runtime.attach('shell', (): Promise<NexusCleanupReport> => shell.dispose())
   const detachFacts = runtime.trackManagedResources(shell.facts())

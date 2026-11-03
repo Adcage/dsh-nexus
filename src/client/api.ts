@@ -1,6 +1,6 @@
 /** Browser-only transport. Relative URLs, memory-only authorization, no mutation retries. */
 import { z } from 'zod'
-import { NEXUS_API_PREFIX, TOOL_DISPLAY_MODES, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings } from '../protocol.ts'
+import { NEXUS_API_PREFIX, CHILD_ACCESS_SETTINGS, TOOL_DISPLAY_MODES, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings } from '../protocol.ts'
 
 export type PublicCapabilities = Omit<ConsoleCapabilities, 'csrfToken'>
 const strings = z.array(z.string())
@@ -12,7 +12,9 @@ const library = z.object({ modules: z.array(moduleSchema), defaultSelection: str
 const settings = z.object({
   files: z.object({ defaultLines: z.number().int(), maxOutputBytes: z.number().int() }),
   terminal: z.object({ engine: z.enum(['bash', 'pwsh']), bashPath: z.string().optional(), pwshPath: z.string().optional() }),
-  agents: z.object({ concurrency: z.number().int(), maxDepth: z.number().int(), role: z.object({ name: z.string().optional(), instructions: z.string().optional(), model: z.string().optional() }).optional() }),
+  agents: z.object({ concurrency: z.number().int(), maxDepth: z.number().int(),
+    childAccess: z.enum(CHILD_ACCESS_SETTINGS).catch('read-only').default('inherit'),
+    role: z.object({ name: z.string().optional(), instructions: z.string().optional(), model: z.string().optional(), provider: z.string().trim().transform((value) => value === '' ? undefined : value).optional() }).optional() }),
   web: z.object({ maxResults: z.number().int(), maxCharsPerPage: z.number().int() }),
   // The shape check normalises exactly like the host schema, so an older host
   // response without the field still loads and never reaches registration as an
@@ -24,6 +26,7 @@ const backend = z.object({ service: z.enum(['present', 'absent', 'unknown']), ba
 ]), readiness: z.literal('unverified') })
 const capabilities = z.object({ verification: z.literal('unverified'), registered: z.object({ consoleApi: z.literal(true), nexusRuntime: z.literal(true) }),
   backendRegistrations: z.object({ scope: z.literal('effective-http-context'), terminal: backend, web: backend, internalAgent: backend }),
+  providers: strings.default([]),
   diagnostics: strings, settingsLocation: z.object({ namespace: z.literal('dsh-nexus'), domain: z.literal('dsh_nexus') }), basePrompt: z.string(),
 })
 const preview = z.object({ selection: strings, modules: z.array(moduleSchema), text: z.string() })
@@ -31,6 +34,7 @@ const preview = z.object({ selection: strings, modules: z.array(moduleSchema), t
 export const consoleData = {
   library: z.object({ value: library, hash: z.string().min(1) }),
   settings: z.object({ value: settings, hash: z.string().min(1) }),
+  childModels: z.object({ models: strings }),
   capabilities, sessions: z.array(z.object({ id: z.string(), title: z.string() })),
   preview, prompt: preview.extend({ sessionId: z.string() }),
 }
@@ -70,6 +74,7 @@ export function createNexusApi(fetcher: typeof fetch = globalThis.fetch) {
   }
   return {
     capabilities: authorize,
+    async childModels(provider: string) { return consoleData.childModels.parse(await request(`${NEXUS_API_PREFIX}/capabilities?provider=${encodeURIComponent(provider)}`)) },
     async library() { return consoleData.library.parse(await request(`${NEXUS_API_PREFIX}/library`)) },
     async settings() { return consoleData.settings.parse(await request(`${NEXUS_API_PREFIX}/settings`)) },
     async sessions() { return consoleData.sessions.parse(await request(`${NEXUS_API_PREFIX}/sessions`)) },

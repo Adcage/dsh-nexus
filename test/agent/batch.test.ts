@@ -59,7 +59,7 @@ async function openCase(options: { hold?: boolean | 'children' } = {}): Promise<
   const store = await mountNexusStoreFixture()
   const openStore = await store.open()
   const coordinator = createWriteCoordinator(harness.ctx)
-  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator)
+  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator, () => DEFAULT_SETTINGS)
   const definition = createAgentTool(harness.ctx, openStore, () => DEFAULT_SETTINGS, coordinator)
   const bodies: Promise<void>[] = []
   harness.register({

@@ -8,7 +8,7 @@ import WebRuntime from '@deepseek-ai/dsh-web'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SpawnProvider from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { registerRoutes } from '../../src/http/routes.ts'
 import { openNexusRuntime, type NexusRuntime } from '../../src/runtime/service.ts'
 import { registerTerminalBackends } from '../../src/shell/terminals.ts'
@@ -40,7 +40,28 @@ it('distinguishes absent services, empty public registries and unknown web backe
       expect(response.status).toBe(200)
       return await response.json() as { backendRegistrations: unknown; csrfToken: string }
     }
+    const modelRead = vi.spyOn(ctx.llm, 'listModels').mockResolvedValue([
+      { provider: 'catalog-route', id: 'catalog-model', name: 'Private display name', description: 'not public' },
+    ])
+    const providers = vi.spyOn(ctx.llm, 'listProviders').mockReturnValue([{ id: 'catalog-route', name: 'Private adapter display name' }])
     const absent = await read()
+    expect(absent).toHaveProperty('providers', ['catalog-route'])
+    expect(modelRead).not.toHaveBeenCalled()
+    const catalog = await consoleRequest(`${endpoint}?provider=catalog-route`)
+    expect(catalog.status).toBe(200)
+    expect(await catalog.json()).toEqual({ models: ['catalog-model'] })
+    expect(modelRead).toHaveBeenCalledWith('catalog-route')
+    modelRead.mockRejectedValueOnce(new Error('private connection detail'))
+    expect(await (await consoleRequest(`${endpoint}?provider=catalog-route`)).json()).toEqual({ models: [] })
+    modelRead.mockImplementationOnce(() => new Promise(() => {}))
+    const began = Date.now()
+    expect(await (await consoleRequest(`${endpoint}?provider=catalog-route`)).json()).toEqual({ models: [] })
+    expect(Date.now() - began).toBeLessThan(3000)
+    // Queries cannot bypass the existing origin/host guard or request grammar.
+    expect((await consoleRequest(`${endpoint}?provider=catalog-route`, 'GET', undefined, { Origin: 'https://evil.invalid' })).status).toBe(403)
+    expect((await consoleRequest(`${endpoint}?provider=a&provider=b`)).status).toBe(400)
+    providers.mockRestore()
+    modelRead.mockRestore()
     expect(absent.backendRegistrations).toEqual({
       scope: 'effective-http-context',
       terminal: { service: 'absent', backends: { state: 'absent', names: [] }, readiness: 'unverified' },

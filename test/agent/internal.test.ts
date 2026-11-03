@@ -64,8 +64,8 @@ async function openCase(
   const store = await mountNexusStoreFixture()
   const openStore = await store.open()
   const coordinator = createWriteCoordinator(harness.ctx)
-  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator)
   const settings = options.settings?.(DEFAULT_SETTINGS) ?? DEFAULT_SETTINGS
+  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator, () => settings)
   harness.register(createAgentTool(harness.ctx, openStore, () => settings, coordinator))
   const parent = await harness.createParent('primary')
   const entry: OpenCase = {
@@ -168,7 +168,7 @@ describe('start and inspect children', () => {
     const store = await mountNexusStoreFixture()
     const openStore = await store.open()
     const coordinator = createWriteCoordinator(harness.ctx)
-    const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator)
+    const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator, () => DEFAULT_SETTINGS)
     harness.register(createAgentTool(harness.ctx, openStore, () => DEFAULT_SETTINGS, coordinator))
     const parent = await harness.createParent('only-spawn')
     open.push({
@@ -406,6 +406,183 @@ describe('failed native start cleanup authority', () => {
     ).rejects.toMatchObject({ code: 'WRITE_SCOPE_BUSY' })
   })
 })
+
+describe('child model route', () => {
+  it('names a route rejected by native start and never retries on the parent route', async () => {
+    const testCase = await openCase()
+    const original = SubagentRuntime.prototype.startActivation
+    const attempts: unknown[] = []
+    SubagentRuntime.prototype.startActivation = function rejectRoute(
+      this: SubagentRuntime,
+      spec: Parameters<typeof SubagentRuntime.prototype.startActivation>[0],
+    ) {
+      attempts.push(spec.request.agentOptions)
+      return Promise.reject(new Error('provider no longer registered'))
+    } as unknown as typeof SubagentRuntime.prototype.startActivation
+    try {
+      const refused = await testCase.call({ action: 'start', task: 'route removed during admission', provider: 'nexus-test' })
+      expect(refused.isError).toBe(true)
+      expect(refused.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
+      expect(refused.error?.message).toContain('provider route "nexus-test"')
+      expect(attempts).toEqual([{ provider: 'nexus-test' }])
+      expect(testCase.harness.requests).toHaveLength(0)
+    } finally {
+      SubagentRuntime.prototype.startActivation = original
+    }
+  })
+
+  it.each([null, 123, {}, ['nexus-test']])('rejects a non-string provider %j before starting', async (provider) => {
+    const testCase = await openCase()
+    const refused = await testCase.call({ action: 'start', task: 'bad route', provider })
+    expect(refused.isError).toBe(true)
+    // The native tool schema rejects non-strings before Nexus parsing runs.
+    expect(refused.error?.info).toMatchObject({ name: 'ToolArgsError', code: 'INVALID_ARGS' })
+    expect(childIds(valueOf(await testCase.call({ action: 'list' })))).toEqual([])
+    expect(testCase.harness.requests).toHaveLength(0)
+  })
+
+  it('forwards provider and model to the native start and runs the child on that route', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness } = testCase
+
+    const captured = await captureStartRequests(() =>
+      testCase.call({ action: 'start', task: 'route it', provider: '  nexus-test  ', model: 'nexus-test-model' }),
+    )
+
+    expect(captured.agentOptions).toEqual([{ provider: 'nexus-test', model: 'nexus-test-model' }])
+    const childId = valueOf(captured.result).childId as string
+    await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
+    // The route actually used is the requested one, not the parent's default.
+    expect(harness.requestsOf(childId)[0]?.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
+    expect(harness.ctx.agents.get(SessionId(childId))?.options).toMatchObject({ provider: 'nexus-test' })
+    harness.releaseAll()
+  })
+
+  it('accepts a provider alone and keeps the parent model on that route', async () => {
+    const testCase = await openCase({ hold: true })
+    const { harness } = testCase
+
+    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'route it', provider: 'nexus-test' }))
+
+    // No model is invented: the native merge keeps the parent's model.
+    expect(captured.agentOptions).toEqual([{ provider: 'nexus-test' }])
+    const childId = valueOf(captured.result).childId as string
+    await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
+    expect(harness.requestsOf(childId)[0]?.options).toMatchObject({ provider: 'nexus-test', model: 'nexus-test-model' })
+    harness.releaseAll()
+  })
+
+  it('passes no agentOptions when neither the call nor the settings name a route', async () => {
+    const testCase = await openCase({ hold: true })
+
+    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'plain' }))
+
+    expect(captured.agentOptions).toEqual([undefined])
+    testCase.harness.releaseAll()
+  })
+
+  it('uses the configured role provider when the call names none', async () => {
+    const testCase = await openCase({
+      hold: true,
+      settings: (current) => ({
+        ...current,
+        agents: { ...current.agents, role: { ...current.agents.role, provider: 'nexus-test' } },
+      }),
+    })
+
+    const fromSettings = await captureStartRequests(() => testCase.call({ action: 'start', task: 'configured route' }))
+    expect(fromSettings.agentOptions).toEqual([{ provider: 'nexus-test' }])
+
+    // An explicit argument still wins over the configured default.
+    const explicit = await captureStartRequests(() =>
+      testCase.call({ action: 'start', task: 'explicit route', provider: 'nexus-test', model: 'nexus-test-model' }),
+    )
+    expect(explicit.agentOptions).toEqual([{ provider: 'nexus-test', model: 'nexus-test-model' }])
+    testCase.harness.releaseAll()
+  })
+
+  it('lets an explicit provider override an unregistered configured default', async () => {
+    const testCase = await openCase({ hold: true, settings: (current) => ({
+      ...current, agents: { ...current.agents, role: { provider: 'unregistered-default' } },
+    }) })
+    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'explicit route', provider: 'nexus-test' }))
+    expect(captured.result.isError).not.toBe(true)
+    expect(captured.agentOptions).toEqual([{ provider: 'nexus-test' }])
+    testCase.harness.releaseAll()
+  })
+
+  it('treats a blank provider as absent instead of inventing a route', async () => {
+    const testCase = await openCase({ hold: true })
+
+    const captured = await captureStartRequests(() => testCase.call({ action: 'start', task: 'blank route', provider: '   ' }))
+
+    expect(captured.agentOptions).toEqual([undefined])
+    testCase.harness.releaseAll()
+  })
+
+  it('rejects an unregistered provider by name and never starts on the parent route', async () => {
+    const testCase = await openCase()
+    const { harness } = testCase
+
+    const refused = await testCase.call({
+      action: 'start',
+      task: 'use gpt',
+      provider: 'gpt-codex-subscription',
+      model: 'gpt-5',
+    })
+
+    expect(refused.isError).toBe(true)
+    expect(refused.error?.info).toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
+    expect(refused.error?.message).toContain('gpt-codex-subscription')
+    // No fallback: no child exists and not a single model request was made.
+    expect(childIds(valueOf(await testCase.call({ action: 'list' })))).toEqual([])
+    expect(harness.requests).toHaveLength(0)
+  })
+
+  it('carries the provider route into batch tasks', async () => {
+    const testCase = await openCase({ hold: true })
+
+    const captured = await captureStartRequests(() =>
+      testCase.call({
+        action: 'batch',
+        tasks: [{ task: 'on the gpt route', provider: 'nexus-test', model: 'nexus-test-model' }, { task: 'on the parent route' }],
+      }),
+    )
+
+    // Parallel starts settle in their own order, so the two routes are matched
+    // by content rather than by position.
+    expect(captured.agentOptions).toHaveLength(2)
+    expect(captured.agentOptions.filter((value) => value === undefined)).toHaveLength(1)
+    expect(captured.agentOptions).toContainEqual({ provider: 'nexus-test', model: 'nexus-test-model' })
+    testCase.harness.releaseAll()
+  })
+})
+
+/**
+ * Record the `agentOptions` each native start received, without changing it.
+ *
+ * The native merge hides an omitted `agentOptions` by filling in the parent's
+ * route, so a case that must prove "nothing was forwarded" reads the start spec
+ * itself instead of the resulting child.
+ * @param run - action to run.
+ * @returns the action's own result plus one entry per attempted start.
+ */
+async function captureStartRequests<T>(run: () => Promise<T>): Promise<{ readonly result: T; readonly agentOptions: unknown[] }> {
+  const original = SubagentRuntime.prototype.startActivation
+  const agentOptions: unknown[] = []
+  SubagentRuntime.prototype.startActivation = function capture(
+    this: SubagentRuntime,
+    spec: Parameters<typeof SubagentRuntime.prototype.startActivation>[0],
+  ) {
+    agentOptions.push(spec.request.agentOptions)
+    return original.call(this, spec)
+  } as unknown as typeof SubagentRuntime.prototype.startActivation
+  try {
+    return { result: await run(), agentOptions }
+  } finally {
+    SubagentRuntime.prototype.startActivation = original
+  }
+}
 
 describe('delegation limits', () => {
   it('refuses the fifth concurrent child and counts pending admissions', async () => {

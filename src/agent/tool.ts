@@ -72,7 +72,7 @@ const AGENT_ACTIONS: readonly AgentAction[] = [
  * this table is what keeps an action's input closed before any side effect.
  */
 const ACTION_FIELDS: Readonly<Record<AgentAction, readonly string[]>> = Object.freeze({
-  start: ['action', 'task', 'label', 'context', 'role', 'model', 'cwd', 'access'],
+  start: ['action', 'task', 'label', 'context', 'role', 'model', 'provider', 'cwd', 'access'],
   list: ['action'],
   status: ['action', 'childId'],
   read: ['action', 'childId', 'offset', 'limit'],
@@ -85,7 +85,7 @@ const ACTION_FIELDS: Readonly<Record<AgentAction, readonly string[]>> = Object.f
 })
 
 /** The start fields a batch task may carry. */
-const TASK_FIELDS: readonly string[] = Object.freeze(['task', 'label', 'context', 'role', 'model', 'cwd', 'access'])
+const TASK_FIELDS: readonly string[] = Object.freeze(['task', 'label', 'context', 'role', 'model', 'provider', 'cwd', 'access'])
 
 /** One validated start input. */
 interface StartArgs extends ChildStartInput {
@@ -274,7 +274,7 @@ export function createAgentTool(
     description:
       'Delegate work to internal child agents and control them. Actions: start (run one child), list (this session\'s direct children), status (one child), read (a bounded page of a child\'s events by zero-based event position), wait (bounded wait), message (steer or continue a live child), interrupt (ask a child to stop; acknowledgement only), stop (stop one child and await the native release), continue (reuse the same child conversation), batch (up to ' +
       `${AGENT_BATCH_MAX_TASKS} starts, parallel or sequence). ` +
-      'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, and a write child is bounded by this session\'s granted workspace and holds an exclusive scope over that whole workspace root (not over its subdirectory), so this session can have one writer child at a time. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
+      'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, and the deployment\'s child-access setting may cap a writer below this session\'s own mode (a parent that is itself read-only cannot delegate write access at all). A write child holds an exclusive scope over its granted workspace root (not over its subdirectory), so this session can have one writer child at a time. A child runs on this session\'s model route unless a provider and/or model is named. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
     parameters: {
       action: {
         type: 'string',
@@ -295,7 +295,16 @@ export function createAgentTool(
         description:
           'start only: role name used for display and for the configured role guidance placed in the child\'s task content; a role is never a capability ceiling.',
       },
-      model: { type: 'string', description: 'start only: model id for the child; the provider route stays this session\'s route.' },
+      model: {
+        type: 'string',
+        description:
+          'start only: model id for the child, interpreted by the provider route selected by `provider`; omitted keeps this session\'s model.',
+      },
+      provider: {
+        type: 'string',
+        description:
+          'start only: provider route for the child\'s model (a route name from DSH 设置 → 模型, e.g. a second subscription route); omitted keeps this session\'s route. The model id is interpreted by that provider, and a route with no registered adapter is refused by name.',
+      },
       cwd: {
         type: 'string',
         description:
@@ -304,7 +313,8 @@ export function createAgentTool(
       access: {
         type: 'string',
         enum: ['read', 'write'],
-        description: 'start only: filesystem access; defaults to "read".',
+        description:
+          'start only: filesystem access; defaults to "read". "read" is always read-only; "write" is capped by the deployment\'s child-access setting and can never exceed this session\'s own mode.',
       },
       childId: { type: 'string', description: 'status/read/wait/message/interrupt/stop/continue: the child id an earlier start returned.' },
       text: { type: 'string', description: 'message/continue only: the text to deliver to the child.' },
@@ -333,7 +343,8 @@ export function createAgentTool(
           label: { type: 'string' },
           context: { type: 'string', enum: ['spawn', 'fork'] },
           role: { type: 'string' },
-          model: { type: 'string' },
+          model: { type: 'string', description: 'Model id interpreted by the selected provider route; omitted uses the configured role default or parent model.' },
+          provider: { type: 'string', description: 'Provider route for this task; omitted uses the configured role default or parent route. The model id is interpreted by this provider.' },
           cwd: { type: 'string' },
           access: { type: 'string', enum: ['read', 'write'] },
         }),
@@ -649,6 +660,12 @@ function parseStart(args: Readonly<Record<string, unknown>>, ctx: Context | unde
       throw new NexusError('INVALID_ARGUMENT', `${field} must be a non-empty string when supplied`)
     }
   }
+  if (args.provider !== undefined && typeof args.provider !== 'string') {
+    throw new NexusError('INVALID_ARGUMENT', 'provider must be a non-empty string when supplied')
+  }
+  // A blank provider carries no route, so it is treated as absent rather than
+  // being forwarded as an empty provider id.
+  const provider = typeof args.provider === 'string' ? args.provider.trim() : ''
   if (ctx !== undefined) resolveChildProvider(ctx, context)
   return {
     task,
@@ -657,6 +674,7 @@ function parseStart(args: Readonly<Record<string, unknown>>, ctx: Context | unde
     ...(args.label === undefined ? {} : { label: args.label as string }),
     ...(args.role === undefined ? {} : { role: args.role as string }),
     ...(args.model === undefined ? {} : { model: args.model as string }),
+    ...(provider === '' ? {} : { provider }),
     ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }),
   }
 }

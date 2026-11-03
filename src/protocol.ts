@@ -98,6 +98,8 @@ export interface ConsoleCapabilities {
     readonly web: ConsoleBackendRegistration
     readonly internalAgent: ConsoleBackendRegistration
   }
+  /** Registered provider route ids only, never adapter connection configuration. */
+  readonly providers: readonly string[]
   readonly diagnostics: readonly string[]
   readonly settingsLocation: { readonly namespace: 'dsh-nexus'; readonly domain: 'dsh_nexus' }
   readonly basePrompt: string
@@ -220,7 +222,25 @@ export interface AgentRoleDefaults {
   readonly instructions?: string
   /** Model the child starts with. */
   readonly model?: string
+  /**
+   * Provider route for the child's model (for example a second subscription
+   * route). Omitted keeps the parent session's route.
+   */
+  readonly provider?: string
 }
+
+/**
+ * The sandbox ceiling every internal child is held to.
+ *
+ * `inherit` follows the delegating session's current mode (the operator's
+ * default: a child can do what its parent can do, and never more),
+ * `workspace-write` keeps the historical ceiling where only a `write` child may
+ * write its workspace, and `read-only` caps every child.
+ */
+export type ChildAccessSetting = 'inherit' | 'workspace-write' | 'read-only'
+
+/** Every accepted child-access ceiling, in display order. */
+export const CHILD_ACCESS_SETTINGS = ['inherit', 'workspace-write', 'read-only'] as const
 
 /** Internal-child limits and role defaults. */
 export interface AgentSettings {
@@ -228,6 +248,8 @@ export interface AgentSettings {
   readonly concurrency: number
   /** Effective depth cap for descendants. */
   readonly maxDepth: number
+  /** Sandbox ceiling a child is narrowed to, never wider than the parent's mode. */
+  readonly childAccess: ChildAccessSetting
   /** Role values applied to a child that names none. */
   readonly role?: AgentRoleDefaults
 }

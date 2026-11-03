@@ -14,7 +14,7 @@ import { NexusError } from '../runtime/errors.ts'
 import type { NexusRuntime } from '../runtime/service.ts'
 import { NEXUS_DOMAIN_NAME, runtimeSettingsSchema } from '../storage/domain.ts'
 import { guardConsoleRequest, guardConsoleWrite, HttpError, readConsoleJson } from './guards.ts'
-import { inspectBackendRegistrations } from './capabilities.ts'
+import { inspectBackendRegistrations, inspectModelProviders, inspectModelIds } from './capabilities.ts'
 
 const saveShape = z.strictObject({ value: z.unknown(), expectedHash: z.string().min(1) })
 const previewShape = z.strictObject({ library: z.unknown(), selection: z.array(z.string()) })
@@ -102,8 +102,12 @@ export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void 
         guardConsoleRequest(req, ctx.webServer.protocol)
         assertAvailable()
         const url = new URL(req.url ?? '/', ctx.webServer.getOrigin())
-        if (url.search !== '') throw new HttpError(400, 'INVALID_REQUEST', 'Query parameters are not supported.')
         const path = url.pathname.slice(NEXUS_API_PREFIX.length)
+        const modelProvider = url.searchParams.get('provider')?.trim()
+        if (url.search !== '' && (path !== '/capabilities' || modelProvider === undefined || modelProvider === '' ||
+          [...url.searchParams.keys()].length !== 1 || modelProvider.length > 256)) {
+          throw new HttpError(400, 'INVALID_REQUEST', 'Only one provider query on capabilities is supported.')
+        }
         const keyedTarget = /^\/session-keys\/~([^/]*)\/prompt$/.exec(path)
         const targetPath = keyedTarget ?? /^\/sessions\/([^/]+)\/prompt$/.exec(path)
         const methods = path === '/library' || path === '/settings' ? ['GET', 'PUT']
@@ -155,9 +159,13 @@ export function registerRoutes(ctx: Context, runtime: NexusRuntime): () => void 
             const input = parse(applyShape, body)
             result = await runtime.prompts.apply(exact, input.selection, input.expectedLibraryHash, () => { assertActor(exact) })
           } else result = runtime.prompts.peek(exact)
+        } else if (modelProvider !== undefined) {
+          result = { models: await inspectModelIds(ctx, modelProvider) }
+          assertAvailable()
         } else {
           result = { csrfToken: token, verification: 'unverified', registered: { consoleApi: true, nexusRuntime: true },
             backendRegistrations: inspectBackendRegistrations(ctx),
+            providers: inspectModelProviders(ctx),
             diagnostics: ['Registration only; OS backends, providers, accounts and GUI have not been verified.'],
             settingsLocation: { namespace: 'dsh-nexus', domain: NEXUS_DOMAIN_NAME }, basePrompt: BASE_PROMPT } satisfies ConsoleCapabilities
         }

@@ -16,7 +16,7 @@
 1. **加包。** 把 `<你的 Profile>` 整个换成目标 Profile 名，尖括号不要留（日常默认那个通常叫 `web`）。PowerShell 和 bash 里都是同一条命令：
 
    ```sh
-   dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.12/dsh-nexus-0.1.12.tgz
+   dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.13/dsh-nexus-0.1.13.tgz
    ```
 
 2. **重启 DSH 应用。** 新 bundle 不会热进已经打开的页面，必须重启这个 Profile 的宿主进程让 Profile 重新加载，重启完再刷新页面。
@@ -27,11 +27,11 @@
    dsh plugin --profile <你的 Profile> list
    ```
 
-   输出里应该有一行 `dsh-nexus 0.1.12`。再看界面：重启后新会话能选到 `Nexus` 预设，设置里的 `dsh-nexus` 卡片能打开控制台。两样都出现才算装好。
+   输出里应该有一行 `dsh-nexus 0.1.13`。再看界面：重启后新会话能选到 `Nexus` 预设，设置里的 `dsh-nexus` 卡片能打开控制台。两样都出现才算装好。
 
 ### 升级
 
-去 [Releases](https://github.com/Adcage/dsh-nexus/releases) 复制最新那条 tarball 链接，替换上面第 1 步命令里的版本号（链接里出现两次：`.../download/v0.1.12/dsh-nexus-0.1.12.tgz`），执行后同样重启应用再刷新页面。
+去 [Releases](https://github.com/Adcage/dsh-nexus/releases) 复制最新那条 tarball 链接，替换上面第 1 步命令里的版本号（链接里出现两次：`.../download/v0.1.13/dsh-nexus-0.1.13.tgz`），执行后同样重启应用再刷新页面。
 
 两个坑要说清楚：
 
@@ -40,7 +40,7 @@
 
   ```sh
   dsh plugin --profile <你的 Profile> remove dsh-nexus
-  dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.12/dsh-nexus-0.1.12.tgz
+  dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.13/dsh-nexus-0.1.13.tgz
   ```
 
 ### 别人 / 别的机器
@@ -77,10 +77,10 @@ onlyBuiltDependencies:
 
 ```sh
 # git 按 tag 装（版本可复现）
-dsh plugin --profile <你的 Profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.12
+dsh plugin --profile <你的 Profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.13
 
 # codeload 源码归档
-dsh plugin --profile <你的 Profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.12
+dsh plugin --profile <你的 Profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.13
 ```
 
 - **codeload 归档按 URL 固定**：它锁定的是抓取那个 ref 时产出的字节，tag 被移动或之后有新提交都不会重新解析；换版本要同时改 URL 和上面那个键里的 hash。
@@ -114,6 +114,17 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 - **宿主默认**：完全不注册 Nexus 视图。宿主会把这三个名字当作未知工具，并用第一个字符串参数当摘要，所以 `shell` 调用大致显示为“工具调用 · run”，而不是命令本身——这是宿主的兜底显示，不是更好看的 Nexus 样式。
 
 该选择只影响显示，随其它设置一起保存，切换后无需刷新页面；卡片本身的内容、折叠的事实与输出、以及“只按记录显示”的措辞都没有变。
+
+### 子 Agent 权限与模型路由
+
+控制台「内部协作」新增两项，编辑只改共享草稿，点击「保存全部设置」才落盘：
+
+- `agents.childAccess`（默认 `inherit`）：`inherit` 让写子 Agent 继承父会话**当前**权限；`workspace-write` 把写子 Agent 限于父会话工作区；`read-only` 把所有子 Agent 限为只读。工具的 `access: "read"` 永远只读，`access: "write"` 还要受此设置与父权限双重限制；父会话自己只读时仍会拒绝写委派。旧记录缺字段按默认值加载，非法值则按只读处理，不会扩大权限。
+- `agents.role.provider`（可选）：默认子模型提供方路由，与原有 `agents.role.model` 配合。路由名请到 **DSH 设置 → 模型／子 Agent** 查看（例如订阅插件提供的路由），不是账号名或模型 id。工具 `start` 和 `batch.tasks` 中显式的 `provider`／`model` 优先；留空则使用角色默认，再未配置才沿用父会话路由／模型。空白 provider 视作未提供，模型 id 由所选 provider 解释；未知路由会按名字报 Nexus 错误，**不会偷偷退回父路由**。
+
+**权限警告：`inherit` 给子 Agent 与父会话相同的权限。父会话是 `danger-full-access` 时，写子 Agent 也不受工作区边界限制，可以写到工作区外。** 如需工作区限制或只读，请显式选更窄选项。持久策略记录、深度上限与工作区根目录的独占写租约仍保留；继承完全访问时，租约不能隔离工作区之外的写入。
+
+提供方框使用宿主公开的 `llm.listProviders()` 列出路由建议；离开提供方框或聚焦模型框时，才通过 `llm.listModels(provider)` 懒加载 `provider / model` 建议（最长等待 1.5 秒，失败或超时不影响控制台）。两个输入框仍可自由填写，目录不是白名单，不会把未列出的模型拒之门外，也不会修改 DSH 的账号或模型配置。控制台仅返回路由名与模型 id，不返回连接配置或凭据。
 
 `shell` 工具的引擎设置默认 `bash`（Windows 上是 Git Bash），可显式选择 `pwsh`（要求 PowerShell 7）：
 

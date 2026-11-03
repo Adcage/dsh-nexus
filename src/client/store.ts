@@ -6,6 +6,7 @@ import { consoleData, NexusApiError, type NexusApi, type PublicCapabilities } fr
 export type ConsoleNotice = 'idle' | 'saved' | 'previewed' | 'applied' | 'error' | 'conflict'
 export interface ConsoleSnapshot {
   readonly capabilities?: PublicCapabilities
+  readonly childModels?: { readonly provider: string; readonly models: readonly string[] }
   readonly sessions: readonly ConsoleSession[]
   readonly librarySaved?: ConsoleStored<PromptLibrary>
   readonly libraryDraft?: PromptLibrary
@@ -43,6 +44,7 @@ export function createConsoleStore(api: NexusApi) {
   let state = EMPTY_CONSOLE_SNAPSHOT
   let disposed = false
   let libraryRevision = 0, settingsRevision = 0, selectionRevision = 0
+  let childModelsRequest = 0
   let libraryRequest = 0, settingsRequest = 0, refreshRequest = 0, previewRequest = 0, targetEpoch = 0
   const listeners = new Set<() => void>()
   function publish(patch: Partial<ConsoleSnapshot>) {
@@ -112,6 +114,16 @@ export function createConsoleStore(api: NexusApi) {
         // leave that question open for the next publish to answer wrongly.
         await Promise.all([readLibrary(false), readSettings(false)])
       } finally { if (request === refreshRequest) busy('refresh', false) }
+    },
+    async suggestChildModels(provider: string) {
+      const route = provider.trim(), request = ++childModelsRequest
+      if (disposed) return
+      publish({ childModels: { provider: route, models: [] } })
+      if (route === '') return
+      try {
+        const { models } = await api.childModels(route)
+        if (request === childModelsRequest) publish({ childModels: { provider: route, models } })
+      } catch { /* Suggestions are optional; never block draft edits or saving. */ }
     },
     reloadLibrary: () => readLibrary(true),
     reloadSettings: () => readSettings(true),
@@ -200,6 +212,7 @@ export function createConsoleStore(api: NexusApi) {
 export type ConsoleStore = ReturnType<typeof createConsoleStore>
 
 const snapshotShape = z.object({
+  childModels: z.object({ provider: z.string(), models: z.array(z.string()) }).optional(),
   capabilities: consoleData.capabilities.optional(), sessions: consoleData.sessions,
   librarySaved: consoleData.library.optional(), libraryDraft: consoleData.library.shape.value.optional(),
   settingsSaved: consoleData.settings.optional(), settingsDraft: consoleData.settings.shape.value.optional(),

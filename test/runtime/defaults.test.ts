@@ -105,7 +105,7 @@ describe('runtime defaults', () => {
     expect(DEFAULT_SETTINGS).toEqual({
       files: { defaultLines: 200, maxOutputBytes: 32_768 },
       terminal: { engine: 'bash' },
-      agents: { concurrency: 4, maxDepth: 2 },
+      agents: { concurrency: 4, maxDepth: 2, childAccess: 'inherit' },
       web: { maxResults: 5, maxCharsPerPage: 12_000 },
       toolDisplay: 'nexus',
     })
@@ -141,6 +141,39 @@ describe('runtime defaults', () => {
   it('accepts both defaults through the schemas the store validates on reopen', () => {
     expect(runtimeSettingsSchema.parse(DEFAULT_SETTINGS)).toEqual(DEFAULT_SETTINGS)
     expect(promptLibrarySchema.parse(DEFAULT_LIBRARY)).toEqual({ modules: [], defaultSelection: [] })
+  })
+
+  it('defaults a missing child ceiling to inherit but normalizes invalid values to read-only', () => {
+    const { childAccess: _omitted, ...legacyAgents } = DEFAULT_SETTINGS.agents
+    const legacy = { ...DEFAULT_SETTINGS, agents: legacyAgents }
+    // A record written before this setting existed must open with the documented
+    // default instead of failing the whole domain load.
+    expect(runtimeSettingsSchema.parse(legacy)).toEqual({
+      ...legacy,
+      agents: { ...legacyAgents, childAccess: 'inherit' },
+    })
+    const unknown = { ...DEFAULT_SETTINGS, agents: { ...DEFAULT_SETTINGS.agents, childAccess: 'writable' } }
+    expect(runtimeSettingsSchema.parse(unknown).agents.childAccess).toBe('read-only')
+    for (const childAccess of [null, 42, {}, '']) {
+      expect(runtimeSettingsSchema.parse({ ...DEFAULT_SETTINGS, agents: { ...DEFAULT_SETTINGS.agents, childAccess } }).agents.childAccess).toBe('read-only')
+    }
+    for (const ceiling of ['inherit', 'workspace-write', 'read-only'] as const) {
+      expect(runtimeSettingsSchema.parse({ ...DEFAULT_SETTINGS, agents: { ...DEFAULT_SETTINGS.agents, childAccess: ceiling } }).agents.childAccess).toBe(ceiling)
+    }
+  })
+
+  it('keeps the configured role provider optional and stores it when present', () => {
+    const withProvider = {
+      ...DEFAULT_SETTINGS,
+      agents: { ...DEFAULT_SETTINGS.agents, role: { name: 'Scout', provider: 'codex-subscription' } },
+    }
+    expect(runtimeSettingsSchema.parse(withProvider)).toEqual(withProvider)
+    // The field is optional: a record that never named one opens unchanged.
+    expect(runtimeSettingsSchema.parse(DEFAULT_SETTINGS).agents.role).toBeUndefined()
+    const withRoute = (provider: unknown) => ({ ...DEFAULT_SETTINGS, agents: { ...DEFAULT_SETTINGS.agents, role: { provider } } })
+    expect(runtimeSettingsSchema.parse(withRoute('  codex-subscription  ')).agents.role?.provider).toBe('codex-subscription')
+    expect(runtimeSettingsSchema.parse(withRoute('   ')).agents.role?.provider).toBeUndefined()
+    expect(runtimeSettingsSchema.safeParse(withRoute(42)).success).toBe(false)
   })
 
   it('normalizes a missing or unknown stored tool display to nexus at the load boundary', () => {

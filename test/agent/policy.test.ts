@@ -21,10 +21,12 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { NexusStore } from '../../src/storage/store.ts'
+import type { RuntimeSettings } from '../../src/protocol.ts'
 import {
   admitChildPolicy,
   registerChildPolicy,
   type ChildAccess,
+  type ChildAccessCeiling,
 } from '../../src/agent/policy.ts'
 import { canonicalDirectory, createWriteCoordinator, directoryKey, type WriteCoordinator } from '../../src/agent/coordination.ts'
 import { createFsTools } from '../../src/fs/read.ts'
@@ -53,6 +55,13 @@ interface OpenCase {
   readonly coordinator: WriteCoordinator
   readonly disposePolicy: () => void
   readonly parent: Agent
+  /** Settings the enforcement hooks read, so a case can change them mid-run. */
+  readonly settings: () => RuntimeSettings
+}
+
+/** The stored defaults with one child-access ceiling applied. */
+function settingsWith(childAccess: ChildAccessCeiling): RuntimeSettings {
+  return { ...DEFAULT_SETTINGS, agents: { ...DEFAULT_SETTINGS.agents, childAccess } }
 }
 
 /** Cases still open; disposed in reverse order after each test. */
@@ -72,15 +81,23 @@ afterEach(async () => {
  * @param options - deployment sandbox mode and whether scripted answers are held.
  * @returns the open case.
  */
-async function openCase(options: { mode?: SandboxMode; hold?: boolean } = {}): Promise<OpenCase> {
+async function openCase(
+  options: {
+    mode?: SandboxMode
+    hold?: boolean
+    childAccess?: ChildAccessCeiling
+    settings?: () => RuntimeSettings
+  } = {},
+): Promise<OpenCase> {
   const harness = await mountSubagentHarness({ mode: options.mode ?? 'workspace-write', hold: options.hold ?? false })
   const store = await mountNexusStoreFixture()
   const openStore = await store.open()
   const coordinator = createWriteCoordinator(harness.ctx)
-  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator)
+  const settings = options.settings ?? ((): RuntimeSettings => settingsWith(options.childAccess ?? 'inherit'))
+  const disposePolicy = registerChildPolicy(harness.ctx, openStore, coordinator, settings)
   const parent = await harness.createParent('policy-parent')
-  for (const tool of createFsTools(harness.ctx, () => DEFAULT_SETTINGS)) harness.ctx.tools.register(tool)
-  const entry: OpenCase = { harness, store, openStore, coordinator, disposePolicy, parent }
+  for (const tool of createFsTools(harness.ctx, settings)) harness.ctx.tools.register(tool)
+  const entry: OpenCase = { harness, store, openStore, coordinator, disposePolicy, parent, settings }
   open.push(entry)
   return entry
 }
@@ -114,7 +131,13 @@ async function startChild(
     openStore,
     coordinator,
     { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-    { childId: SessionId(childId), cwd, access, maxDepth: extra.maxDepth ?? 2 },
+    {
+      childId: SessionId(childId),
+      cwd,
+      access,
+      maxDepth: extra.maxDepth ?? 2,
+      accessCeiling: testCase.settings().agents.childAccess,
+    },
   )
   try {
     await harness.ctx.subagents.startActivation({
@@ -149,7 +172,8 @@ function effectiveMode(testCase: OpenCase, child: Agent): SandboxMode {
 function requestPolicy(testCase: OpenCase, childId: string, index: number): string | undefined {
   const request = testCase.harness.requestsOf(childId)[index]
   if (request === undefined) return undefined
-  return JSON.stringify(request.options.messages).match(/Current DSH file policy: [a-z-]+/)?.[0]
+  // Earlier snapshots remain in model history; only the last one is current.
+  return [...JSON.stringify(request.options.messages).matchAll(/Current DSH file policy: [a-z-]+/g)].at(-1)?.[0]
 }
 
 /**
@@ -265,7 +289,7 @@ describe('child policy admission', () => {
         openStore,
         testCase.coordinator,
         { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-        { childId: SessionId('escape-child'), cwd: outside, access: 'write', maxDepth: 2 },
+        { childId: SessionId('escape-child'), cwd: outside, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
       ),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
 
@@ -288,7 +312,7 @@ describe('child policy admission', () => {
         openStore,
         testCase.coordinator,
         { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-        { childId: SessionId('alias-child'), cwd: alias, access: 'write', maxDepth: 2 },
+        { childId: SessionId('alias-child'), cwd: alias, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
       ),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     expect(harness.ctx.agents.get(SessionId('alias-child'))).toBeUndefined()
@@ -303,7 +327,7 @@ describe('child policy admission', () => {
         openStore,
         testCase.coordinator,
         { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-        { childId: SessionId('expanding-child'), cwd: harness.workspace, access: 'write', maxDepth: 2 },
+        { childId: SessionId('expanding-child'), cwd: harness.workspace, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
       ),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     expect(await openStore.getChildPolicy('expanding-child')).toBeUndefined()
@@ -326,7 +350,13 @@ describe('child policy admission', () => {
         openStore,
         coordinator,
         { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-        { childId: SessionId('no-policy-child'), cwd: harness.workspace, access: 'read', maxDepth: 2 },
+        {
+          childId: SessionId('no-policy-child'),
+          cwd: harness.workspace,
+          access: 'read',
+          maxDepth: 2,
+          accessCeiling: 'inherit',
+        },
       ),
     ).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
     expect(await openStore.getChildPolicy('no-policy-child')).toBeUndefined()
@@ -342,7 +372,7 @@ describe('child policy admission', () => {
       openStore,
       testCase.coordinator,
       { agent: parent, sessionId: parent.id, signal: new AbortController().signal },
-      { childId: SessionId('unstarted-child'), cwd: scope, access: 'write', maxDepth: 2 },
+      { childId: SessionId('unstarted-child'), cwd: scope, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
     )
     expect(await openStore.getChildPolicy('unstarted-child')).toMatchObject({ access: 'write' })
     // Admission-only cleanup is genuinely safe: no native start was attempted.
@@ -355,7 +385,106 @@ describe('child policy admission', () => {
   })
 })
 
+describe('configurable child sandbox ceiling', () => {
+  it('gives a write child the parent session mode under inherit', async () => {
+    const testCase = await openCase({ mode: 'danger-full-access', childAccess: 'inherit' })
+    const { harness, openStore } = testCase
+
+    const started = await startChild(testCase, 'full-writer', 'write', harness.workspace)
+
+    // `inherit` is the parent's current mode, not a fixed ceiling: here the
+    // parent itself runs unrestricted.
+    expect(effectiveMode(testCase, started.child)).toBe('danger-full-access')
+    expect(await openStore.getChildPolicy('full-writer')).toMatchObject({ access: 'write' })
+  })
+
+  it('never widens past a read-only parent under inherit', async () => {
+    const testCase = await openCase({ mode: 'read-only', childAccess: 'inherit' })
+    const { harness } = testCase
+
+    const read = await startChild(testCase, 'read-child', 'read', harness.workspace)
+    expect(effectiveMode(testCase, read.child)).toBe('read-only')
+    // Inheritance is a ceiling, not a grant: a read-only parent still cannot
+    // delegate a writer at all.
+    await expect(startChild(testCase, 'write-child', 'write', harness.workspace)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+
+  it('reproduces the previous workspace-write ceilings under the workspace-write setting', async () => {
+    const testCase = await openCase({ mode: 'danger-full-access', childAccess: 'workspace-write' })
+    const { harness } = testCase
+    const scope = join(harness.workspace, 'ww-scope')
+    await mkdir(scope, { recursive: true })
+
+    const writer = await startChild(testCase, 'ww-writer', 'write', scope)
+    expect(effectiveMode(testCase, writer.child)).toBe('workspace-write')
+    const policy = harness.ctx.sandboxPolicy.resolve({ session: writer.child.session })
+    expect(directoryKey(policy.workspaceRoot)).toBe(directoryKey(harness.workspace))
+    const reader = await startChild(testCase, 'ww-reader', 'read', harness.workspace)
+    expect(effectiveMode(testCase, reader.child)).toBe('read-only')
+  })
+
+  it('caps even a write child under the read-only setting and takes no write lease', async () => {
+    const testCase = await openCase({ childAccess: 'read-only' })
+    const { harness, openStore, coordinator } = testCase
+    const scope = join(harness.workspace, 'capped-scope')
+    await mkdir(scope, { recursive: true })
+
+    const started = await startChild(testCase, 'capped-writer', 'write', scope)
+
+    expect(effectiveMode(testCase, started.child)).toBe('read-only')
+    // The requested access is recorded as what was actually granted, so the
+    // durable record and the tool result never claim write authority.
+    expect(await openStore.getChildPolicy('capped-writer')).toMatchObject({ access: 'read' })
+    expect(coordinator.scopeOf(SessionId('capped-writer'))).toBeUndefined()
+  })
+})
+
 describe('policy revalidation beyond creation', () => {
+  it('never keeps inherited full access after its parent becomes read-only', async () => {
+    const testCase = await openCase({ mode: 'danger-full-access', hold: true })
+    const { harness, parent } = testCase
+    const started = await startChild(testCase, 'parent-tightened', 'write', harness.workspace)
+    await waitFor(() => harness.requestsOf('parent-tightened').length === 1, 'the first request')
+    expect(effectiveMode(testCase, started.child)).toBe('danger-full-access')
+    setSandboxMode(parent.session, 'read-only')
+    harness.releaseFor('parent-tightened')
+    await started.child.whenIdle()
+    await harness.ctx.subagents.sendMessage(parent, started.childId, [{ type: 'text', text: 'next turn' }], {
+      signal: new AbortController().signal,
+    })
+    await waitFor(() => harness.requestsOf('parent-tightened').length >= 2, 'the next request')
+    expect(effectiveMode(testCase, started.child)).toBe('read-only')
+    expect(requestPolicy(testCase, 'parent-tightened', 1)).toContain('read-only')
+    harness.releaseFor('parent-tightened')
+  })
+
+  it('re-narrows a resident writer when the ceiling becomes read-only before its next step', async () => {
+    const ceiling: { current: ChildAccessCeiling } = { current: 'workspace-write' }
+    const testCase = await openCase({ hold: true, settings: () => settingsWith(ceiling.current) })
+    const { harness, parent } = testCase
+    const scope = join(harness.workspace, 'ceiling-scope')
+    await mkdir(scope, { recursive: true })
+    const started = await startChild(testCase, 'ceiling-writer', 'write', scope)
+    await waitFor(() => harness.requestsOf('ceiling-writer').length === 1, 'the first child request')
+    expect(effectiveMode(testCase, started.child)).toBe('workspace-write')
+
+    // The operator tightens the setting after admission. The next turn must run
+    // under the new ceiling instead of keeping the wider recorded grant.
+    ceiling.current = 'read-only'
+    harness.releaseFor('ceiling-writer')
+    await started.child.whenIdle()
+    await harness.ctx.subagents.sendMessage(parent, started.childId, [{ type: 'text', text: 'next turn' }], {
+      signal: new AbortController().signal,
+    })
+    await waitFor(() => harness.requestsOf('ceiling-writer').length >= 2, 'the second child request')
+
+    expect(effectiveMode(testCase, started.child)).toBe('read-only')
+    expect(requestPolicy(testCase, 'ceiling-writer', 1)).toContain('read-only')
+    harness.releaseFor('ceiling-writer')
+  })
+
   it('re-narrows a child whose mode was widened before its next step', async () => {
     const testCase = await openCase({ hold: true })
     const { harness } = testCase
@@ -548,7 +677,7 @@ describe('the leased scope is the workspace a writer can actually write', () => 
       openStore,
       testCase.coordinator,
       { agent: other, sessionId: other.id, signal: new AbortController().signal },
-      { childId: SessionId('writer-other'), cwd: otherRoot, access: 'write', maxDepth: 2 },
+      { childId: SessionId('writer-other'), cwd: otherRoot, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
     )
     expect(admission.policy.access).toBe('write')
     await admission.releaseUnstarted()
@@ -601,7 +730,7 @@ describe('failed native start cleanup authority', () => {
         openStore,
         testCase.coordinator,
         { agent: testCase.parent, sessionId: testCase.parent.id, signal: new AbortController().signal },
-        { childId: SessionId('persist-failure-child'), cwd: scope, access: 'write', maxDepth: 2 },
+        { childId: SessionId('persist-failure-child'), cwd: scope, access: 'write', maxDepth: 2, accessCeiling: 'inherit' },
       ),
     ).rejects.toBeDefined()
     // A reservation that never reached the store holds nothing: this is the

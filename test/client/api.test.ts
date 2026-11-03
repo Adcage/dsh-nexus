@@ -1,8 +1,29 @@
 import { describe, expect, it } from 'vitest'
 import { createNexusApi } from '../../src/client/api.ts'
 import { clientFixture } from './fixture.ts'
+import { DEFAULT_SETTINGS } from '../../src/runtime/defaults.ts'
 
 describe('same-origin Nexus API', () => {
+  it('defaults a missing child ceiling but fails closed on malformed host values', async () => {
+    const f = clientFixture()
+    const api = createNexusApi(f.fetch)
+    const { childAccess: _omitted, ...legacyAgents } = DEFAULT_SETTINGS.agents
+    f.reply = () => Response.json({ value: { ...DEFAULT_SETTINGS, agents: legacyAgents }, hash: 'legacy' })
+    expect((await api.settings()).value.agents.childAccess).toBe('inherit')
+    for (const childAccess of ['bogus', null, 42]) {
+      f.reply = () => Response.json({ value: { ...DEFAULT_SETTINGS, agents: { ...legacyAgents, childAccess } }, hash: 'invalid' })
+      expect((await api.settings()).value.agents.childAccess).toBe('read-only')
+    }
+  })
+
+  it('loads only model ids lazily from the guarded capabilities route', async () => {
+    const f = clientFixture()
+    f.reply = (path) => path.includes('?provider=') ? Response.json({ models: ['gpt-5'] }) : undefined
+    const api = createNexusApi(f.fetch)
+    expect(await api.childModels('codex subscription')).toEqual({ models: ['gpt-5'] })
+    expect(f.requests.map((request) => request.path)).toEqual(['/api/dsh-nexus/capabilities?provider=codex%20subscription'])
+  })
+
   it('keeps authorization in memory and sends protected conditional writes without retry', async () => {
     const f = clientFixture()
     const api = createNexusApi(f.fetch)

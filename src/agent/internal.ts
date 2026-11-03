@@ -15,6 +15,12 @@
  * controlled. The child id is reserved and its policy persisted before the
  * native activation, so a failure cleans up exactly its own reservation.
  *
+ * A child's model route is the parent's unless the call (or the configured role
+ * default) names a provider and/or model, which are forwarded together as the
+ * native `agentOptions`. A named provider must have a registered adapter in this
+ * scope; an unregistered one is refused by name instead of falling back to the
+ * session's own route.
+ *
  * Lifecycle truth comes from native facts: `interrupt` only acknowledges the
  * cancellation request, `stop` awaits the targeted native drain and reports the
  * confirmed release, and `read`/`status` are built from the child's durable log
@@ -80,12 +86,20 @@ export interface ChildStartInput {
   readonly context?: ChildContext
   /** Role name used for display and configured guidance, never a capability ceiling. */
   readonly role?: string
-  /** Model id for the child; the provider route stays the parent's. */
+  /** Model id for the child, interpreted by {@link ChildStartInput.provider}. */
   readonly model?: string
+  /** Provider route for the child's model; omitted keeps the parent session's route. */
+  readonly provider?: string
   /** Directory: absolute, or relative to the caller's current directory. */
   readonly cwd?: string
   /** Filesystem access; defaults to read. */
   readonly access?: ChildAccess
+}
+
+/** The model route one child starts on; an absent field means "keep the parent's". */
+export interface ChildModelRoute {
+  readonly provider?: string
+  readonly model?: string
 }
 
 /** One started child as the tool reports it. */
@@ -200,6 +214,57 @@ export interface ChildRuntimeOptions {
 function clampSetting(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
   return Math.min(max, Math.max(min, Math.trunc(value)))
+}
+
+/**
+ * The first value that is a non-blank string, trimmed.
+ * @param values - candidates in precedence order.
+ * @returns the first usable value, or undefined when none names one.
+ */
+function firstPresent(...values: readonly (string | undefined)[]): string | undefined {
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (trimmed !== undefined && trimmed !== '') return trimmed
+  }
+  return undefined
+}
+
+/**
+ * Refuse a provider route this scope has no adapter for.
+ *
+ * The native runtime would create the child and fail on its first request, so
+ * the refusable moment is now — and it names the route. Nothing falls back to the
+ * parent's route: a caller that asked for another provider either gets that
+ * provider or an explicit capability error.
+ * @param ctx - context carrying the model registry.
+ * @param provider - requested provider route.
+ * @throws NexusError `UNSUPPORTED_CAPABILITY` when no adapter serves that route.
+ */
+function assertRegisteredProvider(ctx: Context, provider: string): void {
+  const llm = ctx.get('llm')
+  if (llm?.listProviders().some((info) => info.id === provider)) return
+  throw new NexusError(
+    'UNSUPPORTED_CAPABILITY',
+    `cannot start a child on provider route "${provider}": no model adapter is registered for it in this scope, so its model ids cannot be interpreted; enable that provider plugin (DSH 设置 → 模型) or omit the provider to keep this session's route`,
+  )
+}
+
+/**
+ * Resolve the model route one child starts on.
+ *
+ * The call wins over the configured role default, and a field neither names stays
+ * absent so the native runtime keeps this session's value for it.
+ * @param ctx - context carrying the model registry.
+ * @param configured - current runtime settings.
+ * @param input - validated start input.
+ * @returns the route fields to forward as `agentOptions`.
+ * @throws NexusError `UNSUPPORTED_CAPABILITY` when the named provider is not registered.
+ */
+function childModelRoute(ctx: Context, configured: RuntimeSettings, input: ChildStartInput): ChildModelRoute {
+  const provider = firstPresent(input.provider, configured.agents.role?.provider)
+  const model = firstPresent(input.model, configured.agents.role?.model)
+  if (provider !== undefined) assertRegisteredProvider(ctx, provider)
+  return { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }) }
 }
 
 /**
@@ -434,7 +499,7 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
    * @param label - display label.
    * @param input - start input.
    * @param maxDepth - absolute subtree depth cap.
-   * @param model - child model id, when one was requested.
+   * @param route - resolved model route; omitted fields keep the parent's.
    * @returns the admitted policy facts and the exact activation.
    */
   const launchChild = async (
@@ -444,14 +509,19 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
     label: string,
     input: ChildStartInput,
     maxDepth: number,
-    model: string | undefined,
+    route: ChildModelRoute,
   ): Promise<{ readonly access: ChildAccess; readonly cwd: string; readonly activation: SubagentActivation }> => {
     const admitted = await admitChildPolicy(ctx, store, coordinator, owner, {
       childId,
       cwd: input.cwd ?? '.',
       access: input.access ?? 'read',
       maxDepth,
+      accessCeiling: settings().agents.childAccess,
     })
+    const agentOptions = {
+      ...(route.provider === undefined ? {} : { provider: route.provider }),
+      ...(route.model === undefined ? {} : { model: route.model }),
+    }
     try {
       const activation = await ctx.subagents.startActivation({
         provider,
@@ -462,7 +532,7 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
           parent: owner.agent,
           cwd: admitted.policy.cwd,
           maxDepth,
-          ...(model === undefined ? {} : { agentOptions: { model } }),
+          ...(route.provider === undefined && route.model === undefined ? {} : { agentOptions }),
         },
         signal: owner.signal,
         delivery: 'parent',
@@ -476,7 +546,7 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       coordinator.pin(childId)
       throw new NexusError(
         'RESOURCE_NOT_AVAILABLE',
-        `child "${childId}" did not start and its cleanup is unconfirmed, so its policy record and write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) are retained for that child id; it stays discoverable and stop-able, and a second writer on that workspace root is refused until the native runtime releases it`,
+        `child "${childId}"${route.provider === undefined ? '' : ` on provider route "${route.provider}" (no fallback attempted)`} did not start and its cleanup is unconfirmed, so its policy record and write scope (${admitted.lease?.cwd ?? admitted.policy.cwd}) are retained for that child id; it stays discoverable and stop-able, and a second writer on that workspace root is refused until the native runtime releases it`,
         { cause: error },
       )
     }
@@ -504,18 +574,18 @@ export function createChildRuntime(ctx: Context, options: ChildRuntimeOptions): 
       assertLiveCaller(owner)
       const context = input.context ?? 'spawn'
       const provider = resolveChildProvider(ctx, context)
+      const route = childModelRoute(ctx, settings(), input)
       const maxDepth = await childDepthCap(owner)
       assertStartCapacity(owner)
 
       const childId = brandSessionId(randomUUID())
-      const model = input.model ?? settings().agents.role?.model
       const label = input.label ?? input.role ?? settings().agents.role?.name ?? 'subagent'
       // The reservation counts against the concurrency limit from this point
       // until the native runtime either published the child or failed.
       pendingStarts += 1
       let launched
       try {
-        launched = await launchChild(owner, childId, provider, label, input, maxDepth, model)
+        launched = await launchChild(owner, childId, provider, label, input, maxDepth, route)
       } finally {
         pendingStarts -= 1
       }
