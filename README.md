@@ -9,84 +9,68 @@
 
 ## 安装
 
-### 怎么装
+### 直接用 Git 仓库地址安装
 
-推荐直接装 Release 里预构建好的 tarball：tarball 里已经带着构建产物 `lib/`，安装时不跑构建、不需要本机的 pnpm 开发工具链，也不需要改 Profile 的 `pnpm-workspace.yaml` 去放行任何构建脚本。
+仓库随源码一起提交构建好的 `lib/`，安装时不编译插件，不依赖 GitHub Release 附件，也不需要为 Nexus 在 Profile 里放行构建脚本。使用已正常安装的 DSH 即可，不需要另外准备 Nexus 的 TypeScript / tsdown 开发工具链。
 
-1. **加包。** 把 `<你的 Profile>` 整个换成目标 Profile 名，尖括号不要留（日常默认那个通常叫 `web`）。PowerShell 和 bash 里都是同一条命令：
+以下命令适用于 **CLI 管理的 Profile**；桌面应用管理的 Profile 请使用 **设置 → 插件** 或插件管理工具，提供同一个 Git 安装地址。
 
-   ```sh
-   dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.13/dsh-nexus-0.1.13.tgz
-   ```
-
-2. **重启 DSH 应用。** 新 bundle 不会热进已经打开的页面，必须重启这个 Profile 的宿主进程让 Profile 重新加载，重启完再刷新页面。
-
-3. **确认装上了。** 先看依赖在不在（只读命令）：
+1. **加包。** 把 `<profile>` 换成你的 Profile 名（例如 `web`），不要保留尖括号：
 
    ```sh
-   dsh plugin --profile <你的 Profile> list
+   dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git
    ```
 
-   输出里应该有一行 `dsh-nexus 0.1.13`。再看界面：重启后新会话能选到 `Nexus` 预设，设置里的 `dsh-nexus` 卡片能打开控制台。两样都出现才算装好。
+2. **重启目标 Profile 的 DSH 宿主进程，再刷新页面。** 新增 bundle 不保证热加载到已打开的页面。
 
-### 升级
+3. **确认安装。** 执行下面的只读命令，检查有无 `dsh-nexus`；再确认新会话可选 `Nexus` 预设、设置里能打开 Nexus 控制台：
 
-去 [Releases](https://github.com/Adcage/dsh-nexus/releases) 复制最新那条 tarball 链接，替换上面第 1 步命令里的版本号（链接里出现两次：`.../download/v0.1.13/dsh-nexus-0.1.13.tgz`），执行后同样重启应用再刷新页面。
+   ```sh
+   dsh plugin --profile <profile> list
+   ```
 
-两个坑要说清楚：
+不带 `#` 的地址跟随仓库默认分支。需要固定版本时，可以在 `.git` 后加 `#<commit>` 或 `#<tag>`；所选提交必须已经包含 `lib/` 且没有安装构建脚本。**旧版本的 tag 不会因为本次改动自动获得 Git 直装能力。**
 
-- **对同一个版本再执行一次 `add` 是无声空操作**：pnpm 认为包没有变化，不重装，也不报错。
-- 真的要在同一个版本上重装，先移除再加：
+### 升级与重装
 
-  ```sh
-  dsh plugin --profile <你的 Profile> remove dsh-nexus
-  dsh plugin --profile <你的 Profile> add https://github.com/Adcage/dsh-nexus/releases/download/v0.1.13/dsh-nexus-0.1.13.tgz
-  ```
+Git 分支不是自动更新通道：推送新代码不会自动更新别人已经安装的插件，重复 `add` 相同地址也可能命中缓存。升级后仍需重启 DSH。
 
-### 别人 / 别的机器
-
-把上面第 1 步那条命令原样发给对方就行。Release tarball 里带着构建好的 `lib/`，安装时不跑构建，所以目标机器不需要 Node.js、不需要 pnpm，也不用改 Profile 的任何配置（不用往 `pnpm-workspace.yaml` 里加放行项）。
-
-### 不要用这条
+最可靠的方式是使用新提交的完整 commit hash：
 
 ```sh
-dsh plugin --profile <p> add git+https://github.com/Adcage/dsh-nexus.git
+dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#<新的完整commit>
 ```
 
-本仓库不提交构建产物，这条命令拿到的是源码，安装时要跑 `package.json` 里的 `prepare` 现场构建 `lib/`；而 pnpm 10 默认拦截依赖的构建脚本，于是装不上。用户在 0.1.10 上实际遇到的报错（原样引用）：
+需要移除后重装时，先记录插件设置，并注意原地址是否仍被缓存；移除并不能保证清除 pnpm 的所有 Git 缓存。使用明确的新 commit 能避免分支解析歧义。
 
-```text
-ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-nexus@0.1.10" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist.
-```
+Release tarball 仍可作为可选安装方式，但不再是 Git 安装的前提。
 
-要让它跑通，必须把 pnpm 打印的那条**带 codeload URL 和 commit hash 的精确键**写进**该 Profile 的** `pnpm-workspace.yaml` 放行，而这个键每次发版都会变、得重新生成——所以受支持的安装路径是 tarball。下面保留完整替代方案，写给坚持走这条路或只想临时验证的人。
+### 开发者：提交时自动构建
 
-### 从 Git / codeload 安装（替代方案，需要放行构建脚本）
-
-`git+https://…` 和 codeload 源码归档拿到的是**没有 `lib/` 的源码**，安装时跑 `prepare` 构建。要用这条路，前提是：
-
-1. 机器上有开发工具链（Node.js ≥ 22.17.0 与 pnpm），安装时会下载 `devDependencies`；
-2. 目标 Profile 的 `pnpm-workspace.yaml` 放行 dsh-nexus 的构建脚本，键的形状是 `<包名>@<pnpm 解析出的 codeload 源码 URL>`：
-
-```yaml
-onlyBuiltDependencies:
-  - 'dsh-nexus@https://codeload.github.com/Adcage/dsh-nexus/tar.gz/b5e1a32cbdc784c52c8f47229058c662e2669a7d'
-```
-
-这个键**不稳定**：URL 末尾就是该 ref 的 hash，v0.1.9 解析出 `241c1735…`，v0.1.10 是 `b5e1a32…`；换版本、甚至移动 tag，键都会变，不能照抄旧键，必须重新让 pnpm 打印（上面那条是 v0.1.10 的键，只用来参考形状）。字段名也以 pnpm 实际打印的为准：pnpm 10.18／10.20 读 `onlyBuiltDependencies`，当前 DSH 的失败提示写的是 `allowBuilds`，不要把两者混着抄。要改的是**目标 Profile 的** `pnpm-workspace.yaml`，不是本仓库根目录的那份，也不要在 Profile 里手改 `package.json` / `cordis.patch.yml`。
+克隆仓库后，准备 Node.js ≥ 22.17.0 和 pnpm，安装依赖，然后**手动启用一次**提交钩子（不会影响其他仓库）：
 
 ```sh
-# git 按 tag 装（版本可复现）
-dsh plugin --profile <你的 Profile> add git+https://github.com/Adcage/dsh-nexus.git#v0.1.13
-
-# codeload 源码归档
-dsh plugin --profile <你的 Profile> add https://codeload.github.com/Adcage/dsh-nexus/tar.gz/refs/tags/v0.1.13
+pnpm install
+# 如果已经使用 Husky 等钩子，先整合现有钩子，不要直接覆盖 hooksPath。
+git config --local core.hooksPath .githooks
 ```
 
-- **codeload 归档按 URL 固定**：它锁定的是抓取那个 ref 时产出的字节，tag 被移动或之后有新提交都不会重新解析；换版本要同时改 URL 和上面那个键里的 hash。
-- **重复安装同一个 ref 可能被当成“没有变化”**：pnpm 对同一个 git ref 缓存解析结果，再次 `add` 往往什么都不做。需要重装时先 `dsh plugin --profile <你的 Profile> remove dsh-nexus`，或换一个 tag / commit。
+macOS / Linux 上应确保 `.githooks/pre-commit` 可执行；首次将该文件提交到 Git 时，应记录可执行位：
 
-因为放行键每次都跟着 commit 变，**git / codeload 目前只适合临时验证**；日常安装请用上面的 Release tarball。
+```sh
+git add .githooks/pre-commit
+git update-index --chmod=+x .githooks/pre-commit
+```
+
+之后正常暂存需要提交的文件，再运行 `git commit` 即可。钩子会自动：
+
+1. 检查暂存区与工作目录是否一致（生成目录 `lib/` 除外），拒绝未解决的冲突、未暂存修改和未被忽略的新增文件。
+2. 执行 `pnpm check`（类型检查、构建、离线测试）及 `pnpm verify:runtime`。
+3. 再次确认源码和暂存区没有在检查期间变化，然后**只把 `lib/` 的新增、修改和删除纳入这次提交**；不会替你暂存源码、提交或推送。
+
+因此首次提交时，请一并暂存打算提交的新增脚本、测试、文档和配置。若只想提交部分改动，请先自行保存其余改动；钩子不会自动 stash 或丢弃文件。构建失败会阻止提交，生成目录可能已变化，但不会由钩子暂存。每次提交会等待完整检查完成；提交过程中不要同时修改源码或操作暂存区。
+
+钩子只在主动启用的开发机器生效，`git clone` 不会自动启用，`git commit --no-verify` 可以绕过。绕过时必须自行运行检查并同步提交 `lib/`，否则 Git 安装可能拿到旧代码。发布行为变化时仍应更新 `package.json` 的版本号。普通插件安装用户不需要启用钩子。
 
 ### 本地构建后安装（开发用）
 

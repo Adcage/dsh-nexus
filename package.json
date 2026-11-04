@@ -1,6 +1,6 @@
 {
   "name": "dsh-nexus",
-  "version": "0.1.13",
+  "version": "0.1.16",
   "description": "Nexus preset, core tools, system-prompt modules and console for the DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
@@ -37,7 +37,6 @@
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsdown",
-    "prepare": "pnpm run build",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "test": "vitest run",
     "test:integration": "pnpm build && vitest run --config vitest.integration.config.ts",

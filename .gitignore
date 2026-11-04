@@ -1,10 +1,10 @@
-# Product build, dependency and runtime output, plus the orchestration state the
+# Dependencies and runtime output, plus the orchestration state the
 # local `.git/info/exclude` also carries (ledger says Task 1 repeats those
 # entries), so a clone does not show them as untracked.
 .superpowers/
 .pi/
 node_modules/
-lib/
+# lib/ is committed so Git installs need no lifecycle build scripts.
 dist/
 coverage/
 .dev-home/

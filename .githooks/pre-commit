@@ -1,0 +1,3 @@
+#!/bin/sh
+# Git starts this hook in the working-tree root (Git for Windows also uses sh).
+exec node scripts/precommit.mjs
