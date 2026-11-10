@@ -49,7 +49,7 @@
 |---|---|---|
 | 有 `command`，无 `mode` | `run` | — |
 | 有 `command`，`mode:"run"` | `run` | — |
-| 有 `command`，`mode` 为其他合法值 | 拒绝（不猜） | `"command" only applies to mode "run"; mode "read" needs "resourceId"` |
+| 有 `command`，`mode` 为其他合法值 | 拒绝（不猜） | `"command" only applies to the shell mode "run"; mode "read" needs its own fields` |
 | 无 `command`，`mode` 明确 | 按该 mode 走现有分支 | 现有各模式的必填检查 |
 | 无 `command`、无 `mode`、有 `resourceId` | 拒绝 | `give "mode" to say what to do with "resourceId": send, read, status, wait, stop, close` |
 | `command`/`mode`/`resourceId` 都没有 | 拒绝 | `nothing to do: give "command" to run (e.g. {"command":"ls -la"}), or "mode" with "resourceId" to operate on a resource` |
