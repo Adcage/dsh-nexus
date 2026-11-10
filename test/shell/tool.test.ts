@@ -450,7 +450,7 @@ interface RecoveryJson {
 }
 
 interface SandboxJson {
-  mode: string
+  action: string
   enforcement?: string
   denied: boolean
   runnerFailed?: string
@@ -561,14 +561,41 @@ describe('shell tool contract', () => {
     })
   })
 
-  it('requires an explicit action before describing actions and shows a complete run example', async () => {
+  it('describes the command shorthand before the action list and shows a complete run example', async () => {
     const shell = await openShell()
     const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
     const introduction = schema?.description.split('Actions:')[0]
 
-    expect(introduction).toMatch(/every call requires an explicit action/i)
-    expect(introduction).toMatch(/no default action/i)
-    expect(introduction).toContain('{"action":"run","command":"ls -la"}')
+    expect(introduction).toContain('{"command":"ls -la"}')
+    expect(introduction).toMatch(/the mode is then "run"/i)
+    expect(introduction).toMatch(/name the mode only when/i)
+  })
+
+  it('runs a command whose call omits the mode', async () => {
+    const shell = await openShell({ script: () => ({ exitCode: 0, stdout: 'hi\n' }) })
+    const result = await shell.call({ command: 'echo hi' })
+    expect(valueOf(result).action).toBe('run')
+  })
+
+  it('names the contradiction when a command is supplied beside another mode', async () => {
+    const shell = await openShell()
+    const result = await shell.call({ mode: 'read', command: 'echo hi', resourceId: 'nexus-proc-1' })
+    expectCode(result, 'INVALID_ARGUMENT')
+    expect(resultText(result)).toContain('"command" only applies to the shell mode "run"')
+  })
+
+  it('asks for a mode when only a resourceId is supplied', async () => {
+    const shell = await openShell()
+    const result = await shell.call({ resourceId: 'nexus-proc-1' })
+    expectCode(result, 'INVALID_ARGUMENT')
+    expect(resultText(result)).toContain('give "mode" to say what to do with "resourceId"')
+  })
+
+  it('explains both call shapes when nothing is supplied', async () => {
+    const shell = await openShell()
+    const result = await shell.call({})
+    expectCode(result, 'INVALID_ARGUMENT')
+    expect(resultText(result)).toContain('{"command":"ls -la"}')
   })
 
   it('explains that open creates a terminal without running a command and is then driven by send and close', async () => {
@@ -596,18 +623,18 @@ describe('shell tool contract', () => {
   it('rejects unknown, irrelevant and malformed fields before any resource exists', async () => {
     const shell = await openShell()
     const invalid: Record<string, unknown>[] = [
-      { action: 'run', command: 'echo hi', resourceId: 'nexus-term-1' },
-      { action: 'run', command: 'echo hi', env: { SECRET: 'model-supplied' } },
-      { action: 'run' },
-      { action: 'run', command: '   ' },
-      { action: 'run', command: 'echo hi', timeoutMs: 0 },
-      { action: 'run', command: 'echo hi', timeoutMs: 600_001 },
-      { action: 'open', text: 'not allowed' },
-      { action: 'send', resourceId: 'nexus-term-1' },
-      { action: 'read', resourceId: 'nexus-term-1', text: 'not allowed' },
-      { action: 'wait', resourceId: 'nexus-term-1', command: 'echo hi' },
-      { action: 'read', resourceId: 'nexus-term-1', limit: 0 },
-      { action: 'list', command: 'echo hi' },
+      { mode: 'run', command: 'echo hi', resourceId: 'nexus-term-1' },
+      { mode: 'run', command: 'echo hi', env: { SECRET: 'model-supplied' } },
+      { mode: 'run' },
+      { mode: 'run', command: '   ' },
+      { mode: 'run', command: 'echo hi', timeoutMs: 0 },
+      { mode: 'run', command: 'echo hi', timeoutMs: 600_001 },
+      { mode: 'open', text: 'not allowed' },
+      { mode: 'send', resourceId: 'nexus-term-1' },
+      { mode: 'read', resourceId: 'nexus-term-1', text: 'not allowed' },
+      { mode: 'wait', resourceId: 'nexus-term-1', command: 'echo hi' },
+      { mode: 'read', resourceId: 'nexus-term-1', limit: 0 },
+      { mode: 'list', command: 'echo hi' },
     ]
     for (const args of invalid) {
       const result = await shell.call(args)
@@ -617,13 +644,13 @@ describe('shell tool contract', () => {
     // The schema rejects null/type tricks with the native INVALID_ARGS code;
     // the tool does not get to translate a rejected argument shape.
     const nullTricks: Record<string, unknown>[] = [
-      { action: 'run', command: 'echo hi', timeoutMs: null },
-      { action: 'send', resourceId: 'nexus-term-1', text: 'hi', submit: null },
-      { action: 'wait', resourceId: 'nexus-term-1', timeoutMs: null },
-      { action: 'open', cwd: 42 },
-      { action: 'run', command: 'echo hi', engine: 'cmd' },
-      { action: 'wait', resourceId: 'nexus-term-1', timeoutMs: 1.5 },
-      { action: 'explode' },
+      { mode: 'run', command: 'echo hi', timeoutMs: null },
+      { mode: 'send', resourceId: 'nexus-term-1', text: 'hi', submit: null },
+      { mode: 'wait', resourceId: 'nexus-term-1', timeoutMs: null },
+      { mode: 'open', cwd: 42 },
+      { mode: 'run', command: 'echo hi', engine: 'cmd' },
+      { mode: 'wait', resourceId: 'nexus-term-1', timeoutMs: 1.5 },
+      { mode: 'explode' },
     ]
     for (const args of nullTricks) {
       const result = await shell.call(args)
@@ -637,19 +664,19 @@ describe('shell tool contract', () => {
 
   it('routes each handle only to the family that minted it', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }), backends: ['bash', 'pwsh'] })
-    const started = valueOf(await shell.call({ action: 'run', command: 'sleep 60', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'sleep 60', background: true }))
     const processId = started.process!.resourceId
     expect(processId).toMatch(/^nexus-shell-/)
 
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const terminalId = opened.terminal!.resourceId
     expect(terminalId).toMatch(/^nexus-term-/)
 
-    expect(valueOf(await shell.call({ action: 'status', resourceId: processId }))).toMatchObject({
+    expect(valueOf(await shell.call({ mode: 'status', resourceId: processId }))).toMatchObject({
       action: 'status',
       family: 'process',
     })
-    expect(valueOf(await shell.call({ action: 'status', resourceId: terminalId }))).toMatchObject({
+    expect(valueOf(await shell.call({ mode: 'status', resourceId: terminalId }))).toMatchObject({
       action: 'status',
       family: 'terminal',
     })
@@ -657,9 +684,9 @@ describe('shell tool contract', () => {
     // A native PTY id, an unknown job id and an unrelated string are never
     // handed to either controller.
     for (const resourceId of ['pty-1', 'nexus-shell-0000000000000000', 'not-a-resource']) {
-      expectCode(await shell.call({ action: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
-      expectCode(await shell.call({ action: 'stop', resourceId }), 'RESOURCE_NOT_AVAILABLE')
-      expectCode(await shell.call({ action: 'close', resourceId }), 'RESOURCE_NOT_AVAILABLE')
+      expectCode(await shell.call({ mode: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
+      expectCode(await shell.call({ mode: 'stop', resourceId }), 'RESOURCE_NOT_AVAILABLE')
+      expectCode(await shell.call({ mode: 'close', resourceId }), 'RESOURCE_NOT_AVAILABLE')
     }
 
     // A live Agent from another session is not authorized for either family.
@@ -668,7 +695,7 @@ describe('shell tool contract', () => {
       const denied = await shell.harness.ctx.tools.execute({
         callId: ToolCallId(`shell-tool-foreign-${resourceId}`),
         name: 'shell',
-        arguments: { action: 'status', resourceId },
+        arguments: { mode: 'status', resourceId },
         agent: foreign.agent,
         signal: new AbortController().signal,
       })
@@ -681,19 +708,19 @@ describe('shell tool contract', () => {
     const staleSession = 'shell-tool-stale-session'
     const primary = await openShell({ sessionId: staleSession, script: () => ({ staysOpen: true }) })
     const stale = await openShell({ sessionId: staleSession, backends: [] })
-    const owned = valueOf(await primary.call({ action: 'run', command: 'owned', background: true }))
+    const owned = valueOf(await primary.call({ mode: 'run', command: 'owned', background: true }))
     const staleCall = await stale.harness.ctx.tools.execute({
       callId: ToolCallId('shell-tool-stale-call'),
       name: 'shell',
-      arguments: { action: 'status', resourceId: owned.process!.resourceId },
+      arguments: { mode: 'status', resourceId: owned.process!.resourceId },
       agent: stale.harness.owner.agent,
       signal: stale.harness.owner.signal,
     })
     expectCode(staleCall, 'RESOURCE_NOT_AVAILABLE')
-    await primary.call({ action: 'close', resourceId: owned.process!.resourceId })
+    await primary.call({ mode: 'close', resourceId: owned.process!.resourceId })
 
-    await shell.call({ action: 'close', resourceId: processId })
-    await shell.call({ action: 'close', resourceId: terminalId })
+    await shell.call({ mode: 'close', resourceId: processId })
+    await shell.call({ mode: 'close', resourceId: terminalId })
   })
 })
 
@@ -708,7 +735,7 @@ describe('shell run', () => {
         spec.argv.at(-1) === '$PSVersionTable.PSVersion.Major' ? { stdout: '7\n' } : { stdout: 'ok\n' },
     })
     const relative = 'sub dir'
-    const first = valueOf(await shell.call({ action: 'run', command: 'pwd', cwd: relative }))
+    const first = valueOf(await shell.call({ mode: 'run', command: 'pwd', cwd: relative }))
     expect(first.process).toMatchObject({ status: 'exited', exitCode: 0, cleanupConfirmed: true })
     expect(shell.harness.subprocess.spawns[0]?.cwd).toBe(resolve(CWD, relative))
     expect(shell.harness.subprocess.spawns[0]?.argv).toEqual([
@@ -721,13 +748,13 @@ describe('shell run', () => {
     // Resolving a relative cwd never changes the DSH session directory.
     expect(shell.harness.owner.agent.session.header.cwd).toBe(CWD)
 
-    const second = valueOf(await shell.call({ action: 'run', command: 'pwd' }))
+    const second = valueOf(await shell.call({ mode: 'run', command: 'pwd' }))
     expect(second.process?.resourceId).not.toBe(first.process?.resourceId)
     expect(shell.harness.subprocess.spawns[1]?.cwd).toBe(CWD)
 
     // The stored settings decide the engine of a call that names none.
     shell.config.value = PWSH_CONFIG
-    const third = valueOf(await shell.call({ action: 'run', command: 'Write-Output 1' }))
+    const third = valueOf(await shell.call({ mode: 'run', command: 'Write-Output 1' }))
     expect(third.process?.resourceId).toMatch(/^nexus-shell-/)
     expect(shell.harness.subprocess.spawns[2]?.argv.at(-1)).toBe('$PSVersionTable.PSVersion.Major')
     expect(shell.harness.subprocess.spawns[3]?.argv.slice(0, 6)).toEqual([
@@ -740,7 +767,7 @@ describe('shell run', () => {
     ])
 
     // An explicit engine overrides the setting and never silently falls back.
-    const fourth = valueOf(await shell.call({ action: 'run', command: 'echo bash', engine: 'bash' }))
+    const fourth = valueOf(await shell.call({ mode: 'run', command: 'echo bash', engine: 'bash' }))
     expect(fourth.process).toMatchObject({ status: 'exited', cleanupConfirmed: true })
     expect(shell.harness.subprocess.spawns[4]?.argv[1]).toBe('--noprofile')
   })
@@ -749,13 +776,13 @@ describe('shell run', () => {
     const early = new AbortController()
     const pre = await openShell({ script: () => ({ staysOpen: true }), signal: early.signal })
     early.abort()
-    const cancelled = await pre.call({ action: 'run', command: 'never starts', background: true })
+    const cancelled = await pre.call({ mode: 'run', command: 'never starts', background: true })
     expect(cancelled.isError).toBe(true)
     expect(pre.harness.subprocess.spawns).toHaveLength(0)
 
     const live = new AbortController()
     const shell = await openShell({ script: () => ({ staysOpen: true }), signal: live.signal })
-    const foreground = shell.call({ action: 'run', command: 'foreground work' })
+    const foreground = shell.call({ mode: 'run', command: 'foreground work' })
     await until(() => shell.harness.subprocess.spawns.length === 1)
     live.abort()
     const settled = await foreground
@@ -764,7 +791,7 @@ describe('shell run', () => {
     // stopped through the ownership path.
     expect(['ABORTED', 'RESOURCE_NOT_AVAILABLE']).toContain(settled.error?.info?.code)
     const observer = new AbortController()
-    const list = valueOf(await shell.call({ action: 'list' }, observer.signal))
+    const list = valueOf(await shell.call({ mode: 'list' }, observer.signal))
     expect(list.processes).toHaveLength(1)
     expect(list.processes?.[0]?.process).toMatchObject({ stopRequested: 'cancel', cleanupConfirmed: true })
   })
@@ -772,22 +799,22 @@ describe('shell run', () => {
   it('detaches a published background run from the tool-call signal', async () => {
     const live = new AbortController()
     const shell = await openShell({ script: () => ({ staysOpen: true }), signal: live.signal })
-    const started = valueOf(await shell.call({ action: 'run', command: 'background work', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'background work', background: true }))
     const resourceId = started.process!.resourceId
     live.abort()
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50))
     const observer = new AbortController()
-    expect(valueOf(await shell.call({ action: 'status', resourceId }, observer.signal)).process).toMatchObject({
+    expect(valueOf(await shell.call({ mode: 'status', resourceId }, observer.signal)).process).toMatchObject({
       status: 'running',
       stopRequested: null,
     })
-    const stopped = valueOf(await shell.call({ action: 'stop', resourceId }, observer.signal))
+    const stopped = valueOf(await shell.call({ mode: 'stop', resourceId }, observer.signal))
     expect(stopped.process).toMatchObject({ stopRequested: 'user', cleanupConfirmed: true })
   })
 
   it('reports a non-zero exit explicitly instead of treating it as a tool failure', async () => {
     const shell = await openShell({ script: () => ({ stdout: 'partial', exitCode: 3 }) })
-    const result = await shell.call({ action: 'run', command: 'exit 3' })
+    const result = await shell.call({ mode: 'run', command: 'exit 3' })
     expect(result.isError).toBe(false)
     const value = valueOf(result)
     expect(value.process).toMatchObject({ status: 'exited', exitCode: 3, cleanupConfirmed: true })
@@ -797,13 +824,13 @@ describe('shell run', () => {
 
   it('refuses an unavailable engine before a process is created', async () => {
     const shell = await openShell({ config: { deployment: { pwshPath: missingExecutable('nope.exe') }, terminal: { engine: 'pwsh' } } })
-    expectCode(await shell.call({ action: 'run', command: 'echo hi' }), 'SHELL_UNAVAILABLE')
+    expectCode(await shell.call({ mode: 'run', command: 'echo hi' }), 'SHELL_UNAVAILABLE')
     expect(shell.harness.subprocess.spawns).toHaveLength(0)
   })
 
   it('publishes a background run, keeps a wait timeout harmless, and separates stop from close', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
-    const startedResult = await shell.call({ action: 'run', command: 'long work', background: true })
+    const startedResult = await shell.call({ mode: 'run', command: 'long work', background: true })
     const started = valueOf(startedResult)
     expect(started.background).toBe(true)
     expect(started.process?.status).toBe('running')
@@ -812,49 +839,49 @@ describe('shell run', () => {
     expect(startedResult.meta).toMatchObject({ action: 'run' })
     expect(startedResult.meta).not.toHaveProperty('timedOut')
 
-    const status = valueOf(await shell.call({ action: 'status', resourceId }))
+    const status = valueOf(await shell.call({ mode: 'status', resourceId }))
     expect(status).toMatchObject({ action: 'status', family: 'process', background: true })
     expect(status.job?.id).toBe(resourceId)
     expect(status.job?.status).toBe('running')
 
-    const timedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const timedResult = await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 })
     const timed = valueOf(timedResult)
     expect(timed.timedOut).toBe(true)
     expect(timed.process?.status).toBe('running')
     // The durable presentation fact records the timeout, so a replayed card keeps
     // the timeout stage instead of a settled one.
     expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
-    expect(resultText(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))).toContain(
+    expect(resultText(await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 }))).toContain(
       'not completion',
     )
 
-    const stopped = valueOf(await shell.call({ action: 'stop', resourceId }))
+    const stopped = valueOf(await shell.call({ mode: 'stop', resourceId }))
     expect(stopped.process).toMatchObject({ stopRequested: 'user', cleanupConfirmed: true })
     // stop keeps control; only close forgets the resource.
-    expect(valueOf(await shell.call({ action: 'status', resourceId })).process?.resourceId).toBe(resourceId)
+    expect(valueOf(await shell.call({ mode: 'status', resourceId })).process?.resourceId).toBe(resourceId)
 
-    const closed = valueOf(await shell.call({ action: 'close', resourceId }))
+    const closed = valueOf(await shell.call({ mode: 'close', resourceId }))
     expect(closed).toMatchObject({ closed: true })
-    expectCode(await shell.call({ action: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
+    expectCode(await shell.call({ mode: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
   })
 
   it('keeps unconfirmed cleanup controllable and retryable', async () => {
     let unconfirmed = true
     const shell = await openShell({ script: () => ({ staysOpen: true, cleanupUnconfirmed: () => unconfirmed }) })
-    const started = valueOf(await shell.call({ action: 'run', command: 'stubborn', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'stubborn', background: true }))
     const resourceId = started.process!.resourceId
 
-    const stopped = valueOf(await shell.call({ action: 'stop', resourceId }))
+    const stopped = valueOf(await shell.call({ mode: 'stop', resourceId }))
     expect(stopped.process).toMatchObject({ status: 'stopping', cleanupConfirmed: false })
-    expect(resultText(await shell.call({ action: 'stop', resourceId }))).toContain('not confirmed')
+    expect(resultText(await shell.call({ mode: 'stop', resourceId }))).toContain('not confirmed')
 
-    const refused = valueOf(await shell.call({ action: 'close', resourceId }))
+    const refused = valueOf(await shell.call({ mode: 'close', resourceId }))
     expect(refused).toMatchObject({ closed: false, reason: 'cleanup-unconfirmed' })
     // The retained handle is still listed and controllable after the refusal.
-    expect(valueOf(await shell.call({ action: 'list' })).processes).toHaveLength(1)
+    expect(valueOf(await shell.call({ mode: 'list' })).processes).toHaveLength(1)
 
     unconfirmed = false
-    const retried = valueOf(await shell.call({ action: 'close', resourceId }))
+    const retried = valueOf(await shell.call({ mode: 'close', resourceId }))
     expect(retried).toMatchObject({ closed: true })
   })
 })
@@ -870,7 +897,7 @@ describe('shell read for processes', () => {
     const reader = createScriptedOutputReader(original, { memoryBytes: 16, spillPath })
     const shell = await openShell({ script: () => ({ readers: { stdout: reader } }) })
 
-    const started = valueOf(await shell.call({ action: 'run', command: 'long output' }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'long output' }))
     const resourceId = started.process!.resourceId
     expect(started.page?.lossy).toBe(false)
     expect(started.page?.cursor.startsWith('nxprocread1.')).toBe(true)
@@ -880,7 +907,7 @@ describe('shell read for processes', () => {
     let cursor = started.page!.cursor
     let text = started.page!.text
     for (let page = 0; page < 16; page += 1) {
-      const read = valueOf(await shell.call({ action: 'read', resourceId, cursor, limit: 24 }))
+      const read = valueOf(await shell.call({ mode: 'read', resourceId, cursor, limit: 24 }))
       expect(read).toMatchObject({ action: 'read', family: 'process' })
       expect(Buffer.byteLength(read.page!.text, 'utf8')).toBeLessThanOrEqual(24)
       expect(JSON.stringify(read)).not.toContain(spillPath)
@@ -889,17 +916,17 @@ describe('shell read for processes', () => {
       cursor = read.page!.cursor
     }
     expect(text).toBe(original)
-    expect(resultText(await shell.call({ action: 'read', resourceId }))).toContain('byte')
+    expect(resultText(await shell.call({ mode: 'read', resourceId }))).toContain('byte')
   })
 
   it('says where the previous page ended when a read restarts at the beginning', async () => {
     const shell = await openShell({ script: () => ({ stdout: 'alpha\nbeta\ngamma\n' }) })
-    const started = valueOf(await shell.call({ action: 'run', command: 'produce lines' }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'produce lines' }))
     const resourceId = started.process!.resourceId
     const previous = started.page!.cursor
     expect(started.page?.text.length).toBeGreaterThan(0)
 
-    const restarted = await shell.call({ action: 'read', resourceId, limit: 5 })
+    const restarted = await shell.call({ mode: 'read', resourceId, limit: 5 })
     const value = valueOf(restarted)
     expect(value.previousCursor).toBe(previous)
     const text = resultText(restarted)
@@ -907,56 +934,56 @@ describe('shell read for processes', () => {
     expect(text).toMatch(/restarted at the beginning/i)
 
     // A continuation names the cursor, so the notice is not repeated.
-    const continued = valueOf(await shell.call({ action: 'read', resourceId, cursor: previous }))
+    const continued = valueOf(await shell.call({ mode: 'read', resourceId, cursor: previous }))
     expect(continued.previousCursor).toBeUndefined()
   })
 
   it('does not claim a restart when the resource never returned a page', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
-    const started = valueOf(await shell.call({ action: 'run', command: 'idle job', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'idle job', background: true }))
 
-    const first = valueOf(await shell.call({ action: 'read', resourceId: started.process!.resourceId }))
+    const first = valueOf(await shell.call({ mode: 'read', resourceId: started.process!.resourceId }))
     expect(first.previousCursor).toBeUndefined()
   })
 
   it('reports a dropped head as loss instead of inventing bytes', async () => {    const original = `${'z'.repeat(200)}-TAIL`
     const reader = createScriptedOutputReader(original, { memoryBytes: 16 })
     const shell = await openShell({ script: () => ({ readers: { stdout: reader } }) })
-    const started = valueOf(await shell.call({ action: 'run', command: 'lossy' }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'lossy' }))
     expect(started.page?.lossy).toBe(true)
     expect(started.recovery).toContainEqual(
       expect.objectContaining({ stream: 'stdout', lost: true, reason: 'retention' }),
     )
-    const text = resultText(await shell.call({ action: 'read', resourceId: started.process!.resourceId }))
+    const text = resultText(await shell.call({ mode: 'read', resourceId: started.process!.resourceId }))
     expect(text).toContain('loss')
   })
 
   it('rejects cross-family, cross-resource and malformed cursors', async () => {
     const shell = await openShell({ script: () => ({ stdout: 'cursor source' }), backends: ['bash'] })
-    const first = valueOf(await shell.call({ action: 'run', command: 'one' }))
-    const second = valueOf(await shell.call({ action: 'run', command: 'two' }))
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const first = valueOf(await shell.call({ mode: 'run', command: 'one' }))
+    const second = valueOf(await shell.call({ mode: 'run', command: 'two' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const cursor = first.page!.cursor
 
     expectCode(
-      await shell.call({ action: 'read', resourceId: second.process!.resourceId, cursor }),
+      await shell.call({ mode: 'read', resourceId: second.process!.resourceId, cursor }),
       'INVALID_ARGUMENT',
     )
     expectCode(
-      await shell.call({ action: 'read', resourceId: first.process!.resourceId, cursor: 'garbage' }),
+      await shell.call({ mode: 'read', resourceId: first.process!.resourceId, cursor: 'garbage' }),
       'INVALID_ARGUMENT',
     )
     // A terminal cursor is never decoded by the process family.
-    const terminalCursor = valueOf(await shell.call({ action: 'read', resourceId: opened.terminal!.resourceId, limit: 1 }))
+    const terminalCursor = valueOf(await shell.call({ mode: 'read', resourceId: opened.terminal!.resourceId, limit: 1 }))
     expectCode(
       await shell.call({
-        action: 'read',
+        mode: 'read',
         resourceId: first.process!.resourceId,
         cursor: terminalCursor.cursor ?? 'nxterm1.missing',
       }),
       'INVALID_ARGUMENT',
     )
-    await shell.call({ action: 'close', resourceId: opened.terminal!.resourceId })
+    await shell.call({ mode: 'close', resourceId: opened.terminal!.resourceId })
   })
 })
 
@@ -967,21 +994,21 @@ describe('shell read for processes', () => {
 describe('shell terminals', () => {
   it('opens the configured engine, forwards a display name and a resolved cwd', async () => {
     const shell = await openShell({ config: PWSH_CONFIG, backends: ['bash', 'pwsh'] })
-    const opened = valueOf(await shell.call({ action: 'open', cwd: 'inner dir', name: 'worker' }))
+    const opened = valueOf(await shell.call({ mode: 'open', cwd: 'inner dir', name: 'worker' }))
     expect(opened).toMatchObject({ action: 'open', motd: 'nexus scripted shell' })
     expect(opened.terminal).toMatchObject({ kind: 'terminal', engine: 'pwsh', name: 'worker' })
     expect(shell.backends.get('pwsh')?.spawns[0]).toMatchObject({ cwd: resolve(CWD, 'inner dir'), name: 'worker' })
     expect(shell.backends.get('bash')?.spawns).toHaveLength(0)
-    await shell.call({ action: 'close', resourceId: opened.terminal!.resourceId })
+    await shell.call({ mode: 'close', resourceId: opened.terminal!.resourceId })
   })
 
   it('sends raw text with submit defaulting to true and never changes the session directory', async () => {
     const shell = await openShell()
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
 
-    const sent = valueOf(await shell.call({ action: 'send', resourceId, text: "cd '目录 with space'" }))
+    const sent = valueOf(await shell.call({ mode: 'send', resourceId, text: "cd '目录 with space'" }))
     expect(sent).toMatchObject({
       action: 'send',
       family: 'terminal',
@@ -992,15 +1019,15 @@ describe('shell terminals', () => {
     expect(session.sends).toEqual([{ text: "cd '目录 with space'", submit: true }])
     expect(shell.harness.owner.agent.session.header.cwd).toBe(CWD)
 
-    const typed = valueOf(await shell.call({ action: 'send', resourceId, text: 'partial', submit: false }))
+    const typed = valueOf(await shell.call({ mode: 'send', resourceId, text: 'partial', submit: false }))
     expect(typed.cancelled).toBe(false)
     expect(session.sends[1]).toEqual({ text: 'partial', submit: false })
 
     // A second concurrent send is refused by the native registry, not wrapped.
     session.manualSends = true
-    const firstSend = shell.call({ action: 'send', resourceId, text: 'long command' })
+    const firstSend = shell.call({ mode: 'send', resourceId, text: 'long command' })
     await until(() => session.active !== undefined)
-    const busy = await shell.call({ action: 'send', resourceId, text: 'second' })
+    const busy = await shell.call({ mode: 'send', resourceId, text: 'second' })
     expect(busy.isError).toBe(true)
     // The native TerminalError's code stays in its message; the registry does
     // not invent a Nexus code for a native refusal.
@@ -1008,24 +1035,24 @@ describe('shell terminals', () => {
     session.settleActive()
     expect(valueOf(await firstSend).cancelled).toBe(false)
 
-    await shell.call({ action: 'close', resourceId })
+    await shell.call({ mode: 'close', resourceId })
   })
 
   it('reports a delivered interrupt and a cancellation as facts, not as success or exit', async () => {
     const shell = await openShell()
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
 
-    const stopped = valueOf(await shell.call({ action: 'stop', resourceId }))
+    const stopped = valueOf(await shell.call({ mode: 'stop', resourceId }))
     expect(stopped).toMatchObject({ interrupted: true, targetPgid: 4242 })
     expect(session.signals).toEqual(['SIGINT'])
     // stop is not close: the terminal is still controllable.
-    expect(valueOf(await shell.call({ action: 'status', resourceId })).terminal?.resourceId).toBe(resourceId)
+    expect(valueOf(await shell.call({ mode: 'status', resourceId })).terminal?.resourceId).toBe(resourceId)
 
     session.manualSends = true
     const controller = new AbortController()
-    const pending = shell.call({ action: 'send', resourceId, text: 'sleep 60' }, controller.signal)
+    const pending = shell.call({ mode: 'send', resourceId, text: 'sleep 60' }, controller.signal)
     await until(() => session.active !== undefined)
     controller.abort()
     // The registry preserves caller cancellation as the native ABORTED failure;
@@ -1035,89 +1062,89 @@ describe('shell terminals', () => {
     expect(cancelled.error?.info?.code).toBe('ABORTED')
     expect(session.interrupts).toBe(1)
     expect(session.sends.at(-1)).toEqual({ text: 'sleep 60', submit: true })
-    expect(valueOf(await shell.call({ action: 'status', resourceId })).terminal?.resourceId).toBe(resourceId)
-    await shell.call({ action: 'close', resourceId })
+    expect(valueOf(await shell.call({ mode: 'status', resourceId })).terminal?.resourceId).toBe(resourceId)
+    await shell.call({ mode: 'close', resourceId })
   })
 
   it('reads newest-relative line pages without claiming an inferred idle is an exit', async () => {
     const shell = await openShell()
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
     for (const line of ['one', 'two', 'three', 'four']) session.append(line)
 
-    const newest = valueOf(await shell.call({ action: 'read', resourceId, limit: 2 }))
+    const newest = valueOf(await shell.call({ mode: 'read', resourceId, limit: 2 }))
     expect(newest).toMatchObject({ action: 'read', family: 'terminal', totalLines: 4, hasOlder: true })
     expect(newest.text).toBe('three\nfour')
     expect(newest.cursor).toMatch(/^nxterm1\./)
 
-    const older = valueOf(await shell.call({ action: 'read', resourceId, cursor: newest.cursor!, limit: 2 }))
+    const older = valueOf(await shell.call({ mode: 'read', resourceId, cursor: newest.cursor!, limit: 2 }))
     expect(older.text).toBe('one\ntwo')
     expect(older.hasOlder).toBe(false)
     expect(older.cursor).toBeUndefined()
     // The terminal family's continuation unit is a line, not a byte.
-    expect(resultText(await shell.call({ action: 'read', resourceId }))).toContain('line')
+    expect(resultText(await shell.call({ mode: 'read', resourceId }))).toContain('line')
 
     session.manualSends = true
-    const send = shell.call({ action: 'send', resourceId, text: 'slow' })
+    const send = shell.call({ mode: 'send', resourceId, text: 'slow' })
     await until(() => session.active !== undefined)
     session.settleActive({ waitReason: 'inferred_idle', sessionStatus: { kind: 'running' } })
     const sendResult = await send
     const settled = valueOf(sendResult)
     expect(settled).toMatchObject({ waitReason: 'inferred_idle', cancelled: false })
     expect(resultText(sendResult)).toContain('inferred idle')
-    await shell.call({ action: 'close', resourceId })
+    await shell.call({ mode: 'close', resourceId })
   })
 
   it('reports a wait timeout and a session exit without inventing command success', async () => {
     const shell = await openShell()
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
 
-    const timedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const timedResult = await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 })
     const timed = valueOf(timedResult)
     expect(timed).toMatchObject({ timedOut: true, waitReason: 'timeout' })
     expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
-    expect(resultText(await shell.call({ action: 'wait', resourceId, timeoutMs: 50 }))).toContain('not an exit')
+    expect(resultText(await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 }))).toContain('not an exit')
 
     session.statusValue = { kind: 'exited', exitCode: 0, signal: null }
-    const exitedResult = await shell.call({ action: 'wait', resourceId, timeoutMs: 50 })
+    const exitedResult = await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 })
     const exited = valueOf(exitedResult)
     expect(exited).toMatchObject({ timedOut: false, waitReason: 'session_exit' })
     // A settled wait keeps a durable `false`, so the stage is not a timeout.
     expect(exitedResult.meta).toMatchObject({ action: 'wait', timedOut: false })
     expect(exited.sessionStatus).toMatchObject({ kind: 'exited', exitCode: 0 })
-    await shell.call({ action: 'close', resourceId })
+    await shell.call({ mode: 'close', resourceId })
   })
 
   it('keeps unconfirmed terminal cleanup owned and retryable', async () => {
     const shell = await openShell()
-    const opened = valueOf(await shell.call({ action: 'open' }))
+    const opened = valueOf(await shell.call({ mode: 'open' }))
     const resourceId = opened.terminal!.resourceId
     const session = shell.backends.get('bash')!.sessions[0]!
     session.closeFailures = 1
 
-    const refusedResult = await shell.call({ action: 'close', resourceId })
+    const refusedResult = await shell.call({ mode: 'close', resourceId })
     const refused = valueOf(refusedResult)
     expect(refused).toMatchObject({ closed: false, reason: 'cleanup-unconfirmed' })
     expect(refused.terminal?.cleanupUnconfirmed).toBe(true)
     expect(resultText(refusedResult)).toContain('retained')
 
-    const retried = valueOf(await shell.call({ action: 'close', resourceId }))
+    const retried = valueOf(await shell.call({ mode: 'close', resourceId }))
     expect(retried).toMatchObject({ closed: true })
-    expectCode(await shell.call({ action: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
+    expectCode(await shell.call({ mode: 'status', resourceId }), 'RESOURCE_NOT_AVAILABLE')
   })
 
   it('lists both families separately, enforces the terminal cap and reaps what it owns', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
     for (let index = 0; index < AGENT_MAX_TERMINALS; index += 1) {
-      expect(valueOf(await shell.call({ action: 'open' })).terminal?.kind).toBe('terminal')
+      expect(valueOf(await shell.call({ mode: 'open' })).terminal?.kind).toBe('terminal')
     }
-    expectCode(await shell.call({ action: 'open' }), 'RESOURCE_NOT_AVAILABLE')
+    expectCode(await shell.call({ mode: 'open' }), 'RESOURCE_NOT_AVAILABLE')
 
-    const started = valueOf(await shell.call({ action: 'run', command: 'job', background: true }))
-    const listed = valueOf(await shell.call({ action: 'list' }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'job', background: true }))
+    const listed = valueOf(await shell.call({ mode: 'list' }))
     expect(listed).toMatchObject({ action: 'list' })
     expect(listed.processes).toHaveLength(1)
     expect(listed.processes?.[0]?.process.resourceId).toBe(started.process!.resourceId)
@@ -1142,7 +1169,7 @@ describe('shell completion notices', () => {
     const inserted: UserMessage[] = []
     shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
 
-    const started = valueOf(await shell.call({ action: 'run', command: 'run the suite', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'run the suite', background: true }))
     await until(() => inserted.length === 1)
     const text = noticeText(inserted[0]!)
 
@@ -1161,7 +1188,7 @@ describe('shell completion notices', () => {
     const inserted: UserMessage[] = []
     shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
 
-    const started = valueOf(await shell.call({ action: 'run', command: 'silent job', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'silent job', background: true }))
     await until(() => inserted.length === 1)
     const text = noticeText(inserted[0]!)
     expect(text).toContain(started.process!.resourceId)
@@ -1173,9 +1200,9 @@ describe('shell completion notices', () => {
     const inserted: UserMessage[] = []
     shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
 
-    const started = valueOf(await shell.call({ action: 'run', command: 'notice me', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'notice me', background: true }))
     const resourceId = started.process!.resourceId
-    await shell.call({ action: 'stop', resourceId })
+    await shell.call({ mode: 'stop', resourceId })
     await until(() => inserted.length === 1)
     expect(inserted[0]?.source.kind).toBe('dsh-nexus')
     const text = noticeText(inserted[0]!)
@@ -1204,8 +1231,8 @@ describe('shell completion notices', () => {
       )
       await until(() => agent.status === 'running')
 
-      const busy = valueOf(await shell.call({ action: 'run', command: 'busy owner job', background: true }))
-      await shell.call({ action: 'stop', resourceId: busy.process!.resourceId })
+      const busy = valueOf(await shell.call({ mode: 'run', command: 'busy owner job', background: true }))
+      await shell.call({ mode: 'stop', resourceId: busy.process!.resourceId })
       await until(() => agent.inbox.nextStep.some((message) => message.source.kind === 'dsh-nexus'))
       expect(agent.inbox.nextStep.filter((message) => message.source.kind === 'dsh-nexus')).toHaveLength(1)
     } finally {
@@ -1214,12 +1241,12 @@ describe('shell completion notices', () => {
     }
 
     // A caller that waits for the settlement collects it; no extra notice.
-    const awaited = valueOf(await shell.call({ action: 'run', command: 'awaited job', background: true }))
-    const waiting = shell.call({ action: 'wait', resourceId: awaited.process!.resourceId, timeoutMs: 5_000 })
+    const awaited = valueOf(await shell.call({ mode: 'run', command: 'awaited job', background: true }))
+    const waiting = shell.call({ mode: 'wait', resourceId: awaited.process!.resourceId, timeoutMs: 5_000 })
     await until(() =>
       shell.harness.ctx.jobs.list(shell.harness.owner.sessionId).some((job) => job.id === awaited.process!.resourceId),
     )
-    await shell.call({ action: 'stop', resourceId: awaited.process!.resourceId })
+    await shell.call({ mode: 'stop', resourceId: awaited.process!.resourceId })
     const waited = valueOf(await waiting)
     expect(waited.timedOut).toBe(false)
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50))
@@ -1231,7 +1258,7 @@ describe('shell completion notices', () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
     const inserted: UserMessage[] = []
     shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
-    const started = valueOf(await shell.call({ action: 'run', command: 'teardown', background: true }))
+    const started = valueOf(await shell.call({ mode: 'run', command: 'teardown', background: true }))
     expect(started.process?.status).toBe('running')
     await shell.harness.dispose()
     open.splice(open.indexOf(shell.harness), 1)
@@ -1247,9 +1274,9 @@ describe('shell completion notices', () => {
 describe('shell policy facts and composition', () => {
   it('renders the confinement mode, enforcement and denial fact of a run', async () => {
     const shell = await openShell({ sandbox: true, script: () => ({ stderr: 'permission denied', exitCode: 1 }) })
-    const value = valueOf(await shell.call({ action: 'run', command: 'touch /outside' }))
+    const value = valueOf(await shell.call({ mode: 'run', command: 'touch /outside' }))
     expect(value.sandbox).toMatchObject({ mode: 'workspace-write', enforcement: 'partial', denied: true })
-    expect(resultText(await shell.call({ action: 'run', command: 'touch /outside' }))).toContain('denied')
+    expect(resultText(await shell.call({ mode: 'run', command: 'touch /outside' }))).toContain('denied')
     expect(value.process).toMatchObject({ status: 'exited', exitCode: 1 })
   })
 
@@ -1265,7 +1292,7 @@ describe('shell policy facts and composition', () => {
           exitCode: 3221225794,
         }),
       })
-      const result = await shell.call({ action: 'run', command: 'echo hi' })
+      const result = await shell.call({ mode: 'run', command: 'echo hi' })
       expectCode(result, 'UNSUPPORTED_CAPABILITY')
       const message = result.error?.message ?? ''
       expect(message).toContain('3221225794')
@@ -1281,7 +1308,7 @@ describe('shell policy facts and composition', () => {
     const run = await harness.ctx.tools.execute({
       callId: ToolCallId(`shell-tool-${callSequence}`),
       name: 'shell',
-      arguments: { action: 'run', command: 'echo hi', background: true },
+      arguments: { mode: 'run', command: 'echo hi', background: true },
       agent: harness.owner.agent,
       signal: harness.owner.signal,
     })
@@ -1290,7 +1317,7 @@ describe('shell policy facts and composition', () => {
     const terminal = await harness.ctx.tools.execute({
       callId: ToolCallId(`shell-tool-${callSequence}-open`),
       name: 'shell',
-      arguments: { action: 'open' },
+      arguments: { mode: 'open' },
       agent: harness.owner.agent,
       signal: harness.owner.signal,
     })
@@ -1300,7 +1327,7 @@ describe('shell policy facts and composition', () => {
   it('never accepts a model-supplied environment on the way to the native spawn', async () => {
     const shell = await openShell()
     const rejected = await shell.call({
-      action: 'run',
+      mode: 'run',
       command: 'echo hi',
       env: { DSH_TRUSTED_SOMETHING: '1', BASH_FUNC_x: '2' },
     })
@@ -1321,7 +1348,7 @@ describe('shell policy facts and composition', () => {
     const dispose = registerTerminalBackends(shell.harness.ctx, () => shell.config.value)
     try {
       await until(() => shell.harness.ctx.terminals.listBackends().includes('nexus-pwsh'))
-      expectCode(await shell.call({ action: 'open', engine: 'pwsh' }), 'SHELL_UNAVAILABLE')
+      expectCode(await shell.call({ mode: 'open', engine: 'pwsh' }), 'SHELL_UNAVAILABLE')
       // The version probe ran before any persistent terminal was requested.
       expect(shell.harness.subprocess.terminalSpawns).toHaveLength(0)
       expect(shell.harness.subprocess.spawns[0]?.argv.at(-1)).toBe('$PSVersionTable.PSVersion.Major')
@@ -1335,9 +1362,9 @@ describe('shell policy facts and composition', () => {
 describe('named integration regressions', () => {
   it('does_not_reuse_a_terminal_resource_id_after_controller_recreation', async () => {
     const shell = await openShell()
-    const first = valueOf(await shell.call({ action: 'open' }))
+    const first = valueOf(await shell.call({ mode: 'open' }))
     const firstId = first.terminal!.resourceId
-    await shell.call({ action: 'close', resourceId: firstId })
+    await shell.call({ mode: 'close', resourceId: firstId })
 
     // A second controller in the same context mints a distinct identity, so an
     // old id cannot address a new terminal.

@@ -113,8 +113,8 @@ dsh plugin --profile <profile> add <绝对路径>/dist/dsh-nexus-<version>.tgz
 `shell` 工具的引擎设置默认 `bash`（Windows 上是 Git Bash），可显式选择 `pwsh`（要求 PowerShell 7）：
 
 ```jsonc
-{ "action": "run", "command": "ls -la", "engine": "bash" }
-{ "action": "run", "command": "Get-ChildItem", "engine": "pwsh" }
+{ "command": "ls -la", "engine": "bash" }
+{ "command": "Get-ChildItem", "engine": "pwsh" }
 ```
 
 引擎只在显式设置或部署配置里选择，**不会**在失败后自动换另一个。
