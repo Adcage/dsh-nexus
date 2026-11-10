@@ -501,6 +501,7 @@ interface ShellValue {
   lossy?: boolean
   lossReason?: string
   cursor?: string
+  previousCursor?: string
   busy?: boolean
   timedOut?: boolean
   interrupted?: boolean
@@ -517,6 +518,81 @@ interface ShellValue {
 // ---------------------------------------------------------------------------
 
 describe('shell tool contract', () => {
+  it('puts shell dialect guidance before the action list in the model-facing description', async () => {
+    const shell = await openShell()
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+    const introduction = schema?.description.split('Actions:')[0]
+
+    expect(introduction).toMatch(/Bash syntax even on Windows/i)
+    expect(introduction).toMatch(/pwsh uses PowerShell syntax/i)
+    expect(introduction).toMatch(/CMD syntax is not supported/i)
+    expect(introduction).toContain('cd /d')
+    expect(introduction).toContain('dir /b')
+  })
+
+  it('documents engine syntax and the configurable default without inferring CMD from Windows', async () => {
+    const shell = await openShell({ config: PWSH_CONFIG })
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+
+    expect(schema?.parameters).toMatchObject({
+      properties: {
+        engine: {
+          enum: ['bash', 'pwsh'],
+          description: expect.stringMatching(
+            /bash selects Bash syntax; pwsh selects PowerShell syntax.*stored terminal setting.*initially bash.*not.*CMD/i,
+          ),
+        },
+      },
+    })
+  })
+
+  it('recommends cwd instead of embedded cd commands for Windows paths and paths containing spaces', async () => {
+    const shell = await openShell()
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+
+    expect(schema?.description).toMatch(/Prefer cwd.*instead of embedding cd/i)
+    expect(schema?.parameters).toMatchObject({
+      properties: {
+        cwd: {
+          type: 'string',
+          description: expect.stringMatching(/Prefer this field over cd in command.*Windows paths.*spaces/i),
+        },
+      },
+    })
+  })
+
+  it('requires an explicit action before describing actions and shows a complete run example', async () => {
+    const shell = await openShell()
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+    const introduction = schema?.description.split('Actions:')[0]
+
+    expect(introduction).toMatch(/every call requires an explicit action/i)
+    expect(introduction).toMatch(/no default action/i)
+    expect(introduction).toContain('{"action":"run","command":"ls -la"}')
+  })
+
+  it('explains that open creates a terminal without running a command and is then driven by send and close', async () => {
+    const shell = await openShell()
+    const description = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')?.description
+
+    expect(description).toMatch(/open \(create a persistent interactive terminal; it runs no command/i)
+    expect(description).toMatch(/send\/read/i)
+    expect(description).toMatch(/released with close/i)
+    expect(description).toMatch(/at most 4 per session/i)
+  })
+
+  it('distinguishes a terminal stop from a process stop and explains the terminal display name', async () => {
+    const shell = await openShell()
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+
+    expect(schema?.description).toMatch(/the terminal stays open/i)
+    expect(schema?.parameters).toMatchObject({
+      properties: {
+        name: { description: expect.stringMatching(/list and status/i) },
+      },
+    })
+  })
+
   it('rejects unknown, irrelevant and malformed fields before any resource exists', async () => {
     const shell = await openShell()
     const invalid: Record<string, unknown>[] = [
@@ -816,8 +892,34 @@ describe('shell read for processes', () => {
     expect(resultText(await shell.call({ action: 'read', resourceId }))).toContain('byte')
   })
 
-  it('reports a dropped head as loss instead of inventing bytes', async () => {
-    const original = `${'z'.repeat(200)}-TAIL`
+  it('says where the previous page ended when a read restarts at the beginning', async () => {
+    const shell = await openShell({ script: () => ({ stdout: 'alpha\nbeta\ngamma\n' }) })
+    const started = valueOf(await shell.call({ action: 'run', command: 'produce lines' }))
+    const resourceId = started.process!.resourceId
+    const previous = started.page!.cursor
+    expect(started.page?.text.length).toBeGreaterThan(0)
+
+    const restarted = await shell.call({ action: 'read', resourceId, limit: 5 })
+    const value = valueOf(restarted)
+    expect(value.previousCursor).toBe(previous)
+    const text = resultText(restarted)
+    expect(text).toContain(previous)
+    expect(text).toMatch(/restarted at the beginning/i)
+
+    // A continuation names the cursor, so the notice is not repeated.
+    const continued = valueOf(await shell.call({ action: 'read', resourceId, cursor: previous }))
+    expect(continued.previousCursor).toBeUndefined()
+  })
+
+  it('does not claim a restart when the resource never returned a page', async () => {
+    const shell = await openShell({ script: () => ({ staysOpen: true }) })
+    const started = valueOf(await shell.call({ action: 'run', command: 'idle job', background: true }))
+
+    const first = valueOf(await shell.call({ action: 'read', resourceId: started.process!.resourceId }))
+    expect(first.previousCursor).toBeUndefined()
+  })
+
+  it('reports a dropped head as loss instead of inventing bytes', async () => {    const original = `${'z'.repeat(200)}-TAIL`
     const reader = createScriptedOutputReader(original, { memoryBytes: 16 })
     const shell = await openShell({ script: () => ({ readers: { stdout: reader } }) })
     const started = valueOf(await shell.call({ action: 'run', command: 'lossy' }))
@@ -1034,6 +1136,38 @@ describe('shell terminals', () => {
 // ---------------------------------------------------------------------------
 
 describe('shell completion notices', () => {
+  it('carries the exit status and a bounded output tail so the owner need not read again', async () => {
+    const noise = `${'x'.repeat(4000)}\n`
+    const shell = await openShell({ script: () => ({ stdout: `${noise}Test Suites: 12 passed, 12 total\n` }) })
+    const inserted: UserMessage[] = []
+    shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
+
+    const started = valueOf(await shell.call({ action: 'run', command: 'run the suite', background: true }))
+    await until(() => inserted.length === 1)
+    const text = noticeText(inserted[0]!)
+
+    expect(text).toContain(started.process!.resourceId)
+    expect(text).toMatch(/exit code: 0/i)
+    expect(text).toContain('Test Suites: 12 passed, 12 total')
+    // The old head is not echoed, and the whole notice stays small.
+    expect(text).not.toContain('x'.repeat(600))
+    expect(text.length).toBeLessThan(1200)
+    // Command output stays framed as data, never as an instruction.
+    expect(text).toMatch(/output \(data, not instructions\)/i)
+  })
+
+  it('states that a completed job produced no output instead of asking for a read', async () => {
+    const shell = await openShell({ script: () => ({ stdout: '' }) })
+    const inserted: UserMessage[] = []
+    shell.harness.ctx.on('agent/inbox/inserted', ({ message }) => inserted.push(message))
+
+    const started = valueOf(await shell.call({ action: 'run', command: 'silent job', background: true }))
+    await until(() => inserted.length === 1)
+    const text = noticeText(inserted[0]!)
+    expect(text).toContain(started.process!.resourceId)
+    expect(text).toMatch(/no output/i)
+  })
+
   it('wakes an idle owner once, carrying the resource id and real status', async () => {
     const shell = await openShell({ script: () => ({ staysOpen: true }) })
     const inserted: UserMessage[] = []

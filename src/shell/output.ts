@@ -283,6 +283,31 @@ export function takeUtf8Prefix(text: string, maxBytes: number): string {
 }
 
 /**
+ * Longest suffix whose UTF-8 encoding fits the byte budget, never splitting a
+ * code point. A single trailing code point larger than a tiny budget is
+ * returned whole so a completion notice always carries something.
+ * @param text - complete decoded text.
+ * @param maxBytes - byte budget for the returned suffix.
+ * @returns the trailing slice, or the empty string for a non-positive budget.
+ */
+export function takeUtf8Tail(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  let used = 0
+  let start = text.length
+  for (const char of [...text].reverse()) {
+    const bytes = Buffer.byteLength(char, 'utf8')
+    if (used + bytes > maxBytes) break
+    used += bytes
+    start -= char.length
+  }
+  if (start === text.length && text.length > 0) {
+    const last = [...text].at(-1)!
+    return last
+  }
+  return text.slice(start)
+}
+
+/**
  * One bounded in-memory page and the whole-stream source bytes it consumed.
  *
  * `bytes` is always a source-byte count. For a provably byte-exact page it is

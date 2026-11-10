@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { NexusError } from '../../src/runtime/errors.ts'
-import { ManagedOutput } from '../../src/shell/output.ts'
+import { ManagedOutput, takeUtf8Tail } from '../../src/shell/output.ts'
 import { createScriptedLiveOutputReader, createScriptedOutputReader, createScriptedRawOutputReader } from '../support/fixtures.ts'
 
 /** Read every page through a fresh cursor until the stream is empty. */
@@ -24,6 +24,26 @@ function readAll(output: ManagedOutput): { text: string; pages: number; lossy: b
   }
   return { text, pages: pages + 1, lossy }
 }
+
+describe('takeUtf8Tail', () => {
+  it('returns the whole text when it fits the byte budget', () => {
+    expect(takeUtf8Tail('Tests: 12 passed', 512)).toBe('Tests: 12 passed')
+  })
+
+  it('keeps the newest bytes and never splits a code point', () => {
+    const text = `${'a'.repeat(100)}结尾🙂`
+    const tail = takeUtf8Tail(text, 12)
+    // 结尾🙂 is 10 bytes, so a 12-byte budget still fits two ASCII bytes ahead of it.
+    expect(tail).toBe('aa结尾🙂')
+    expect(Buffer.byteLength(tail, 'utf8')).toBeLessThanOrEqual(12)
+    expect(text.endsWith(tail)).toBe(true)
+  })
+
+  it('returns one whole code point when the budget is smaller than it', () => {
+    expect(takeUtf8Tail('ab🙂', 2)).toBe('🙂')
+    expect(takeUtf8Tail('abc', 0)).toBe('')
+  })
+})
 
 describe('ManagedOutput', () => {
   it('splits CJK and emoji on code-point boundaries without gaps or replacement characters', () => {
