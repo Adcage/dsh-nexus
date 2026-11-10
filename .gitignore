@@ -18,3 +18,6 @@ coverage/
 # tarball-install probes. Ignored since this wave; the files that were already
 # here are kept, not deleted.
 /tmp/
+
+docs/superpowers/
+/debug/
