@@ -233,21 +233,21 @@ describe('nexus preset composition', () => {
       // The shell tool answers through the real process and terminal controllers.
       // A `list` proves the controllers are wired; a `run` below proves the
       // executed-request shape through the recorded spawn and confinement seams.
-      const shellList = await harness.call('shell', { action: 'list' }, agent)
+      const shellList = await harness.call('shell', { mode: 'list' }, agent)
       expect(shellList.isError).toBe(false)
-      expect(shellList.value).toMatchObject({ action: 'list', processes: [], terminals: [] })
+      expect(shellList.value).toMatchObject({ mode: 'list', processes: [], terminals: [] })
 
       expect(harness.ctx.get('sandboxPolicy')).toBeDefined()
       const spawnsBefore = harness.subprocess.spawns.length
       const confineBefore = harness.sandbox.calls.length
       const run = await harness.call(
         'shell',
-        { action: 'run', command: 'echo cold-run', engine: 'bash' },
+        { mode: 'run', command: 'echo cold-run', engine: 'bash' },
         agent,
       )
       expect(run.isError, JSON.stringify(run)).toBe(false)
-      const runValue = run.value as { action: string; process: { status: string }; page: { text: string } }
-      expect(runValue.action).toBe('run')
+      const runValue = run.value as { mode: string; process: { status: string }; page: { text: string } }
+      expect(runValue.mode).toBe('run')
       expect(runValue.process.status).toBe('exited')
       expect(runValue.page.text).toContain('FIXTURE STDOUT')
       // The provider received the configured executable, the documented bash

@@ -418,7 +418,7 @@ describe('real Windows shell acceptance', () => {
     const shell = await openWindowsShell()
     const value = valueOf<RunValue>(
       await shell.call({
-        action: 'run',
+        mode: 'run',
         command: "printf 'arg:%s\\n' '你好 世界'; pwd",
         cwd,
       }),
@@ -436,7 +436,7 @@ describe('real Windows shell acceptance', () => {
     const shell = await openWindowsShell()
     const value = valueOf<RunValue>(
       await shell.call({
-        action: 'run',
+        mode: 'run',
         engine: 'pwsh',
         command: "Write-Output '你好 世界'; Write-Output (Get-Location).Path",
         cwd,
@@ -450,13 +450,13 @@ describe('real Windows shell acceptance', () => {
 
   it('reports a non-zero exit as data instead of failing the call', async () => {
     const shell = await openWindowsShell()
-    const value = valueOf<RunValue>(await shell.call({ action: 'run', command: 'exit 7', cwd: workspace }))
+    const value = valueOf<RunValue>(await shell.call({ mode: 'run', command: 'exit 7', cwd: workspace }))
     expect(value.process).toMatchObject({ status: 'exited', exitCode: 7, cleanupConfirmed: true })
   })
 
   it('refuses an unusable configured bash path without switching engines', async () => {
     const shell = await openWindowsShell({ terminal: { bashPath: join(workspace, 'missing-bash.exe') } })
-    const result = await shell.call({ action: 'run', command: 'echo hi', cwd: workspace })
+    const result = await shell.call({ mode: 'run', command: 'echo hi', cwd: workspace })
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'SHELL_UNAVAILABLE' })
     expect(result.error?.message).toContain('bash')
@@ -465,7 +465,7 @@ describe('real Windows shell acceptance', () => {
   it('refuses Windows PowerShell 5.1 for the pwsh engine instead of running it', async () => {
     expect(existsSync(WINDOWS_POWERSHELL)).toBe(true)
     const shell = await openWindowsShell({ terminal: { pwshPath: WINDOWS_POWERSHELL } })
-    const result = await shell.call({ action: 'run', engine: 'pwsh', command: 'Write-Output hi', cwd: workspace })
+    const result = await shell.call({ mode: 'run', engine: 'pwsh', command: 'Write-Output hi', cwd: workspace })
     expect(result.isError).toBe(true)
     expect(result.error?.info).toMatchObject({ code: 'SHELL_UNAVAILABLE' })
     expect(result.error?.message).toContain('PowerShell 7')
@@ -479,7 +479,7 @@ describe('real Windows shell acceptance', () => {
     const run = shell.ctx.tools.execute({
       callId: ToolCallId('windows-cancel'),
       name: 'shell',
-      arguments: { action: 'run', command: `${windowsChild(pidFile, 60_000)} wait`, cwd },
+      arguments: { mode: 'run', command: `${windowsChild(pidFile, 60_000)} wait`, cwd },
       agent: shell.owner.agent,
       signal: controller.signal,
     })
@@ -493,7 +493,7 @@ describe('real Windows shell acceptance', () => {
     expect(cancelled.isError).toBe(true)
     expect(['ABORTED', 'RESOURCE_NOT_AVAILABLE']).toContain(cancelled.error?.info?.code)
     const listed = valueOf<{ processes: Array<{ process: { stopRequested: string; cleanupConfirmed: boolean } }> }>(
-      await shell.call({ action: 'list' }),
+      await shell.call({ mode: 'list' }),
     )
     expect(listed.processes.at(-1)?.process).toMatchObject({ stopRequested: 'cancel', cleanupConfirmed: true })
     // Real-tree proof: the Windows child is gone from the OS process table.
@@ -506,7 +506,7 @@ describe('real Windows shell acceptance', () => {
     const shell = await openWindowsShell()
     const value = valueOf<RunValue>(
       await withBound(
-        shell.call({ action: 'run', command: `${windowsChild(pidFile, 60_000)} wait`, cwd, timeoutMs: 1_500 }),
+        shell.call({ mode: 'run', command: `${windowsChild(pidFile, 60_000)} wait`, cwd, timeoutMs: 1_500 }),
         40_000,
         'timed-out run',
       ),
@@ -523,7 +523,7 @@ describe('real Windows shell acceptance', () => {
     const shell = await openWindowsShell()
     const value = valueOf<RunValue>(
       await shell.call({
-        action: 'run',
+        mode: 'run',
         cwd,
         background: true,
         command: `${windowsChild(childFile, 120_000)} wait`,
@@ -536,12 +536,12 @@ describe('real Windows shell acceptance', () => {
     expect(pidAlive(grandchild as number)).toBe(true)
 
     const resourceId = value.process.resourceId
-    const stopped = valueOf<RunValue>(await shell.call({ action: 'stop', resourceId }))
+    const stopped = valueOf<RunValue>(await shell.call({ mode: 'stop', resourceId }))
     expect(stopped.process).toMatchObject({ cleanupConfirmed: true })
     // A real owned-tree wait: cleanup is only claimed after the grandchild the
     // provider had to kill is observably gone from the OS process table.
     expect(await eventually(() => !pidAlive(grandchild as number), 20_000)).toBe(true)
-    const closed = valueOf<{ closed?: boolean }>(await shell.call({ action: 'close', resourceId }))
+    const closed = valueOf<{ closed?: boolean }>(await shell.call({ mode: 'close', resourceId }))
     expect(closed.closed).toBe(true)
   })
 
@@ -551,7 +551,7 @@ describe('real Windows shell acceptance', () => {
     const shell = await openWindowsShell()
     const started = valueOf<RunValue>(
       await shell.call({
-        action: 'run',
+        mode: 'run',
         background: true,
         cwd,
         command: `${windowsChild(pidFile, 90_000)} wait`,
@@ -562,30 +562,30 @@ describe('real Windows shell acceptance', () => {
     expect(pid).toBeDefined()
     expect(pidAlive(pid as number)).toBe(true) // still running while published
 
-    const listed = valueOf<{ processes: Array<{ process: { resourceId: string } }> }>(await shell.call({ action: 'list' }))
+    const listed = valueOf<{ processes: Array<{ process: { resourceId: string } }> }>(await shell.call({ mode: 'list' }))
     expect(listed.processes.map((entry) => entry.process.resourceId)).toContain(started.process.resourceId)
 
-    const stopped = valueOf<RunValue>(await shell.call({ action: 'stop', resourceId: started.process.resourceId }))
+    const stopped = valueOf<RunValue>(await shell.call({ mode: 'stop', resourceId: started.process.resourceId }))
     expect(stopped.process.cleanupConfirmed).toBe(true)
     expect(await eventually(() => !pidAlive(pid as number), 20_000)).toBe(true)
-    await shell.call({ action: 'close', resourceId: started.process.resourceId })
+    await shell.call({ mode: 'close', resourceId: started.process.resourceId })
   })
 
   it('keeps persistent terminal input and shell state across sends in a real ConPTY', async () => {
     const cwd = caseWorkspace('terminal')
     const shell = await openWindowsShell()
-    const opened = valueOf<TerminalValue>(await withBound(shell.call({ action: 'open', cwd, engine: 'bash' }), 40_000, 'terminal open'))
+    const opened = valueOf<TerminalValue>(await withBound(shell.call({ mode: 'open', cwd, engine: 'bash' }), 40_000, 'terminal open'))
     const resourceId = opened.terminal?.resourceId ?? opened.resourceId
     expect(resourceId).toMatch(/^nexus-term-/u)
     try {
       await withBound(
-        shell.call({ action: 'send', resourceId, text: 'export NEXUS_MARK=kept' }),
+        shell.call({ mode: 'send', resourceId, text: 'export NEXUS_MARK=kept' }),
         40_000,
         'terminal send (state)',
       )
       const echoed = valueOf<TerminalValue>(
         await withBound(
-          shell.call({ action: 'send', resourceId, text: 'printf "mark=%s\\n" "$NEXUS_MARK"' }),
+          shell.call({ mode: 'send', resourceId, text: 'printf "mark=%s\\n" "$NEXUS_MARK"' }),
           40_000,
           'terminal send (read back)',
         ),
@@ -593,11 +593,11 @@ describe('real Windows shell acceptance', () => {
       // The send settles with the shell's own echo of the command; the marker
       // value below is what proves the terminal kept its state across sends.
       expect(echoed.text ?? '').toContain('NEXUS_MARK')
-      const page = valueOf<TerminalValue>(await withBound(shell.call({ action: 'read', resourceId }), 20_000, 'terminal read'))
+      const page = valueOf<TerminalValue>(await withBound(shell.call({ mode: 'read', resourceId }), 20_000, 'terminal read'))
       expect(page.text ?? '').toContain('mark=kept')
     } finally {
       const closed = valueOf<{ closed?: boolean }>(
-        await withBound(shell.call({ action: 'close', resourceId }), 40_000, 'terminal close'),
+        await withBound(shell.call({ mode: 'close', resourceId }), 40_000, 'terminal close'),
       )
       expect(closed.closed).toBe(true)
     }
@@ -611,7 +611,7 @@ describe('real Windows shell acceptance', () => {
     expect(shell.ctx.get('terminals')).toBeUndefined()
 
     const opened = valueOf<TerminalValue>(
-      await withBound(shell.call({ action: 'open', cwd, engine: 'bash' }), 40_000, 'generation terminal open'),
+      await withBound(shell.call({ mode: 'open', cwd, engine: 'bash' }), 40_000, 'generation terminal open'),
     )
     const resourceId = opened.terminal?.resourceId ?? opened.resourceId
     expect(resourceId).toMatch(/^nexus-term-/u)
@@ -622,7 +622,7 @@ describe('real Windows shell acceptance', () => {
     const sent = valueOf<TerminalValue>(
       await withBound(
         shell.call({
-          action: 'send',
+          mode: 'send',
           resourceId,
           text: `printf 'WINPID=%s\n' "$(cat /proc/$$/winpid)"`,
         }),
@@ -631,7 +631,7 @@ describe('real Windows shell acceptance', () => {
       ),
     )
     const page = valueOf<TerminalValue>(
-      await withBound(shell.call({ action: 'read', resourceId }), 20_000, 'generation terminal read'),
+      await withBound(shell.call({ mode: 'read', resourceId }), 20_000, 'generation terminal read'),
     )
     const match = /WINPID=(\d+)/u.exec(`${sent.text ?? ''}\n${page.text ?? ''}`)
     expect(match, `no WINPID line in terminal output: ${JSON.stringify({ sent: sent.text, page: page.text })}`).not.toBeNull()

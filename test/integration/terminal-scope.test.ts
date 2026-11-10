@@ -83,20 +83,20 @@ describe('Nexus terminal capability in the deployed profile shape', () => {
       // `standard`-shaped sibling registry must stay empty throughout.
       expect(harness.standardTerminals.listBackends()).toEqual([])
 
-      const opened = valueOf<ShellValue>(await harness.call('shell', { action: 'open', engine: 'bash' }, agent))
+      const opened = valueOf<ShellValue>(await harness.call('shell', { mode: 'open', engine: 'bash' }, agent))
       const resourceId = opened.terminal?.resourceId
       expect(resourceId).toMatch(/^nexus-term-/u)
 
       const sent = valueOf<ShellValue>(
-        await harness.call('shell', { action: 'send', resourceId, text: 'printf hello' }, agent),
+        await harness.call('shell', { mode: 'send', resourceId, text: 'printf hello' }, agent),
       )
       expect(sent.terminal?.resourceId).toBe(resourceId)
-      const page = valueOf<ShellValue>(await harness.call('shell', { action: 'read', resourceId }, agent))
+      const page = valueOf<ShellValue>(await harness.call('shell', { mode: 'read', resourceId }, agent))
       expect(typeof page.text).toBe('string')
 
-      const closed = valueOf<ShellValue>(await harness.call('shell', { action: 'close', resourceId }, agent))
+      const closed = valueOf<ShellValue>(await harness.call('shell', { mode: 'close', resourceId }, agent))
       expect(closed.closed).toBe(true)
-      const listed = valueOf<ShellValue>(await harness.call('shell', { action: 'list' }, agent))
+      const listed = valueOf<ShellValue>(await harness.call('shell', { mode: 'list' }, agent))
       expect(listed.terminals).toEqual([])
       // Nothing leaked into the sibling instance and no host-wide service appeared.
       expect(harness.standardTerminals.listBackends()).toEqual([])
@@ -136,7 +136,7 @@ describe('Nexus terminal capability in the deployed profile shape', () => {
       await harness.startNexus()
       const first = await harness.createAgent('terminal-scope-retire', NEXUS_PRESET_ID)
       await harness.runTurn(first, 'retire')
-      const opened = valueOf<ShellValue>(await harness.call('shell', { action: 'open', engine: 'bash' }, first))
+      const opened = valueOf<ShellValue>(await harness.call('shell', { mode: 'open', engine: 'bash' }, first))
       const retiredId = opened.terminal?.resourceId
       expect(retiredId).toMatch(/^nexus-term-/u)
       const spawnsBefore = harness.subprocess.terminalSpawns.length
@@ -155,10 +155,10 @@ describe('Nexus terminal capability in the deployed profile shape', () => {
       expect(harness.standardTerminals.listBackends()).toEqual([])
 
       // The retired resource id is not reusable by another generation.
-      const stale = await harness.call('shell', { action: 'status', resourceId: retiredId }, second)
+      const stale = await harness.call('shell', { mode: 'status', resourceId: retiredId }, second)
       expect(stale.isError).toBe(true)
       expect(stale.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
-      const listed = valueOf<ShellValue>(await harness.call('shell', { action: 'list' }, second))
+      const listed = valueOf<ShellValue>(await harness.call('shell', { mode: 'list' }, second))
       expect(listed.terminals).toEqual([])
 
       // The same holds across a host-row restart, so a reload cannot resurrect it.
@@ -166,7 +166,7 @@ describe('Nexus terminal capability in the deployed profile shape', () => {
       await harness.startNexus()
       const third = await harness.createAgent('terminal-scope-retire-3', NEXUS_PRESET_ID)
       await harness.runTurn(third, 'after restart')
-      const stillStale = await harness.call('shell', { action: 'status', resourceId: retiredId }, third)
+      const stillStale = await harness.call('shell', { mode: 'status', resourceId: retiredId }, third)
       expect(stillStale.isError).toBe(true)
       expect(stillStale.error?.info).toMatchObject({ code: 'RESOURCE_NOT_AVAILABLE' })
       expect(harness.ctx.get('terminals')).toBeUndefined()

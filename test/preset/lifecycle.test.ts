@@ -572,7 +572,7 @@ describe('shell surface cleanup', () => {
 
   it('reports a managed range it could not confirm instead of claiming release', async () => {
     const { harness, surface } = await openSurface()
-    const run = await harness.call('shell', { action: 'run', command: 'sleep', background: true })
+    const run = await harness.call('shell', { mode: 'run', command: 'sleep', background: true })
     expect(run.isError, JSON.stringify(run)).toBe(false)
     const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
 
@@ -601,7 +601,7 @@ describe('shell surface cleanup', () => {
     // A writer child's reservation is durable authority; a shell range that
     // cannot prove cleanup is a second, independent uncertainty.
     await runtime.coordinator.acquire(parent, SessionId('writer-with-hung-shell'), dir)
-    const run = await harness.call('shell', { action: 'run', command: 'sleep', background: true })
+    const run = await harness.call('shell', { mode: 'run', command: 'sleep', background: true })
     expect(run.isError, JSON.stringify(run)).toBe(false)
     const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
     runtime.attach('shell', () => surface.dispose())
@@ -654,7 +654,7 @@ describe('managed resource cleanup facts', () => {
 
       // The child owns a real managed range through the shipped controllers; the
       // provider can settle the parent but never proves the range empty.
-      const run = await harness.call('shell', { action: 'run', command: 'hung-build', background: true }, child!)
+      const run = await harness.call('shell', { mode: 'run', command: 'hung-build', background: true }, child!)
       expect(run.isError, JSON.stringify(run)).toBe(false)
 
       const stopped = await harness.call('agent', { action: 'stop', childId }, parent)
@@ -730,7 +730,7 @@ describe('managed resource cleanup facts', () => {
       })
       const agent = handle.agent
 
-      const run = await harness.call('shell', { action: 'run', command: 'hung-build', background: true }, agent)
+      const run = await harness.call('shell', { mode: 'run', command: 'hung-build', background: true }, agent)
       expect(run.isError, JSON.stringify(run)).toBe(false)
       const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
 

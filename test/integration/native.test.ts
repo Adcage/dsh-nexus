@@ -255,7 +255,7 @@ describe('generation retirement', () => {
       const child = harness.ctx.agents.get(SessionId(childId))
       expect(child).toBeDefined()
 
-      const run = await harness.call('shell', { action: 'run', command: 'retired-build', background: true }, child!)
+      const run = await harness.call('shell', { mode: 'run', command: 'retired-build', background: true }, child!)
       expect(run.isError, JSON.stringify(run)).toBe(false)
       const resourceId = (run.value as { process: { resourceId: string } }).process.resourceId
       const root = await canonicalDirectory(harness.workspace)

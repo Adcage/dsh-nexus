@@ -171,23 +171,23 @@ describe('lifecycle and cleanup', () => {
       await harness.runTurn(nexus, 'lifecycle')
 
       const run = valueOf<{ process: { resourceId: string } }>(
-        await harness.call('shell', { action: 'run', command: 'long work', background: true }, nexus),
+        await harness.call('shell', { mode: 'run', command: 'long work', background: true }, nexus),
       )
       const opened = valueOf<{ terminal: { resourceId: string } }>(
-        await harness.call('shell', { action: 'open', name: 'lifecycle-terminal' }, nexus),
+        await harness.call('shell', { mode: 'open', name: 'lifecycle-terminal' }, nexus),
       )
       const started = valueOf<{ childId: string }>(
         await harness.call('agent', { action: 'start', task: 'read child', context: 'spawn' }, nexus),
       )
 
       // Close every kind of owned resource through its own product action.
-      expect(valueOf<{ closed: boolean }>(await harness.call('shell', { action: 'close', resourceId: run.process.resourceId }, nexus)).closed).toBe(true)
-      expect(valueOf<{ closed: boolean }>(await harness.call('shell', { action: 'close', resourceId: opened.terminal.resourceId }, nexus)).closed).toBe(true)
+      expect(valueOf<{ closed: boolean }>(await harness.call('shell', { mode: 'close', resourceId: run.process.resourceId }, nexus)).closed).toBe(true)
+      expect(valueOf<{ closed: boolean }>(await harness.call('shell', { mode: 'close', resourceId: opened.terminal.resourceId }, nexus)).closed).toBe(true)
       const stopped = await harness.call('agent', { action: 'stop', childId: started.childId }, nexus)
       expect(stopped.isError, JSON.stringify(stopped)).toBe(false)
 
       const listed = valueOf<{ processes: unknown[]; terminals: unknown[] }>(
-        await harness.call('shell', { action: 'list' }, nexus),
+        await harness.call('shell', { mode: 'list' }, nexus),
       )
       expect(listed.processes).toEqual([])
       expect(listed.terminals).toEqual([])
