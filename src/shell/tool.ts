@@ -556,7 +556,7 @@ function buildShellTool(
       'Dialect: bash uses Bash syntax even on Windows; pwsh uses PowerShell syntax. ' +
       'CMD syntax is not supported; in Bash, do not use cd /d, dir /b or type to read files. ' +
       'Prefer cwd to set the working directory instead of embedding cd in command, especially for Windows paths or paths containing spaces. ' +
-      'Actions: run (one command; foreground by default and returns its exit status plus the first output page; background:true publishes a session-owned job and returns immediately), ' +
+      'Modes: run (one command; foreground by default and returns its exit status plus the first output page; background:true publishes a session-owned job and returns immediately), ' +
       'open (create a persistent interactive terminal; it runs no command, keeps its cwd and shell state between sends, must then be driven with send/read and released with close, and allows at most 4 per session), ' +
       'send (type text into that terminal), read (bounded output page; continue with the returned cursor), status (current view only), ' +
       'wait (bounded wait; a timeout never stops the resource), stop (end a command or interrupt a terminal foreground group; the terminal stays open), ' +

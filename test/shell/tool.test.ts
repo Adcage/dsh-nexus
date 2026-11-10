@@ -521,7 +521,7 @@ describe('shell tool contract', () => {
   it('puts shell dialect guidance before the action list in the model-facing description', async () => {
     const shell = await openShell()
     const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
-    const introduction = schema?.description.split('Actions:')[0]
+    const introduction = schema?.description.split('Modes:')[0]
 
     expect(introduction).toMatch(/Bash syntax even on Windows/i)
     expect(introduction).toMatch(/pwsh uses PowerShell syntax/i)
@@ -564,7 +564,7 @@ describe('shell tool contract', () => {
   it('describes the command shorthand before the action list and shows a complete run example', async () => {
     const shell = await openShell()
     const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
-    const introduction = schema?.description.split('Actions:')[0]
+    const introduction = schema?.description.split('Modes:')[0]
 
     expect(introduction).toContain('{"command":"ls -la"}')
     expect(introduction).toMatch(/the mode is then "run"/i)
