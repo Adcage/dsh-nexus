@@ -141,7 +141,7 @@ describe('batch bounds and ordering', () => {
     const value = valueOf(
       await testCase.call({
         action: 'batch',
-        mode: 'parallel',
+        batchMode: 'parallel',
         tasks: [
           { task: 'first', context: 'spawn' },
           { task: 'second', context: 'fork' },
@@ -169,7 +169,7 @@ describe('batch bounds and ordering', () => {
     const testCase = await openCase({ hold: true })
     const { harness } = testCase
     const tasks = Array.from({ length: 6 }, (_, index) => ({ task: `task ${index}` }))
-    const value = valueOf(await testCase.call({ action: 'batch', mode: 'parallel', tasks }))
+    const value = valueOf(await testCase.call({ action: 'batch', batchMode: 'parallel', tasks }))
 
     const items = itemsOf(value)
     expect(items).toHaveLength(6)
@@ -192,7 +192,7 @@ describe('parallel versus sequence write coordination', () => {
       { task: 'write right', access: 'write', cwd: scope },
     ]
 
-    const parallel = itemsOf(valueOf(await testCase.call({ action: 'batch', mode: 'parallel', tasks })))
+    const parallel = itemsOf(valueOf(await testCase.call({ action: 'batch', batchMode: 'parallel', tasks })))
     expect(parallel[0]?.ok).toBe(true)
     expect(parallel[1]?.ok).toBe(false)
     expect(parallel[1]?.code).toBe('WRITE_SCOPE_BUSY')
@@ -203,7 +203,7 @@ describe('parallel versus sequence write coordination', () => {
     )
 
     // The refused item left no child behind, so the sequence batch starts clean.
-    const sequence = itemsOf(valueOf(await testCase.call({ action: 'batch', mode: 'sequence', tasks })))
+    const sequence = itemsOf(valueOf(await testCase.call({ action: 'batch', batchMode: 'sequence', tasks })))
     expect(sequence.map((item) => item.ok)).toEqual([true, true])
     // Each sequence item was released before the next started: one writer at a time.
     expect(sequence[0]?.childId).not.toBe(sequence[1]?.childId)
@@ -214,7 +214,7 @@ describe('parallel versus sequence write coordination', () => {
     const { harness } = testCase
     const batch = testCase.call({
       action: 'batch',
-      mode: 'sequence',
+      batchMode: 'sequence',
       tasks: [{ task: 'first' }, { task: 'second' }],
     })
     const childRequests = () =>
@@ -247,7 +247,7 @@ describe('parallel versus sequence write coordination', () => {
     const batch = testCase.call(
       {
         action: 'batch',
-        mode: 'sequence',
+        batchMode: 'sequence',
         tasks: [{ task: 'first' }, { task: 'second' }, { task: 'third' }],
       },
       abort.signal,
@@ -293,7 +293,7 @@ describe('parallel versus sequence write coordination', () => {
     const batch = testCase.call(
       {
         action: 'batch',
-        mode: 'sequence',
+        batchMode: 'sequence',
         tasks: [{ task: 'first' }, { task: 'second' }, { task: 'third' }],
       },
       abort.signal,
@@ -329,7 +329,7 @@ describe('parallel versus sequence write coordination', () => {
     try {
       const batch = testCase.call({
         action: 'batch',
-        mode: 'sequence',
+        batchMode: 'sequence',
         tasks: [{ task: 'first' }, { task: 'second' }],
       })
       await waitFor(() => childRequests().length === 1, 'the first sequence request')
@@ -365,7 +365,7 @@ describe('parallel versus sequence write coordination', () => {
     try {
       const batch = testCase.call({
         action: 'batch',
-        mode: 'sequence',
+        batchMode: 'sequence',
         tasks: [{ task: 'first' }, { task: 'second' }],
       })
       const childRequests = () =>

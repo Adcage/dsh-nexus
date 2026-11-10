@@ -81,7 +81,7 @@ const ACTION_FIELDS: Readonly<Record<AgentAction, readonly string[]>> = Object.f
   interrupt: ['action', 'childId'],
   stop: ['action', 'childId'],
   continue: ['action', 'childId', 'text'],
-  batch: ['action', 'mode', 'tasks'],
+  batch: ['action', 'batchMode', 'tasks'],
 })
 
 /** The start fields a batch task may carry. */
@@ -108,7 +108,7 @@ interface ControlArgs {
 /** One validated batch input. */
 interface BatchArgs {
   readonly action: 'batch'
-  readonly mode: BatchMode
+  readonly batchMode: BatchMode
   readonly tasks: readonly ChildStartInput[]
 }
 
@@ -273,7 +273,7 @@ export function createAgentTool(
     name: 'agent',
     description:
       'Delegate work to internal child agents and control them. Actions: start (run one child), list (this session\'s direct children), status (one child), read (a bounded page of a child\'s events by zero-based event position), wait (bounded wait), message (steer or continue a live child), interrupt (ask a child to stop; acknowledgement only), stop (stop one child and await the native release), continue (reuse the same child conversation), batch (up to ' +
-      `${AGENT_BATCH_MAX_TASKS} starts, parallel or sequence). ` +
+      `${AGENT_BATCH_MAX_TASKS} starts; "batchMode":"sequence" runs them one at a time, "parallel" is the default). ` +
       'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, and the deployment\'s child-access setting may cap a writer below this session\'s own mode (a parent that is itself read-only cannot delegate write access at all). A write child holds an exclusive scope over its granted workspace root (not over its subdirectory), so this session can have one writer child at a time. A child runs on this session\'s model route unless a provider and/or model is named. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
     parameters: {
       action: {
@@ -330,7 +330,7 @@ export function createAgentTool(
         type: 'integer',
         description: `wait only: bounded wait in milliseconds, 0..${WAIT_MAX_MS}; defaults to ${WAIT_DEFAULT_MS}. A timeout never stops the child.`,
       },
-      mode: {
+      batchMode: {
         type: 'string',
         enum: ['parallel', 'sequence'],
         description:
@@ -407,7 +407,7 @@ async function runAction(runtime: ChildRuntime, owner: CallOwner, input: AgentIn
       return { action: 'stop', childId, ...released }
     }
     case 'batch':
-      return runBatch(runtime, owner, input.mode, input.tasks, owner.signal)
+      return runBatch(runtime, owner, input.batchMode, input.tasks, owner.signal)
   }
 }
 
@@ -611,9 +611,12 @@ export function parseAgentInput(
     case 'start':
       return { action: 'start', ...parseStart(args, ctx) }
     case 'batch': {
-      const mode = args.mode ?? 'parallel'
-      if (mode !== 'parallel' && mode !== 'sequence') {
-        throw new NexusError('INVALID_ARGUMENT', `mode must be "parallel" or "sequence"; received ${JSON.stringify(mode)}`)
+      const batchMode = args.batchMode ?? 'parallel'
+      if (batchMode !== 'parallel' && batchMode !== 'sequence') {
+        throw new NexusError(
+          'INVALID_ARGUMENT',
+          `batchMode must be "parallel" or "sequence"; received ${JSON.stringify(batchMode)}`,
+        )
       }
       if (!Array.isArray(args.tasks) || args.tasks.length === 0) {
         throw new NexusError('INVALID_ARGUMENT', 'batch needs a non-empty tasks array')
@@ -631,7 +634,7 @@ export function parseAgentInput(
         }
         return parseStart(record, ctx)
       })
-      return { action: 'batch', mode, tasks }
+      return { action: 'batch', batchMode, tasks }
     }
     case 'list':
       return { action: 'list' }

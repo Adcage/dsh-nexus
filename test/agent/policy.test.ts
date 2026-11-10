@@ -697,7 +697,7 @@ describe('the leased scope is the workspace a writer can actually write', () => 
     const run = await harness.ctx.tools.execute({
       callId: ToolCallId('child-shell'),
       name: 'shell',
-      arguments: { action: 'run', command: 'echo confined', cwd: harness.workspace },
+      arguments: { mode: 'run', command: 'echo confined', cwd: harness.workspace },
       agent: started.child,
       signal: new AbortController().signal,
     })
