@@ -2,7 +2,7 @@
 
 - 日期：2026-11-10
 - 范围：仅 `shell` 工具（`src/shell/tool.ts`）+ `agent` 工具 batch 字段改名 + 客户端兼容读取
-- 状态：设计已确认，待实现
+- 状态：已实现（见 `2026-11-10-shell-mode-parameter-implementation.md`）
 
 ---
 
