@@ -23,7 +23,7 @@
 | [`verification-record.md`](testing/verification-record.md) | 分层验证记录（含 Task 14 证据与 Windows 受限权限下的已知限制） |
 | [`git-install-verification.md`](testing/git-install-verification.md) | Git 直装与提交钩子的验证过程和结论 |
 
-写新文档时遵循 `AGENTS.md` §8：设计与计划进 `docs/plans/`，验收证据进 `docs/testing/`。
+写新文档时遵循 `AGENTS.md` §9：设计与计划进 `docs/plans/`，验收证据进 `docs/testing/`。
 
 ---
 
@@ -33,13 +33,18 @@
 
 | 路径 | 是什么 |
 |---|---|
-| `docs/superpowers/specs/2026-10-31-dsh-nexus-design.md` | 收敛后的核心功能设计规格（早期绑定规格） |
-| `docs/superpowers/specs/2026-11-05-session-branches-design.md` | 会话分支功能设计规格 |
-| `docs/superpowers/specs/future/2026-10-31-dsh-nexus-assembly-design.md` | 自由装配扩展设计（后置，不属当前范围） |
-| `docs/superpowers/plans/*.md` | 上述功能的实施计划 |
+| `docs/superpowers/specs/2026-11-05-session-branches-design.md` | 会话分支功能设计规格（对应未合并的 `feat/session-branches`） |
+| `docs/superpowers/plans/2026-11-05-session-branches-implementation.md` | 上面那份规格的实施计划 |
 | `.superpowers/orchestration/`、`.superpowers/sdd/` | 子 Agent 编排产物、任务证据 |
 | `.superpowers/worktrees/` | 本地分支 worktree（含未合并的 `feat/session-branches`） |
 | `.pi/` | 本机编码 Agent 配置（含 `nexus-deepseek-runtime` 子 Agent 定义） |
+
+早期那批记录（核心功能规格、自由装配扩展设计、0.1.x 实施计划）已按项目决定**删除**。它们只存在于 Git 历史里，需要追溯时用：
+
+```bash
+git show a1f587c^:docs/superpowers/specs/2026-10-31-dsh-nexus-design.md
+git show a1f587c^:docs/superpowers/plans/2026-11-01-dsh-nexus-implementation.md
+```
 
 ---
 

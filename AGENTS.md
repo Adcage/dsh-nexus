@@ -18,11 +18,25 @@ src/            agent/ client/ fs/ http/ locale/ preset/ prompts/ runtime/ shell
 test/           与 src 同构；integration/ 与 windows/ 各有一套独立 vitest 配置
 scripts/        dev-profile.mjs  pack.mjs  precommit.mjs  verify-runtime.mjs
 docs/           plans/（设计与计划）  testing/（验收与证据）
-.agents/skills/ 随仓库分发的 DSH 插件开发 skill（见 §8）
+.agents/skills/ 随仓库分发的 DSH 插件开发 skill（见 §10）
 lib/            构建产物，**必须随源码提交**（Git 直装消费它）
 ```
 
-## 2. 命令
+## 2. 复用优先（硬性要求）
+
+**所有功能开发先找原生实现；能复用就复用，不自建平行实现。** 判断顺序是「原生有没有 → 能不能用 → 值不值得自建」，不是「先写自己的再说」。
+
+1. **先清点，再设计。** 动手前列出宿主已经提供什么：包 README 里的 Context 服务、事件、Config；`cordis-composition-reference/references/packages.md` 的包清单；本仓库 `src/` 已有实现。在设计文档或任务说明里写清「复用了哪些原生能力 / 哪部分必须自建」，再写代码。
+2. **复用是真调用，不是抄一份。** 复用指直接使用原生服务、事件、工具、UI 座位与持久化（例：`shell` 工具用 `dsh-jobs`/`dsh-terminal`/`dsh-subprocess`/`dsh-shell-env`，`read` 用 `ctx.fs` 与 `dsh-attachment`，存储用 `dsh-storage-domain`）。把原生实现复制进 `src/` 不算复用；缺依赖就补 `inject` 或换原生给的替代路径。
+3. **自建必须给出理由并留痕。** 只有满足下面任一条才自建，且要在同一处（代码注释或文档）写明为什么不用原生：
+   - 原生**不存在**该能力（宿主没有对应服务/座位/事件）；
+   - 原生行为与需求**冲突且无法**通过配置或补丁解决（权限语义、所有权模型、持久化形态等）；
+   - 原生接口**实测不可用或不好用**（真实运行失败、错误语义不可接受、表达能力缺失）。
+4. **自建时按可扩展、可维护设计。** 挂到已有服务或事件上而不是硬编码单一场景；对外契约（工具参数/输出、wire 类型、patch 行 id）保持向后兼容；新增能力优先做成可组合的模块，而不是给单次需求开洞。
+5. **不做无差异的壳。** 如果包一层原生只是为了"看起来更整洁"，却没有行为差异或额外约束，那一层就是负债。
+6. **选择要能被复核。** 设计文档里写清「为什么用原生 / 为什么自建 / 放弃的替代方案」；只在 commit message 里提一句不算留痕。
+
+## 3. 命令
 
 ```bash
 pnpm install            # 首次
@@ -39,7 +53,7 @@ pnpm dev:profile        # 在项目内 .dev-home 里起一个隔离 profile（�
 
 **改完源码必须 `pnpm build` 并一起提交 `lib/`。** Git 直装不编译插件，`lib/` 旧了就等于发布旧代码。
 
-## 3. 三个 id 必须一致
+## 4. 三个 id 必须一致
 
 ```
 package.json "name"  ==  cordis.patch.yml 行 id  ==  src/index.ts `export const name`
@@ -47,7 +61,7 @@ package.json "name"  ==  cordis.patch.yml 行 id  ==  src/index.ts `export const
 
 设置卡片的 namespace 就是该行 id。浏览器半的 loader id 也必须等于包名，否则加载时报 `loaded without registering "<id>"`。
 
-## 4. 注册纪律（非可选）
+## 5. 注册纪律（非可选）
 
 - 所有注册包在 `ctx.effect(fn, label)` 里并返回 disposer；裸 `register()` 会在卸载/热重载后泄漏。
 - 绝不注册不是自己声明的 slot（`slots.inject(ownerKey, cb)` 里做）。
@@ -56,14 +70,14 @@ package.json "name"  ==  cordis.patch.yml 行 id  ==  src/index.ts `export const
 - 命名路由在自己实现里做 loopback / method / body-size 校验，别依赖启动 token。
 - 浏览器半不 import 宿主 UI 包；样式只用 `--dsw-alias-*` token；文案走 `src/locale/{zh,en}.json`。
 
-## 5. 工具契约（模型可见）
+## 6. 工具契约（模型可见）
 
 - **不要用「必填」来表达语义。** 0.1.17 的教训：`shell` 的判据曾经是唯一必填字段，模型要么漏写、要么把命令塞进去；改成「可选 `mode` + 形状优先」后，真实会话 24 次调用 0 次形状错误。新增工具或多动作工具一律按这个方向设计。
 - 工具描述只写模型需要的事实；示例要可直接复制成一次调用。
 - 改参数/输出契约时，**同一提交内**改对应的契约用例（`test/{shell,agent,web}/*.test.ts`）。
 - 输出字段进 `presentationMeta` 前想清楚回放：改键名要给客户端旧键回退（见 `src/client/tool-models.ts` 的 `meta.mode ?? meta.action`）。
 
-## 6. 危险区域（改动前先读，改完必跑 `pnpm test:windows`）
+## 7. 危险区域（改动前先读，改完必跑 `pnpm test:windows`）
 
 | 区域 | 风险 |
 |---|---|
@@ -74,7 +88,7 @@ package.json "name"  ==  cordis.patch.yml 行 id  ==  src/index.ts `export const
 
 不可静默降级或提升权限。Windows 受限预设下 Git Bash 可能起不来（MSYS2 `0xC0000022`），工具会要求显式 `engine: "pwsh"`——这是设计，不要加自动 fallback。
 
-## 7. Git 与发布
+## 8. Git 与发布
 
 - 提交前缀：`feat:` / `fix:` / `docs:` / `test:` / `refactor:` / `build:` / `chore:`。
 - 不提交：`debug/`、`tmp/`、`dist/`、`.dev-home/`、`.superpowers/`、`node_modules/`、`.pi/`、`docs/superpowers/`。
@@ -97,7 +111,7 @@ dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v
 
 `dist/` 里的 tarball 只是本地产物，不是分发渠道。
 
-## 8. 文档
+## 9. 文档
 
 | 我要写… | 放哪 |
 |---|---|
@@ -109,7 +123,7 @@ dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v
 
 索引与「DSH 官方文档在哪读」见 `docs/README.md`。
 
-## 9. 外部权威文档
+## 10. 外部权威文档
 
 按顺序读，不要凭记忆：
 
@@ -120,7 +134,7 @@ dsh plugin --profile <profile> add git+https://github.com/Adcage/dsh-nexus.git#v
 
 > 注意：`dsh-plugin-creator/scripts/dsh-sdk.mjs` 默认读**桌面版** `app.asar`。本机是 CLI 安装（`node_global`），直接读上面的 `node_modules` 路径。
 
-## 10. 验证与如实报告
+## 11. 验证与如实报告
 
 按层声明你到底验证到哪一步：
 
