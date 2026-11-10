@@ -571,6 +571,16 @@ describe('shell tool contract', () => {
     expect(introduction).toMatch(/name the mode only when/i)
   })
 
+  it('declares no required parameter so a command-only call passes argument validation', async () => {
+    const shell = await openShell()
+    const schema = shell.harness.ctx.tools.schemas().find((tool) => tool.name === 'shell')
+    const parameters = schema?.parameters as { required?: string[]; properties: Record<string, unknown> }
+
+    expect(parameters.required).toBeUndefined()
+    expect(parameters.properties['mode']).toMatchObject({ type: 'string' })
+    expect(parameters.properties['mode']).not.toHaveProperty('required')
+  })
+
   it('runs a command whose call omits the mode', async () => {
     const shell = await openShell({ script: () => ({ exitCode: 0, stdout: 'hi\n' }) })
     const result = await shell.call({ command: 'echo hi' })
