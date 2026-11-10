@@ -139,7 +139,7 @@ interface ListInputArgs {
   readonly mode: 'list'
 }
 
-/** Any accepted action input. */
+/** Any accepted mode input. */
 type ShellInput =
   | RunInputArgs
   | OpenInputArgs
@@ -154,11 +154,11 @@ type ResourceFamily = 'process' | 'terminal'
 
 /**
  * Canonical output shape {@link ShellValue}. The output schema declares these
- * fields (only the ones an action produces are present) and closes the object,
+ * fields (only the ones a mode produces are present) and closes the object,
  * so a handler cannot silently add host-only data such as a handle or path.
  */
 interface ShellValue {
-  readonly action: ShellMode
+  readonly mode: ShellMode
   readonly family?: ResourceFamily
   readonly process?: ShellProcessView
   readonly page?: ShellPage
@@ -278,9 +278,9 @@ const NULLABLE_STRING = { oneOf: [{ type: 'string' as const }, { type: 'null' as
 /** An integer-or-null node. */
 const NULLABLE_INTEGER = { oneOf: [{ type: 'integer' as const }, { type: 'null' as const }] as const }
 
-/** The output schema: one closed object; action builders never add other fields. */
+/** The output schema: one closed object; mode builders never add other fields. */
 const SHELL_OUTPUT_SCHEMA = objectNode({
-  action: required({ type: 'string', enum: [...SHELL_MODES] }),
+  mode: required({ type: 'string', enum: [...SHELL_MODES] }),
   family: { type: 'string', enum: ['process', 'terminal'] },
   process: objectNode({
     resourceId: required({ type: 'string' }),
@@ -659,7 +659,7 @@ async function runAction(
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
       })
       return {
-        action: 'run',
+        mode: 'run',
         process: result.view,
         page: result.page,
         recovery: result.recovery,
@@ -675,7 +675,7 @@ async function runAction(
         ...(cwd === undefined ? {} : { cwd }),
         ...(input.name === undefined ? {} : { name: input.name }),
       })
-      return { action: 'open', terminal: result.terminal, motd: result.motd }
+      return { mode: 'open', terminal: result.terminal, motd: result.motd }
     }
     case 'send': {
       const result = await terminals.send(owner, input.resourceId, {
@@ -683,7 +683,7 @@ async function runAction(
         submit: input.submit,
       })
       return {
-        action: 'send',
+        mode: 'send',
         family: 'terminal',
         terminal: result.terminal,
         text: result.text,
@@ -698,7 +698,7 @@ async function runAction(
       if (family === 'terminal') {
         const page = terminals.read(owner, input.resourceId, input.cursor, input.limit)
         return {
-          action: 'read',
+          mode: 'read',
           family,
           terminal: terminals.status(owner, input.resourceId).terminal,
           text: page.text,
@@ -714,7 +714,7 @@ async function runAction(
       }
       const result = await processes.read(owner, input.resourceId, input.cursor, input.limit)
       return {
-        action: 'read',
+        mode: 'read',
         family,
         process: result.view,
         page: result.page,
@@ -726,11 +726,11 @@ async function runAction(
       const family = familyOf(input.resourceId)
       if (family === 'terminal') {
         const result = terminals.status(owner, input.resourceId)
-        return { action: 'status', family, terminal: result.terminal, busy: result.busy }
+        return { mode: 'status', family, terminal: result.terminal, busy: result.busy }
       }
       const result = processes.status(owner, input.resourceId)
       return {
-        action: 'status',
+        mode: 'status',
         family,
         process: result.view,
         background: result.background,
@@ -744,7 +744,7 @@ async function runAction(
       if (family === 'terminal') {
         const result = await terminals.wait(owner, input.resourceId, input.timeoutMs)
         return {
-          action: 'wait',
+          mode: 'wait',
           family,
           terminal: result.terminal,
           timedOut: result.timedOut,
@@ -753,14 +753,14 @@ async function runAction(
         }
       }
       const result = await processes.wait(owner, input.resourceId, input.timeoutMs)
-      return { action: 'wait', family, process: result.view, timedOut: result.timedOut }
+      return { mode: 'wait', family, process: result.view, timedOut: result.timedOut }
     }
     case 'stop': {
       const family = familyOf(input.resourceId)
       if (family === 'terminal') {
         const result = await terminals.stop(owner, input.resourceId)
         return {
-          action: 'stop',
+          mode: 'stop',
           family,
           terminal: result.terminal,
           interrupted: result.interrupted,
@@ -768,14 +768,14 @@ async function runAction(
           ...(result.detail === undefined ? {} : { detail: result.detail }),
         }
       }
-      return { action: 'stop', family, process: await processes.stop(owner, input.resourceId) }
+      return { mode: 'stop', family, process: await processes.stop(owner, input.resourceId) }
     }
     case 'close': {
       const family = familyOf(input.resourceId)
       if (family === 'terminal') {
         const result = await terminals.close(owner, input.resourceId)
         return {
-          action: 'close',
+          mode: 'close',
           family,
           terminal: result.terminal,
           closed: result.closed,
@@ -785,7 +785,7 @@ async function runAction(
       }
       const result = await processes.close(owner, input.resourceId)
       return {
-        action: 'close',
+        mode: 'close',
         family,
         process: result.view,
         closed: result.closed,
@@ -794,7 +794,7 @@ async function runAction(
     }
     case 'list':
       return {
-        action: 'list',
+        mode: 'list',
         processes: processes.list(owner).map((entry) => ({
           process: entry.view,
           background: entry.background,
@@ -820,7 +820,7 @@ function familyOf(resourceId: string): ResourceFamily {
   if (resourceId.startsWith(PROCESS_RESOURCE_PREFIX)) return 'process'
   throw new NexusError(
     'RESOURCE_NOT_AVAILABLE',
-    `"${resourceId}" is not a Nexus shell resource id; use the resourceId returned by the run or open action`,
+    `"${resourceId}" is not a Nexus shell resource id; use the resourceId returned by the run or open mode`,
   )
 }
 
@@ -884,7 +884,7 @@ function rejectForeignFields(record: Record<string, unknown>, mode: ShellMode): 
 function requireString(record: Record<string, unknown>, field: string): string {
   const value = record[field]
   if (typeof value !== 'string' || value.length === 0) {
-    throw invalidArgument(`the shell action requires a non-empty "${field}" string`)
+    throw invalidArgument(`the shell mode requires a non-empty "${field}" string`)
   }
   return value
 }
@@ -1067,7 +1067,7 @@ function renderOutput(text: string): string {
 
 /** Render the canonical value as model-facing text. Source output stays inside one envelope. */
 function renderShellValue(value: ShellValue): string {
-  switch (value.action) {
+  switch (value.mode) {
     case 'run': {
       const background = value.background === true ? ' background="true"' : ' background="false"'
       const job = value.background === true ? '\njob published; it stays owned by the session after this call' : ''
@@ -1205,7 +1205,7 @@ function renderShellValue(value: ShellValue): string {
 function presentationFor(value: ShellValue): { readonly [key: string]: string | boolean } {
   const process = value.process
   const terminal = value.terminal
-  const meta: Record<string, string | boolean> = { action: value.action }
+  const meta: Record<string, string | boolean> = { mode: value.mode }
   if (value.family !== undefined) meta['family'] = value.family
   if (process !== undefined) {
     meta['resourceId'] = process.resourceId
@@ -1217,7 +1217,7 @@ function presentationFor(value: ShellValue): { readonly [key: string]: string | 
   }
   // Durable timeout fact: a `wait` that ended without settlement keeps its own
   // stage on replay instead of looking like a settled result. `run` and the
-  // other actions leave the field absent, and a settled wait records `false`.
+  // other modes leave the field absent, and a settled wait records `false`.
   if (value.timedOut !== undefined) meta['timedOut'] = value.timedOut
   return meta
 }

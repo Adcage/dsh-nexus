@@ -243,7 +243,7 @@ const STOP_ACTIONS: Readonly<Record<NexusToolName, readonly string[]>> = {
 
 /** Recorded facts each owning tool's `presentationMeta` can supply. */
 const FACT_FIELDS: Readonly<Record<NexusToolName, readonly (readonly [NexusToolFactLabel, string])[]>> = {
-  shell: [['toolFactAction', 'action'], ['toolFactKind', 'family'], ['toolFactStatus', 'status'], ['toolFactResource', 'resourceId']],
+  shell: [['toolFactAction', 'mode'], ['toolFactKind', 'family'], ['toolFactStatus', 'status'], ['toolFactResource', 'resourceId']],
   web: [['toolFactAction', 'action'], ['toolFactKind', 'kind'], ['toolFactResult', 'resultId'], ['toolFactSources', 'itemCount'], ['toolFactSaved', 'savedCount']],
   agent: [
     ['toolFactAction', 'action'],
@@ -319,7 +319,11 @@ function recordedStage(phase: string, block: unknown, output: string, stopAction
   if (phase === 'preparing') return 'pending'
   if (phase !== 'result') return 'running'
   if (field(block, 'isError') === true) return 'failed'
-  const action = textOf(field(field(block, 'meta'), 'action'))
+  // A shell result recorded after the mode rename carries `meta.mode`; sessions
+  // recorded before it carry `meta.action`. Both name the same fact, so the
+  // legacy key is still read to keep an old transcript's stage truthful.
+  const meta = field(block, 'meta')
+  const action = textOf(field(meta, 'mode')) ?? textOf(field(meta, 'action'))
   if (action !== undefined && stopActions.includes(action)) return 'stopRequested'
   if (field(field(block, 'meta'), 'timedOut') === true) return 'timedOut'
   return output === '' ? 'empty' : 'recorded'

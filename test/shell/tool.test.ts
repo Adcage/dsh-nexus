@@ -450,7 +450,7 @@ interface RecoveryJson {
 }
 
 interface SandboxJson {
-  action: string
+  mode: string
   enforcement?: string
   denied: boolean
   runnerFailed?: string
@@ -479,7 +479,7 @@ interface TerminalViewJson {
 }
 
 interface ShellValue {
-  action: string
+  mode: string
   family?: 'process' | 'terminal'
   process?: ProcessViewJson
   page?: PageJson
@@ -574,7 +574,7 @@ describe('shell tool contract', () => {
   it('runs a command whose call omits the mode', async () => {
     const shell = await openShell({ script: () => ({ exitCode: 0, stdout: 'hi\n' }) })
     const result = await shell.call({ command: 'echo hi' })
-    expect(valueOf(result).action).toBe('run')
+    expect(valueOf(result).mode).toBe('run')
   })
 
   it('names the contradiction when a command is supplied beside another mode', async () => {
@@ -673,11 +673,11 @@ describe('shell tool contract', () => {
     expect(terminalId).toMatch(/^nexus-term-/)
 
     expect(valueOf(await shell.call({ mode: 'status', resourceId: processId }))).toMatchObject({
-      action: 'status',
+      mode: 'status',
       family: 'process',
     })
     expect(valueOf(await shell.call({ mode: 'status', resourceId: terminalId }))).toMatchObject({
-      action: 'status',
+      mode: 'status',
       family: 'terminal',
     })
 
@@ -836,11 +836,11 @@ describe('shell run', () => {
     expect(started.process?.status).toBe('running')
     const resourceId = started.process!.resourceId
     // A timeout is a `wait` fact only: a non-wait action must not publish it.
-    expect(startedResult.meta).toMatchObject({ action: 'run' })
+    expect(startedResult.meta).toMatchObject({ mode: 'run' })
     expect(startedResult.meta).not.toHaveProperty('timedOut')
 
     const status = valueOf(await shell.call({ mode: 'status', resourceId }))
-    expect(status).toMatchObject({ action: 'status', family: 'process', background: true })
+    expect(status).toMatchObject({ mode: 'status', family: 'process', background: true })
     expect(status.job?.id).toBe(resourceId)
     expect(status.job?.status).toBe('running')
 
@@ -850,7 +850,7 @@ describe('shell run', () => {
     expect(timed.process?.status).toBe('running')
     // The durable presentation fact records the timeout, so a replayed card keeps
     // the timeout stage instead of a settled one.
-    expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
+    expect(timedResult.meta).toMatchObject({ mode: 'wait', timedOut: true })
     expect(resultText(await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 }))).toContain(
       'not completion',
     )
@@ -908,7 +908,7 @@ describe('shell read for processes', () => {
     let text = started.page!.text
     for (let page = 0; page < 16; page += 1) {
       const read = valueOf(await shell.call({ mode: 'read', resourceId, cursor, limit: 24 }))
-      expect(read).toMatchObject({ action: 'read', family: 'process' })
+      expect(read).toMatchObject({ mode: 'read', family: 'process' })
       expect(Buffer.byteLength(read.page!.text, 'utf8')).toBeLessThanOrEqual(24)
       expect(JSON.stringify(read)).not.toContain(spillPath)
       text += read.page!.text
@@ -995,7 +995,7 @@ describe('shell terminals', () => {
   it('opens the configured engine, forwards a display name and a resolved cwd', async () => {
     const shell = await openShell({ config: PWSH_CONFIG, backends: ['bash', 'pwsh'] })
     const opened = valueOf(await shell.call({ mode: 'open', cwd: 'inner dir', name: 'worker' }))
-    expect(opened).toMatchObject({ action: 'open', motd: 'nexus scripted shell' })
+    expect(opened).toMatchObject({ mode: 'open', motd: 'nexus scripted shell' })
     expect(opened.terminal).toMatchObject({ kind: 'terminal', engine: 'pwsh', name: 'worker' })
     expect(shell.backends.get('pwsh')?.spawns[0]).toMatchObject({ cwd: resolve(CWD, 'inner dir'), name: 'worker' })
     expect(shell.backends.get('bash')?.spawns).toHaveLength(0)
@@ -1010,7 +1010,7 @@ describe('shell terminals', () => {
 
     const sent = valueOf(await shell.call({ mode: 'send', resourceId, text: "cd '目录 with space'" }))
     expect(sent).toMatchObject({
-      action: 'send',
+      mode: 'send',
       family: 'terminal',
       waitReason: 'stdin_read',
       cancelled: false,
@@ -1074,7 +1074,7 @@ describe('shell terminals', () => {
     for (const line of ['one', 'two', 'three', 'four']) session.append(line)
 
     const newest = valueOf(await shell.call({ mode: 'read', resourceId, limit: 2 }))
-    expect(newest).toMatchObject({ action: 'read', family: 'terminal', totalLines: 4, hasOlder: true })
+    expect(newest).toMatchObject({ mode: 'read', family: 'terminal', totalLines: 4, hasOlder: true })
     expect(newest.text).toBe('three\nfour')
     expect(newest.cursor).toMatch(/^nxterm1\./)
 
@@ -1105,7 +1105,7 @@ describe('shell terminals', () => {
     const timedResult = await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 })
     const timed = valueOf(timedResult)
     expect(timed).toMatchObject({ timedOut: true, waitReason: 'timeout' })
-    expect(timedResult.meta).toMatchObject({ action: 'wait', timedOut: true })
+    expect(timedResult.meta).toMatchObject({ mode: 'wait', timedOut: true })
     expect(resultText(await shell.call({ mode: 'wait', resourceId, timeoutMs: 50 }))).toContain('not an exit')
 
     session.statusValue = { kind: 'exited', exitCode: 0, signal: null }
@@ -1113,7 +1113,7 @@ describe('shell terminals', () => {
     const exited = valueOf(exitedResult)
     expect(exited).toMatchObject({ timedOut: false, waitReason: 'session_exit' })
     // A settled wait keeps a durable `false`, so the stage is not a timeout.
-    expect(exitedResult.meta).toMatchObject({ action: 'wait', timedOut: false })
+    expect(exitedResult.meta).toMatchObject({ mode: 'wait', timedOut: false })
     expect(exited.sessionStatus).toMatchObject({ kind: 'exited', exitCode: 0 })
     await shell.call({ mode: 'close', resourceId })
   })
@@ -1145,7 +1145,7 @@ describe('shell terminals', () => {
 
     const started = valueOf(await shell.call({ mode: 'run', command: 'job', background: true }))
     const listed = valueOf(await shell.call({ mode: 'list' }))
-    expect(listed).toMatchObject({ action: 'list' })
+    expect(listed).toMatchObject({ mode: 'list' })
     expect(listed.processes).toHaveLength(1)
     expect(listed.processes?.[0]?.process.resourceId).toBe(started.process!.resourceId)
     expect(listed.terminals).toHaveLength(AGENT_MAX_TERMINALS)

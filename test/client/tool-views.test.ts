@@ -457,6 +457,14 @@ describe('Nexus tool views', () => {
     expect(stopped.text).not.toContain('exited')
     expect(stopped.text).not.toContain(zh.toolFactStatus)
     stopped.unmount()
+    // New sessions record `meta.mode` instead of the legacy `meta.action`.
+    const stoppedByMode = await render(shell, {
+      ...recorded('shell', 'result', resultBlock({ content: [], meta: { mode: 'stop', status: 'exited', resourceId: 'proc-7' } })),
+      t: (key: keyof typeof zh) => zh[key],
+    })
+    expect(stoppedByMode.node.querySelector('[data-dsh-nexus-stage="stopRequested"]')).not.toBeNull()
+    expect(stoppedByMode.text).toContain(zh.toolStageStopRequested)
+    stoppedByMode.unmount()
     const timedOut = await render(viewOf(client.slots, 'agent'), recorded('agent', 'result', resultBlock({
       name: 'agent',
       meta: { action: 'wait', childId: 'session-child-1', timedOut: true },
