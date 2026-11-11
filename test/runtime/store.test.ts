@@ -393,6 +393,7 @@ describe('openNexusStore', () => {
         terminal: { engine: 'bash' },
         agents: { concurrency: 1, maxDepth: 0, childAccess: 'read-only' },
         web: { maxResults: 1, maxCharsPerPage: 1 },
+        tools: { read: false, write: false, edit: false, shell: false, web: false, agent: false },
         toolDisplay: 'native',
       }
       const smallestSaved = await store.saveSettings(smallest, accepted.hash)
@@ -401,6 +402,7 @@ describe('openNexusStore', () => {
         terminal: { engine: 'pwsh' },
         agents: { concurrency: 16, maxDepth: 8, childAccess: 'inherit' },
         web: { maxResults: 10, maxCharsPerPage: 24_000 },
+        tools: { read: true, write: true, edit: true, shell: true, web: true, agent: true },
         toolDisplay: 'auto',
       }
       const largestSaved = await store.saveSettings(largest, smallestSaved.hash)
@@ -484,8 +486,16 @@ describe('openNexusStore', () => {
 
       expect(await store.getPrompt('sess-handles')).toEqual(record)
       const raw = await harness.readMedium()
-      expect(raw).not.toContain('"agent"')
-      expect(raw).not.toContain('"context"')
+      // The durable record holds declared fields only: no live Agent, no Context.
+      // The whole medium may legally contain the word "agent" (the stored tool
+      // set has an `agent` tool switch), so the assertion reads the record.
+      const medium = JSON.parse(raw) as { tables: { prompts: Record<string, Record<string, unknown>> } }
+      expect(Object.keys(medium.tables.prompts['sess-handles'] ?? {}).sort()).toEqual([
+        'modules',
+        'selection',
+        'sessionId',
+        'text',
+      ])
 
       const wrongType = { ...record, text: { handle: true } } as unknown as PromptSnapshot
       await expect(store.putPrompt(wrongType)).rejects.toMatchObject({

@@ -107,6 +107,7 @@ describe('runtime defaults', () => {
       terminal: { engine: 'bash' },
       agents: { concurrency: 4, maxDepth: 2, childAccess: 'inherit' },
       web: { maxResults: 5, maxCharsPerPage: 12_000 },
+      tools: { read: true, write: true, edit: true, shell: true, web: true, agent: true },
       toolDisplay: 'nexus',
     })
   })

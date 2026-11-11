@@ -129,6 +129,44 @@ export type ToolDisplayMode = 'nexus' | 'auto' | 'native'
 /** Every accepted display mode, in display order; the stored field accepts only these. */
 export const TOOL_DISPLAY_MODES = ['nexus', 'auto', 'native'] as const
 
+/**
+ * The Nexus tools a session can be restricted to, in registration order.
+ *
+ * These are the six model-facing tools this package registers in a Nexus preset
+ * generation. A stored `false` removes the tool from the model's visible set for
+ * that session; the tool itself stays registered and refuses a direct call.
+ */
+export const NEXUS_TOOL_KEYS = ['read', 'write', 'edit', 'shell', 'web', 'agent'] as const
+
+/** One restrictable Nexus tool name. */
+export type NexusToolKey = (typeof NEXUS_TOOL_KEYS)[number]
+
+/** Which Nexus tools one session may use. */
+export type ToolSettings = { readonly [K in NexusToolKey]: boolean }
+
+/**
+ * Named tool sets the console offers as one-click presets.
+ *
+ * A profile is a UI affordance, not a stored field: selecting one writes its
+ * booleans into {@link ToolSettings}, and the console reports the matching name
+ * back whenever the booleans happen to equal it. Exactly one source of truth is
+ * stored, so a hand-tuned combination needs no separate "custom" flag.
+ */
+export const TOOL_PROFILE_SETS = Object.freeze({
+  /** Local code work only: no network, no delegation. */
+  minimal: Object.freeze({ read: true, write: true, edit: true, shell: true, web: false, agent: false }),
+  /** Everything this package registers; the default. */
+  coding: Object.freeze({ read: true, write: true, edit: true, shell: true, web: true, agent: true }),
+  /** Read-only investigation: runs commands and reads the web, never edits a file. */
+  research: Object.freeze({ read: true, write: false, edit: false, shell: true, web: true, agent: true }),
+}) satisfies Readonly<Record<string, ToolSettings>>
+
+/** One named tool set the console offers. */
+export type ToolProfile = keyof typeof TOOL_PROFILE_SETS
+
+/** Every offered tool profile, in display order. */
+export const TOOL_PROFILES = ['minimal', 'coding', 'research'] as const satisfies readonly ToolProfile[]
+
 /** Lifecycle state of one managed process, as the owner can prove it. */
 export type ProcessStatus =
   | 'starting'
@@ -274,6 +312,15 @@ export interface RuntimeSettings {
   readonly terminal: TerminalSettings
   readonly agents: AgentSettings
   readonly web: WebSettings
+  /**
+   * Which Nexus tools a session may use.
+   *
+   * A missing record reads as every tool enabled, so a record written before
+   * this field existed keeps the full tool set. `ctx.tools.restrict` applies the
+   * result per session; a disabled tool is invisible to the model and refuses a
+   * direct call.
+   */
+  readonly tools: ToolSettings
   /**
    * Which component presents Nexus's own `shell`/`web`/`agent` calls.
    *

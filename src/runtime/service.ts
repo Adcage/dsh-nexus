@@ -143,6 +143,17 @@ export interface NexusRuntime {
    */
   saveSettings(value: RuntimeSettings, expectedHash: string): Promise<Stored<RuntimeSettings>>
   /**
+   * Observe every committed settings replacement.
+   *
+   * A listener runs after the durable write and after {@link NexusRuntime.getSettings}
+   * already answers with the new record, so it can apply the change to live
+   * consumers without reading the store again. A throwing listener is isolated:
+   * it must never fail a save that already reached the medium.
+   * @param listener - called with the committed record.
+   * @returns the unsubscribe function.
+   */
+  onSettingsChange(listener: (settings: RuntimeSettings) => void): () => void
+  /**
    * The execution configuration a shell start resolves against.
    *
    * A snapshot: it never probes or starts a shell, and a saved terminal change
@@ -311,6 +322,8 @@ class NexusRuntimeHandle implements NexusRuntime {
   private committed: Stored<RuntimeSettings>
   /** Exact Agents this host composed as Nexus actors. */
   private readonly members = new Set<Agent>()
+  /** Observers of committed settings replacements. */
+  private readonly settingsListeners = new Set<(settings: RuntimeSettings) => void>()
   /** Managed-resource fact providers of the live generations. */
   private readonly resourceFacts: { readonly facts: ManagedResourceFacts }[] = []
   /** Unconfirmed report details a retired generation handed to this runtime. */
@@ -358,7 +371,21 @@ class NexusRuntimeHandle implements NexusRuntime {
     this.assertAdmitting('save the Nexus settings')
     const saved = frozenRecord(await this.store.saveSettings(value, expectedHash))
     this.committed = saved
+    for (const listener of [...this.settingsListeners]) {
+      try {
+        listener(saved.value)
+      } catch {
+        // A consumer's read model is not a reason to fail a durable save.
+      }
+    }
     return saved
+  }
+
+  onSettingsChange(listener: (settings: RuntimeSettings) => void): () => void {
+    this.settingsListeners.add(listener)
+    return () => {
+      this.settingsListeners.delete(listener)
+    }
   }
 
   getShellConfig(): ShellExecutionConfig {

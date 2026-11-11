@@ -52,6 +52,7 @@ import { createFsTools } from '../fs/read.ts'
 import { registerPromptSections } from '../prompts/register.ts'
 import { NexusError } from '../runtime/errors.ts'
 import type { NexusAgentMembership, NexusCleanupReport, NexusRuntime } from '../runtime/service.ts'
+import { NEXUS_TOOL_KEYS, type NexusToolKey } from '../protocol.ts'
 import { registerTerminalBackends } from '../shell/terminals.ts'
 import { createShellSurface, type ShellToolSurface } from '../shell/tool.ts'
 import { createWebTool } from '../web/tool.ts'
@@ -136,12 +137,26 @@ function assertNexusCaller(ctx: Context, runtime: NexusRuntime, tool: ToolDefini
  * @param tool - the definition to guard.
  * @returns the guarded definition.
  */
-function guardNexusTool(ctx: Context, runtime: NexusRuntime, tool: ToolDefinition): ToolDefinition {
+function guardNexusTool(
+  ctx: Context,
+  runtime: NexusRuntime,
+  tool: ToolDefinition,
+  isDisabled: (name: string) => boolean,
+): ToolDefinition {
   const execute = tool.execute
   return Object.freeze({
     ...tool,
     async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
       assertNexusCaller(ctx, runtime, tool, exec)
+      // The restriction keeps a disabled tool out of the model's visible set; a
+      // call that still arrives (a stale cached schema, a hand-written client)
+      // is refused here instead of running with authority the settings removed.
+      if (isDisabled(tool.name)) {
+        throw new NexusError(
+          'TOOL_DISABLED',
+          `${tool.name} is disabled for this Nexus session by its stored tool settings`,
+        )
+      }
       return execute.call(tool, args, exec)
     },
   })
@@ -186,18 +201,36 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
     createWebTool(ctx, runtime.store, settings, runtime.webResults),
     createAgentTool(ctx, runtime.store, settings, runtime.coordinator),
   ]
-  for (const tool of tools) ctx.tools.register(guardNexusTool(ctx, runtime, tool))
+  // Read per call: a settings save is effective for the next call and for the
+  // next request's schema, without rebuilding this generation.
+  const isDisabled = (name: string): boolean =>
+    (NEXUS_TOOL_KEYS as readonly string[]).includes(name) && settings().tools[name as NexusToolKey] === false
+  for (const tool of tools) ctx.tools.register(guardNexusTool(ctx, runtime, tool, isDisabled))
 
   // Membership precedes the prompt section so a failed creation still reaches
   // the release edge: the serial `agent/created` dispatch rolls back into
   // `agent/disposed`, and the exact instance is the only key used.
   const memberships = new Map<Agent, NexusAgentMembership>()
+  // The restriction layers this generation applied, per exact Agent. `restrict`
+  // is the native seam: it narrows what one Agent inherits, and its disposer
+  // lifts the mask, so a settings change never needs a new generation.
+  const restrictions = new Map<Agent, () => void>()
+  const applyRestrictions = (agent: Agent): void => {
+    restrictions.get(agent)?.()
+    restrictions.delete(agent)
+    const deny = NEXUS_TOOL_KEYS.filter((key) => settings().tools[key] === false)
+    if (deny.length === 0) return
+    restrictions.set(agent, agent.ctx.tools.restrict({ deny }))
+  }
   const onCreated = ctx.on('agent/created', ({ agent }) => {
     if (memberships.has(agent)) return undefined
     memberships.set(agent, runtime.markNexusAgent(agent))
+    applyRestrictions(agent)
     return undefined
   })
   const onDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    restrictions.get(agent)?.()
+    restrictions.delete(agent)
     memberships.get(agent)?.release()
     memberships.delete(agent)
   })
@@ -207,9 +240,18 @@ export function apply(ctx: Context, config: NexusRowConfig): void {
     membershipReleased = true
     onCreated()
     onDisposed()
+    for (const release of restrictions.values()) release()
+    restrictions.clear()
     for (const membership of memberships.values()) membership.release()
     memberships.clear()
   }
+
+  // A saved settings record applies to sessions already running: the next
+  // assembled request reads the rebuilt restriction, without rebuilding this
+  // generation or restarting the runtime.
+  ctx.effect(() => runtime.onSettingsChange(() => {
+    for (const agent of memberships.keys()) applyRestrictions(agent)
+  }), 'dsh-nexus tool restrictions')
 
   const promptSections = registerPromptSections(ctx, runtime.prompts)
   // Delegation policy: the narrow access mode and the write scope of a Nexus

@@ -26,6 +26,7 @@ export type NexusErrorCode =
   | 'OUTPUT_LOST'
   | 'WRITE_SCOPE_BUSY'
   | 'CONFIG_CONFLICT'
+  | 'TOOL_DISABLED'
   | 'UNSUPPORTED_CAPABILITY'
 
 /**

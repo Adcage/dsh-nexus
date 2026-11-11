@@ -37,13 +37,44 @@ describe('five-page shared settings draft', () => {
     await input(view.node, en.roleModel, '')
     await input(view.node, en.roleProvider, 'codex-subscription')
     await button(view.node, en.saveSettings).clickAsync()
-    expect(f.settings.value).toEqual({ files: { defaultLines: 500, maxOutputBytes: 16000 }, web: { maxResults: 7, maxCharsPerPage: 15000 }, terminal: { engine: 'pwsh', bashPath: 'C:/Program Files/Git/bin/bash.exe', pwshPath: 'C:/Program Files/PowerShell/7/pwsh.exe' }, agents: { concurrency: 6, maxDepth: 3, childAccess: 'workspace-write', role: { name: 'Reviewer', instructions: 'Review literal text', provider: 'codex-subscription' } }, toolDisplay: 'nexus' })
+    expect(f.settings.value).toEqual({ files: { defaultLines: 500, maxOutputBytes: 16000 }, web: { maxResults: 7, maxCharsPerPage: 15000 }, terminal: { engine: 'pwsh', bashPath: 'C:/Program Files/Git/bin/bash.exe', pwshPath: 'C:/Program Files/PowerShell/7/pwsh.exe' }, agents: { concurrency: 6, maxDepth: 3, childAccess: 'workspace-write', role: { name: 'Reviewer', instructions: 'Review literal text', provider: 'codex-subscription' } }, tools: { read: true, write: true, edit: true, shell: true, web: true, agent: true }, toolDisplay: 'nexus' })
     await button(view.node, en.integrations).clickAsync()
     expect(view.node.textContent).toContain(en.unknown)
     expect(view.node.textContent).toContain(en.registrationHelp)
     expect(view.node.textContent).toContain(en.nativeSettingsHelp)
     expect(view.node.querySelectorAll('a')).toHaveLength(0)
     expect(view.node.querySelectorAll('input')).toHaveLength(0)
+  })
+  it('fills a tool profile once, keeps the switches authoritative and reports a hand-tuned set as custom', async () => {
+    const f = clientFixture()
+    const store = createConsoleStore(createNexusApi(f.fetch))
+    await store.refresh()
+    const view = await mountConsole(store); cleanups.push(view.dispose)
+    await button(view.node, en.tools).clickAsync()
+
+    const selectOf = (label: string): HTMLSelectElement => {
+      const found = [...view.node.querySelectorAll('label')].find((l) => l.textContent?.startsWith(label))
+      expect(found, `label ${label}`).toBeDefined()
+      return found!.querySelector('select') as HTMLSelectElement
+    }
+    const toggle = async (label: string): Promise<void> => {
+      const found = [...view.node.querySelectorAll('label')].find((l) => l.textContent?.startsWith(label))
+      expect(found, `label ${label}`).toBeDefined()
+      await act(async () => { (found!.querySelector('input') as HTMLInputElement).click() })
+    }
+
+    await input(view.node, en.toolProfile, 'research')
+    expect(store.getSnapshot().settingsDraft?.tools).toEqual({ read: true, write: false, edit: false, shell: true, web: true, agent: true })
+    expect(selectOf(en.toolProfile).value).toBe('research')
+
+    // A single switch away from the profile leaves no profile selected: the
+    // switches, not the select, are the stored truth.
+    await toggle(en.toolWeb)
+    expect(store.getSnapshot().settingsDraft?.tools.web).toBe(false)
+    expect(selectOf(en.toolProfile).value).toBe('custom')
+
+    await button(view.node, en.saveSettings).clickAsync()
+    expect(f.settings.value.tools).toEqual({ read: true, write: false, edit: false, shell: true, web: false, agent: true })
   })
   it('publishes only an integer inside the field bounds and never raises a notice for invalid typing', async () => {
     const f = clientFixture()

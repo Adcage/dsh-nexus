@@ -9,7 +9,7 @@
  * @module dsh-nexus/runtime/defaults
  */
 
-import type { PromptLibrary, RuntimeSettings } from '../protocol.ts'
+import type { PromptLibrary, RuntimeSettings, ToolSettings } from '../protocol.ts'
 
 // Files: default read size, its bounds, and the write/edit input ceiling.
 /** Lines a `read` returns when it names no limit. */
@@ -105,6 +105,16 @@ export const PROMPT_MODULE_MAX_BYTES = 32 * 1024
 /** Bytes all module bodies together may hold. */
 export const PROMPT_LIBRARY_MAX_BYTES = 128 * 1024
 
+/** Every Nexus tool enabled: the stored default and the legacy-record fallback. */
+export const DEFAULT_TOOL_SETTINGS: ToolSettings = Object.freeze({
+  read: true,
+  write: true,
+  edit: true,
+  shell: true,
+  web: true,
+  agent: true,
+})
+
 /** Settings served and stored before the user changes anything. */
 export const DEFAULT_SETTINGS: RuntimeSettings = Object.freeze({
   files: Object.freeze({
@@ -121,6 +131,7 @@ export const DEFAULT_SETTINGS: RuntimeSettings = Object.freeze({
     maxResults: WEB_DEFAULT_RESULTS,
     maxCharsPerPage: WEB_DEFAULT_CHARS_PER_PAGE,
   }),
+  tools: DEFAULT_TOOL_SETTINGS,
   toolDisplay: 'nexus' as const,
 })
 

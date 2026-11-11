@@ -14,6 +14,7 @@
 | [`2026-11-04-git-install-hooks.md`](plans/2026-11-04-git-install-hooks.md) | Git 直装与本地构建钩子的实施计划 | 已完成 |
 | [`2026-11-10-shell-mode-parameter-design.md`](plans/2026-11-10-shell-mode-parameter-design.md) | `shell` 判据 `action` → 可选 `mode` 的设计（含证据与取舍） | 已实现 |
 | [`2026-11-10-shell-mode-parameter-implementation.md`](plans/2026-11-10-shell-mode-parameter-implementation.md) | 上面那份设计的实施计划与任务拆解 | 已完成 |
+| [`2026-11-10-tool-profile-design.md`](plans/2026-11-10-tool-profile-design.md) | 会话级工具开关（档位 + 逐项开关，`ctx.tools.restrict`） | 已实现 |
 
 ### 验收与证据（`docs/testing/`）
 

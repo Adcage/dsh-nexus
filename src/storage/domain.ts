@@ -33,6 +33,7 @@ import {
   FILE_READ_MIN_LINES,
   WEB_MAX_CHARS_PER_PAGE,
   WEB_MAX_RESULTS,
+  DEFAULT_TOOL_SETTINGS,
 } from '../runtime/defaults.ts'
 
 /** Domain name on the storage hub; also the medium's unit name. */
@@ -119,6 +120,19 @@ export const runtimeSettingsSchema: z.ZodType<RuntimeSettings> = z.object({
   // instead of failing the whole domain open. A save is normalised the same
   // way, so an unknown mode can never be stored as-is.
   toolDisplay: z.enum(TOOL_DISPLAY_MODES).catch('nexus'),
+  // Same load-boundary rule for the tool set: a record written before the field
+  // existed opens with every tool enabled, and a malformed value never fails the
+  // whole domain open.
+  tools: z
+    .object({
+      read: z.boolean(),
+      write: z.boolean(),
+      edit: z.boolean(),
+      shell: z.boolean(),
+      web: z.boolean(),
+      agent: z.boolean(),
+    })
+    .catch(DEFAULT_TOOL_SETTINGS),
 })
 
 /** A saved web result as stored. */

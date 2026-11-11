@@ -1,6 +1,6 @@
 /** Browser-only transport. Relative URLs, memory-only authorization, no mutation retries. */
 import { z } from 'zod'
-import { NEXUS_API_PREFIX, CHILD_ACCESS_SETTINGS, TOOL_DISPLAY_MODES, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings } from '../protocol.ts'
+import { NEXUS_API_PREFIX, CHILD_ACCESS_SETTINGS, TOOL_DISPLAY_MODES, consolePromptPath, type ConsoleCapabilities, type PromptLibrary, type RuntimeSettings, type ToolSettings } from '../protocol.ts'
 
 export type PublicCapabilities = Omit<ConsoleCapabilities, 'csrfToken'>
 const strings = z.array(z.string())
@@ -20,6 +20,18 @@ const settings = z.object({
   // response without the field still loads and never reaches registration as an
   // unknown mode.
   toolDisplay: z.enum(TOOL_DISPLAY_MODES).catch('nexus'),
+  // Same normalisation as the host: a response from an older host without the
+  // field loads as every tool enabled.
+  tools: z
+    .object({
+      read: z.boolean(),
+      write: z.boolean(),
+      edit: z.boolean(),
+      shell: z.boolean(),
+      web: z.boolean(),
+      agent: z.boolean(),
+    })
+    .catch({ read: true, write: true, edit: true, shell: true, web: true, agent: true } satisfies ToolSettings),
 })
 const backend = z.object({ service: z.enum(['present', 'absent', 'unknown']), backends: z.union([
   z.object({ state: z.enum(['registered', 'absent']), names: strings }), z.object({ state: z.literal('unknown'), names: z.null() }),
