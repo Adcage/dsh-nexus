@@ -102,16 +102,6 @@ const STOP_BOUND_MS = COMMAND_CLEANUP_GRACE_MS + 500
 const NATIVE_WAIT_MARGIN_MS = 1_000
 
 /**
- * Consecutive completion wakes one owner may receive before notices degrade to
- * queued injection. A queued notice is NOT delivered yet: an idle owner keeps it
- * pending until a later user/steering turn wakes the driver (the explicit
- * tradeoff against an unbounded self-waking chain). Any user-authored input
- * resets the count, so a normal background workflow still reaches an idle owner
- * without polling.
- */
-const COMPLETION_WAKE_BUDGET = 4
-
-/**
  * Bytes of finished output echoed in one completion notice.
  *
  * A notice that carries the outcome keeps the owner from spending a whole extra
@@ -448,8 +438,6 @@ class Controller implements ProcessController {
   private readonly states = new Map<Agent, AgentState>()
   private readonly entries = new Map<string, OwnedProcess>()
   private readonly jobsById = new Map<JobId, OwnedProcess>()
-  /** Consecutive completion wakes spent by one owner; reset by user-authored input. */
-  private readonly wakeSpent = new WeakMap<Agent, number>()
   /** Failed starts whose native record could not be proven gone, by exact owner. */
   private readonly unconfirmedStarts = new Map<Agent, string[]>()
   /** Facts this controller must keep answering after its own disposal. */
@@ -488,9 +476,6 @@ class Controller implements ProcessController {
         () => jobs.events.subscribe({ owners: 'all' }, (event) => this.report(event)),
         'dsh-nexus shell job reporter',
       )
-      jobCtx.on('agent/inbox/claimed', ({ agent, message }) => {
-        if (message.source.kind === 'user') this.wakeSpent.delete(agent)
-      })
     })
   }
 
@@ -1125,8 +1110,9 @@ class Controller implements ProcessController {
   }
 
   /**
-   * Offer one unclaimed background completion to its exact live owner: wake an
-   * idle owner within the budget, otherwise queue it for the next step/turn.
+   * Offer one unclaimed background completion to its exact live owner: wake every
+   * idle owner so monitoring chains never depend on later user input; a busy
+   * owner receives the notice at its next step boundary.
    */
   private report(event: JobEvent): void {
     if (this.disposed || event.type !== 'settled') return
@@ -1151,13 +1137,7 @@ class Controller implements ProcessController {
     })
     try {
       if (entry.agent.status === 'idle') {
-        const spent = this.wakeSpent.get(entry.agent) ?? 0
-        if (spent < COMPLETION_WAKE_BUDGET) {
-          this.wakeSpent.set(entry.agent, spent + 1)
-          entry.agent.followup(message)
-        } else {
-          entry.agent.inject(message)
-        }
+        entry.agent.followup(message)
       } else {
         // A busy driver claims injected context at its next step boundary.
         entry.agent.inject(message)
