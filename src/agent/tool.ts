@@ -2,7 +2,7 @@
  * The unified `agent` tool: internal delegation, inspection and control
  * (AG-01…AG-11).
  *
- * Ten actions with one closed field set each. Every action validates its input
+ * Nine actions with one closed field set each. Every action validates its input
  * and re-checks the caller before any effect. `start` resolves an installed
  * in-process provider, admits the child (canonical directory, access, depth
  * cap, write lease, durable policy) and only then publishes the native
@@ -14,7 +14,9 @@
  *
  * Result delivery stays native: children are started with `delivery: "parent"`,
  * so the runtime's own settlement notice reaches the model once. This tool adds
- * no second reporter.
+ * no second reporter. Model-facing polling via `wait` is intentionally absent;
+ * native settlement delivery wakes the parent, while batch sequencing keeps its
+ * internal activation wait. Historical wait results remain renderable.
  *
  * @module dsh-nexus/agent/tool
  */
@@ -32,8 +34,6 @@ import {
   AGENT_BATCH_MAX_TASKS,
   AGENT_READ_DEFAULT_EVENTS,
   AGENT_READ_MAX_EVENTS,
-  WAIT_DEFAULT_MS,
-  WAIT_MAX_MS,
 } from '../runtime/defaults.ts'
 import { NexusError } from '../runtime/errors.ts'
 import { requireOwner, type CallOwner } from '../runtime/owner.ts'
@@ -53,13 +53,15 @@ import {
 } from './internal.ts'
 import type { ChildAccess } from './policy.ts'
 
+/** Callable actions; legacy wait results remain valid only for replay. */
+type PublicAgentAction = Exclude<AgentAction, 'wait'>
+
 /** Actions in schema order. */
-const AGENT_ACTIONS: readonly AgentAction[] = [
+const AGENT_ACTIONS: readonly PublicAgentAction[] = [
   'start',
   'list',
   'status',
   'read',
-  'wait',
   'message',
   'interrupt',
   'stop',
@@ -71,12 +73,11 @@ const AGENT_ACTIONS: readonly AgentAction[] = [
  * Fields each action accepts. The parameter schema is an open object root, so
  * this table is what keeps an action's input closed before any side effect.
  */
-const ACTION_FIELDS: Readonly<Record<AgentAction, readonly string[]>> = Object.freeze({
+const ACTION_FIELDS: Readonly<Record<PublicAgentAction, readonly string[]>> = Object.freeze({
   start: ['action', 'task', 'label', 'context', 'role', 'model', 'provider', 'cwd', 'access'],
   list: ['action'],
   status: ['action', 'childId'],
   read: ['action', 'childId', 'offset', 'limit'],
-  wait: ['action', 'childId', 'timeoutMs'],
   message: ['action', 'childId', 'text'],
   interrupt: ['action', 'childId'],
   stop: ['action', 'childId'],
@@ -93,7 +94,7 @@ interface StartArgs extends ChildStartInput {
 }
 
 /** Control actions: the ones addressed by a child id. */
-type ControlAction = 'status' | 'read' | 'wait' | 'message' | 'interrupt' | 'stop' | 'continue'
+type ControlAction = 'status' | 'read' | 'message' | 'interrupt' | 'stop' | 'continue'
 
 /** One validated control input. */
 interface ControlArgs {
@@ -102,7 +103,6 @@ interface ControlArgs {
   readonly text?: string
   readonly offset?: number
   readonly limit?: number
-  readonly timeoutMs?: number
 }
 
 /** One validated batch input. */
@@ -272,8 +272,9 @@ export function createAgentTool(
   return defineTool({
     name: 'agent',
     description:
-      'Delegate work to internal child agents and control them. Actions: start (run one child), list (this session\'s direct children), status (one child), read (a bounded page of a child\'s events by zero-based event position), wait (bounded wait), message (steer or continue a live child), interrupt (ask a child to stop; acknowledgement only), stop (stop one child and await the native release), continue (reuse the same child conversation), batch (up to ' +
+      'Delegate work to internal child agents and control them. Actions: start (run one child), list (this session\'s direct children), status (one child), read (a bounded page of a child\'s events by zero-based event position), message (steer or continue a live child), interrupt (ask a child to stop; acknowledgement only), stop (stop one child and await the native release), continue (reuse the same child conversation), batch (up to ' +
       `${AGENT_BATCH_MAX_TASKS} starts; "batchMode":"sequence" runs them one at a time, "parallel" is the default). ` +
+      'The runtime automatically notifies and wakes this session with the child\'s result when it finishes. Continue independent work while children run; if only their results remain to be awaited, end your turn without claiming the task is complete. Do not sleep or repeatedly call list/status/read to poll for completion. ' +
       'Children run through the native in-process subagent service: context "spawn" gives an independent child, "fork" seeds it with this conversation\'s completed turns. A child never receives wider filesystem access than this session: read children are read-only, and the deployment\'s child-access setting may cap a writer below this session\'s own mode (a parent that is itself read-only cannot delegate write access at all). A write child holds an exclusive scope over its granted workspace root (not over its subdirectory), so this session can have one writer child at a time. A child runs on this session\'s model route unless a provider and/or model is named. Stopping and finishing are different: a stop is only confirmed by the native release this tool waits for.',
     parameters: {
       action: {
@@ -316,7 +317,7 @@ export function createAgentTool(
         description:
           'start only: filesystem access; defaults to "read". "read" is always read-only; "write" is capped by the deployment\'s child-access setting and can never exceed this session\'s own mode.',
       },
-      childId: { type: 'string', description: 'status/read/wait/message/interrupt/stop/continue: the child id an earlier start returned.' },
+      childId: { type: 'string', description: 'status/read/message/interrupt/stop/continue: the child id an earlier start returned.' },
       text: { type: 'string', description: 'message/continue only: the text to deliver to the child.' },
       offset: {
         type: 'integer',
@@ -325,10 +326,6 @@ export function createAgentTool(
       limit: {
         type: 'integer',
         description: `read only: 1..${AGENT_READ_MAX_EVENTS} events per page; defaults to ${AGENT_READ_DEFAULT_EVENTS}, and the page text is bounded.`,
-      },
-      timeoutMs: {
-        type: 'integer',
-        description: `wait only: bounded wait in milliseconds, 0..${WAIT_MAX_MS}; defaults to ${WAIT_DEFAULT_MS}. A timeout never stops the child.`,
       },
       batchMode: {
         type: 'string',
@@ -357,7 +354,7 @@ export function createAgentTool(
       presentationMeta: (_args, value) => presentationOf(value as unknown as AgentValue),
     },
     isConcurrencySafe: (args) =>
-      args.action === 'list' || args.action === 'status' || args.action === 'read' || args.action === 'wait',
+      args.action === 'list' || args.action === 'status' || args.action === 'read',
     async execute(args, exec) {
       const input = parseAgentInput(args, ctx)
       const owner = requireOwner(exec)
@@ -381,10 +378,6 @@ async function runAction(runtime: ChildRuntime, owner: CallOwner, input: AgentIn
     case 'read': {
       const page = await runtime.read(owner, SessionId(requireChildId(input.childId)), input.offset, input.limit)
       return { action: 'read', ...page }
-    }
-    case 'wait': {
-      const result = await runtime.wait(owner, SessionId(requireChildId(input.childId)), input.timeoutMs)
-      return { action: 'wait', ...result }
     }
     case 'message': {
       const childId = requireChildId(input.childId)
@@ -595,13 +588,13 @@ export function parseAgentInput(
   ctx: Context | undefined,
 ): AgentInput {
   const action = args.action
-  if (typeof action !== 'string' || !AGENT_ACTIONS.includes(action as AgentAction)) {
+  if (typeof action !== 'string' || !AGENT_ACTIONS.includes(action as PublicAgentAction)) {
     throw new NexusError(
       'INVALID_ARGUMENT',
       `action must be one of ${AGENT_ACTIONS.join(', ')}; received ${JSON.stringify(action)}`,
     )
   }
-  const typed = action as AgentAction
+  const typed = action as PublicAgentAction
   for (const key of Object.keys(args)) {
     if (!ACTION_FIELDS[typed].includes(key)) {
       throw new NexusError('INVALID_ARGUMENT', `action "${typed}" does not accept the field "${key}"`)
@@ -704,19 +697,12 @@ function parseControl(action: ControlAction, args: Readonly<Record<string, unkno
       throw new NexusError('INVALID_ARGUMENT', `limit must be 1..${AGENT_READ_MAX_EVENTS}`)
     }
   }
-  if (action === 'wait' && args.timeoutMs !== undefined) {
-    const value = args.timeoutMs
-    if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > WAIT_MAX_MS) {
-      throw new NexusError('INVALID_ARGUMENT', `timeoutMs must be 0..${WAIT_MAX_MS}`)
-    }
-  }
   return {
     action,
     childId,
     ...(typeof args.text === 'string' ? { text: args.text } : {}),
     ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
     ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
-    ...(typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
   }
 }
 

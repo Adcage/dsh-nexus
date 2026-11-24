@@ -93,6 +93,34 @@ function childIds(value: Record<string, unknown>): string[] {
   return ((value.children ?? []) as { childId: string }[]).map((child) => child.childId)
 }
 
+describe('model-facing delegation contract', () => {
+  it('exposes no wait action or timeout parameter', async () => {
+    const { harness } = await openCase()
+    const schema = harness.ctx.tools.schemas().find((tool) => tool.name === 'agent')
+    expect(schema?.parameters).toMatchObject({
+      properties: {
+        action: { enum: ['start', 'list', 'status', 'read', 'message', 'interrupt', 'stop', 'continue', 'batch'] },
+      },
+    })
+    expect(harness.ctx.tools.get('agent')?.output.schema).toMatchObject({
+      properties: {
+        action: { enum: ['start', 'list', 'status', 'read', 'message', 'interrupt', 'stop', 'continue', 'batch'] },
+      },
+    })
+    expect(schema?.parameters.properties).not.toHaveProperty('timeoutMs')
+    expect(schema?.description).not.toContain('wait (')
+    expect(JSON.stringify(schema?.parameters)).not.toContain('/wait')
+  })
+
+  it('directs the parent to yield to completion notices instead of polling', async () => {
+    const { harness } = await openCase()
+    const schema = harness.ctx.tools.schemas().find((tool) => tool.name === 'agent')
+    expect(schema?.description).toContain('automatically notifies and wakes this session')
+    expect(schema?.description).toContain('end your turn')
+    expect(schema?.description).toContain('Do not sleep or repeatedly call list/status/read')
+  })
+})
+
 describe('start and inspect children', () => {
   it('starts a spawn child with the exact parent, cwd and role guidance', async () => {
     const testCase = await openCase({
@@ -199,7 +227,7 @@ describe('start and inspect children', () => {
   })
 })
 
-describe('read, wait and control', () => {
+describe('read and control', () => {
   it('reads a child log by zero-based event position with real continuation', async () => {
     const testCase = await openCase()
     const started = valueOf(await testCase.call({ action: 'start', task: 'produce output' }))
@@ -309,22 +337,37 @@ describe('read, wait and control', () => {
     harness.releaseFor(childId)
   })
 
-  it('bounds a wait without stopping the child', async () => {
-    const testCase = await openCase({ hold: true })
+  it('refuses wait without stopping a running child', async () => {
+    const testCase = await openCase({ hold: 'children' })
     const { harness } = testCase
     const started = valueOf(await testCase.call({ action: 'start', task: 'still working' }))
     const childId = started.childId as string
     await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
 
-    const waited = valueOf(await testCase.call({ action: 'wait', childId, timeoutMs: 20 }))
-    expect(waited).toMatchObject({ action: 'wait', timedOut: true })
-    expect(harness.ctx.agents.get(SessionId(childId))).toBeDefined()
-
+    const refused = await testCase.call({ action: 'wait', childId, timeoutMs: 30_000 })
+    expect(refused.isError).toBe(true)
+    expect(harness.ctx.agents.get(SessionId(childId))?.status).toBe('running')
     harness.releaseAll()
-    await waitFor(() => harness.ctx.agents.get(SessionId(childId)) === undefined, 'the child to settle')
-    const settled = valueOf(await testCase.call({ action: 'wait', childId, timeoutMs: 100 }))
-    expect(settled.timedOut).toBe(false)
-    expect(settled.lastTurn).toMatchObject({ reason: 'completed' })
+  })
+
+  it('wakes an idle parent with the child result without a wait call', async () => {
+    const testCase = await openCase({
+      hold: 'children',
+      answer: (request) => request.sessionId === 'primary' ? 'parent continued' : 'self-contained child result',
+    })
+    const { harness, parent } = testCase
+    await harness.runTurn(parent, 'start parent work')
+    const started = valueOf(await testCase.call({ action: 'start', task: 'produce the result' }))
+    const childId = started.childId as string
+    await waitFor(() => harness.requestsOf(childId).length === 1, 'the child request')
+    expect(parent.status).toBe('idle')
+    expect(harness.requestsOf(parent.id)).toHaveLength(1)
+
+    harness.releaseFor(childId)
+    await waitFor(() => harness.requestsOf(parent.id).length === 2, 'the native completion notice to wake the parent')
+    await parent.whenIdle()
+    expect(JSON.stringify(harness.requestsOf(parent.id)[1]?.options.messages)).toContain('self-contained child result')
+    expect(harness.ctx.agents.get(SessionId(childId))).toBeUndefined()
   })
 
   it('refuses to control another session\'s child or a stale Agent', async () => {
